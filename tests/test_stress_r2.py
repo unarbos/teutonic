@@ -37,6 +37,7 @@ from teutonic.compress import TopKCompressor, compress_model_gradients
 from teutonic.dataset.synthetic import SyntheticDataset
 from teutonic.hparams import HParams
 from teutonic.model import LlamaConfig, TinyLlama
+from teutonic.probe_spec import select_probe_params
 from teutonic.sampler import MinerSampler
 from teutonic.storage.r2 import R2Storage
 from teutonic.submission import MinerSubmission
@@ -145,9 +146,11 @@ async def cheating_submit(env: TestEnv, uid: int, window: int, cheat_fn) -> Mine
     m = make_model(env.cfg)
     m.load_state_dict(copy.deepcopy(env.shared_init))
     sampler = MinerSampler(env.dataset, uid, window, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
+    pi = {name: p.numel() for name, p in m.named_parameters()}
+    pp = select_probe_params(window, uid, pi, env.hp.n_probe_params, env.hp.probe_slice_size)
     optimizer = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
     result = train_window(m, env.dataset, sampler, optimizer,
-                          device="cpu", probe_slice_size=env.hp.probe_slice_size)
+                          device="cpu", probe_params=pp)
     compressed = compress_model_gradients(m, TopKCompressor(topk=env.hp.topk))
     sub = MinerSubmission(uid=uid, window=window, compressed_gradients=compressed,
                           loss_ledger=result["loss_ledger"], grad_probes=result["grad_probes"])
@@ -337,9 +340,11 @@ async def test_b3_wrong_data() -> tuple[bool, str]:
         m = make_model(env.cfg)
         m.load_state_dict(copy.deepcopy(env.shared_init))
         sampler = MinerSampler(wrong_ds, 2, 0, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
+        pi = {name: p.numel() for name, p in m.named_parameters()}
+        pp = select_probe_params(0, 2, pi, env.hp.n_probe_params, env.hp.probe_slice_size)
         opt = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
         result = train_window(m, wrong_ds, sampler, opt, device="cpu",
-                              probe_slice_size=env.hp.probe_slice_size)
+                              probe_params=pp)
         compressed = compress_model_gradients(m, TopKCompressor(topk=env.hp.topk))
         sub = MinerSubmission(uid=2, window=0, compressed_gradients=compressed,
                               loss_ledger=result["loss_ledger"], grad_probes=result["grad_probes"])
@@ -430,9 +435,11 @@ async def test_b7_stale_submission() -> tuple[bool, str]:
         m = make_model(env.cfg)
         m.load_state_dict(copy.deepcopy(env.shared_init))
         sampler_w0 = MinerSampler(env.dataset, 2, 0, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
+        pi = {name: p.numel() for name, p in m.named_parameters()}
+        pp = select_probe_params(0, 2, pi, env.hp.n_probe_params, env.hp.probe_slice_size)
         opt = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
         result = train_window(m, env.dataset, sampler_w0, opt, device="cpu",
-                              probe_slice_size=env.hp.probe_slice_size)
+                              probe_params=pp)
         compressed = compress_model_gradients(m, TopKCompressor(topk=env.hp.topk))
         sub = MinerSubmission(uid=2, window=1, compressed_gradients=compressed,
                               loss_ledger=result["loss_ledger"], grad_probes=result["grad_probes"])

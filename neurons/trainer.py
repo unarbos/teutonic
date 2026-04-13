@@ -1,16 +1,13 @@
-"""Pure accumulation training loop with loss ledger and gradient probe capture.
+"""Pure accumulation training loop with loss ledger and per-batch gradient probes.
 
 All micro-batches are forward+backward against the frozen start-of-window
 model.  A single ``optimizer.step()`` happens at the very end.  This makes
-every micro-batch loss and gradient probe exactly reproducible by the
+every micro-batch loss and gradient independently reproducible by the
 validator replaying against its own copy of the start-of-window weights.
 
-The miner trains as many batches as it can before the window deadline,
-up to ``sampler.max_batches``.  The number actually completed is returned
-as ``n_batches_trained``.
-
-Probes are captured for ALL model parameters at every batch, since the
-miner cannot predict which parameters or batches the validator will check.
+Since weights are frozen, each batch's gradient is independent.  Probes
+capture the PER-BATCH gradient (not accumulated) for a small subset of
+parameters selected deterministically from (window, uid).
 """
 
 from __future__ import annotations
@@ -24,6 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from teutonic.probe_spec import ProbeParam
 from teutonic.sampler import MinerSampler
 
 logger = structlog.get_logger(__name__)
@@ -38,11 +36,14 @@ def train_window(
     max_grad_norm: float = 1.0,
     deadline: float | None = None,
     upload_budget_s: float = 10.0,
-    probe_slice_size: int = 128,
+    probe_params: tuple[ProbeParam, ...] = (),
 ) -> dict[str, Any]:
     """Run one window of pure-accumulation training.
 
-    Captures gradient probes for every parameter at every batch.
+    Captures per-batch gradient probes only for the parameters listed
+    in *probe_params*.  Gradients accumulate naturally via repeated
+    ``loss.backward()`` calls; the per-batch contribution is extracted
+    as the delta from the previous accumulation at each probe slice.
     """
     t0 = time.monotonic()
     model.train()
@@ -54,6 +55,8 @@ def train_window(
 
     max_n = sampler.total_micro_batches
     raw_grads_accumulated = 0
+
+    prev_probe_vals: dict[str, torch.Tensor] = {}
 
     for k in range(max_n):
         if deadline is not None:
@@ -94,15 +97,21 @@ def train_window(
         loss.backward()
         raw_grads_accumulated += 1
 
-        if probe_slice_size > 0:
+        if probe_params:
             batch_probes: dict[str, torch.Tensor] = {}
-            for name, p in model.named_parameters():
+            for pp in probe_params:
+                p = _get_param_by_name(model, pp.param_name)
                 if p.grad is None:
                     continue
-                end = min(probe_slice_size, p.grad.numel())
-                grad_slice = p.grad.flatten()[:end].detach().clone().cpu()
-                if torch.isfinite(grad_slice).all():
-                    batch_probes[name] = grad_slice
+                current = p.grad.flatten()[pp.slice_start : pp.slice_end].detach().clone()
+                prev = prev_probe_vals.get(pp.param_name)
+                if prev is not None:
+                    delta = current - prev
+                else:
+                    delta = current
+                prev_probe_vals[pp.param_name] = current
+                if torch.isfinite(delta).all():
+                    batch_probes[pp.param_name] = delta.cpu()
             if batch_probes:
                 grad_probes[k] = batch_probes
 
@@ -140,3 +149,11 @@ def train_window(
         "grad_probes": grad_probes,
         "n_batches_trained": n_batches_trained,
     }
+
+
+def _get_param_by_name(model: nn.Module, name: str) -> nn.Parameter:
+    parts = name.split(".")
+    obj: Any = model
+    for p in parts:
+        obj = getattr(obj, p)
+    return obj

@@ -1,16 +1,16 @@
-"""Verification routines: loss ledger spot-checking and gradient probe comparison.
+"""Verification routines: loss spot-checking and per-batch gradient probes.
 
-With pure accumulation training, the miner's model is frozen for the
-entire window.  Every micro-batch loss and gradient probe is computed
-against the same weights -- so the validator can replay ANY micro-batch
-and expect an exact match (within float tolerance).
+With pure accumulation training, the miner's model weights are frozen for
+the entire window.  Every micro-batch loss and gradient is computed against
+the same weights, making each batch independently verifiable with a single
+forward+backward pass -- no need to replay earlier batches.
 
-Submissions are variable-length: a miner may have trained fewer than
-``max_batches``.  Spot-check indices and probe indices are drawn from
-[0, n_batches_trained) rather than [0, max_batches).
+The validator spot-checks random batches (selected by block hash) and
+compares both loss and per-batch gradient slices.
 
-NaN/Inf values in either the reported or replayed data are treated as
-automatic failures for that check index.
+Gradient consistency is checked arithmetically: summing the miner's
+uploaded per-batch probes and comparing against the compressed gradient
+at the same positions.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from teutonic.compress import TopKCompressor
 from teutonic.probe_spec import ProbeSpec
 from teutonic.sampler import MinerSampler
 
@@ -58,7 +57,7 @@ class LossVerificationResult:
 
 @dataclass
 class ProbeVerificationResult:
-    """Result of comparing gradient probes."""
+    """Result of comparing per-batch gradient probes."""
 
     checked_indices: list[int] = field(default_factory=list)
     cosine_sims: list[float] = field(default_factory=list)
@@ -83,12 +82,54 @@ class ProbeVerificationResult:
         return passes / len(self.cosine_sims)
 
 
+@dataclass
+class GradientConsistencyResult:
+    """Result of cross-checking compressed gradients against summed probes.
+
+    The validator sums the miner's per-batch probes across all batches
+    to reconstruct the expected accumulated gradient at the probe
+    positions, then compares against the compressed gradient at those
+    same positions.  No replay needed -- purely arithmetic.
+
+    When no top-K indices overlap with the probe slice (common at small
+    topk), the result is empty and defaults to 1.0 (not checkable, no
+    penalty).
+    """
+
+    param_names: list[str] = field(default_factory=list)
+    cosine_sims: list[float] = field(default_factory=list)
+
+    @property
+    def min_similarity(self) -> float:
+        return min(self.cosine_sims) if self.cosine_sims else 1.0
+
+    @property
+    def mean_similarity(self) -> float:
+        return (
+            sum(self.cosine_sims) / len(self.cosine_sims)
+            if self.cosine_sims
+            else 1.0
+        )
+
+
 def _get_param_by_name(model: nn.Module, name: str) -> nn.Parameter:
     parts = name.split(".")
     obj: Any = model
     for p in parts:
         obj = getattr(obj, p)
     return obj
+
+
+def _cosine_sim(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Cosine similarity with zero-vector handling."""
+    a_norm = a.float().norm().item()
+    b_norm = b.float().norm().item()
+    if a_norm < 1e-12 and b_norm < 1e-12:
+        return 1.0
+    sim = F.cosine_similarity(
+        a.unsqueeze(0).float(), b.unsqueeze(0).float()
+    ).item()
+    return sim if math.isfinite(sim) else -1.0
 
 
 def verify_loss_ledger(
@@ -99,14 +140,7 @@ def verify_loss_ledger(
     spot_check_indices: list[int],
     device: torch.device | str = "cpu",
 ) -> LossVerificationResult:
-    """Replay selected micro-batches (forward only) and compare losses.
-
-    The loss ledger may be shorter than ``sampler.max_batches`` — only
-    indices within ``len(loss_ledger)`` are checked.
-
-    NaN/Inf in the reported loss is treated as an automatic max-error
-    failure for that index.
-    """
+    """Replay selected micro-batches (forward only) and compare losses."""
     model.eval()
     result = LossVerificationResult()
 
@@ -171,14 +205,12 @@ def verify_gradient_probes(
     device: torch.device | str = "cpu",
     n_batches_trained: int | None = None,
 ) -> ProbeVerificationResult:
-    """Replay micro-batches with backward and compare gradient slices.
+    """Replay individual batches and compare per-batch gradient slices.
 
-    For each batch index in ``probe_spec.batch_indices``, replays batches
-    0..k, then checks every parameter listed in ``probe_spec.params``
-    against the miner's submitted probes.
-
-    Missing probes for a (batch, param) pair that should exist result in
-    a cosine similarity of -1.0 (definitive failure).
+    Since weights are frozen, each batch is independently verifiable.
+    For each batch index in ``probe_spec.batch_indices``, replays JUST
+    that single batch (one forward + one backward), then compares the
+    per-batch gradient at each probed parameter.
     """
     model.train()
     result = ProbeVerificationResult()
@@ -192,17 +224,16 @@ def verify_gradient_probes(
 
         model.zero_grad()
 
-        for j in range(k + 1):
-            batch_idx = sampler.get_micro_batch_indices(j)
-            tokens = torch.stack([dataset[int(i)] for i in batch_idx]).to(device)
-            inputs = tokens[:, :-1]
-            targets = tokens[:, 1:]
+        batch_idx = sampler.get_micro_batch_indices(k)
+        tokens = torch.stack([dataset[int(i)] for i in batch_idx]).to(device)
+        inputs = tokens[:, :-1]
+        targets = tokens[:, 1:]
 
-            logits = model(inputs)
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
-            )
-            loss.backward()
+        logits = model(inputs)
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
+        )
+        loss.backward()
 
         for pp in probe_spec.params:
             batch_dict = grad_probes.get(k)
@@ -237,17 +268,7 @@ def verify_gradient_probes(
                 logger.warning("verify.probe.replay_nan", index=k, param=pp.param_name)
                 continue
 
-            actual_norm = actual.float().norm().item()
-            expected_norm = expected.float().norm().item()
-            if actual_norm < 1e-12 and expected_norm < 1e-12:
-                sim = 1.0
-            else:
-                sim = F.cosine_similarity(
-                    actual.unsqueeze(0).float(), expected.unsqueeze(0).float()
-                ).item()
-
-            if not math.isfinite(sim):
-                sim = -1.0
+            sim = _cosine_sim(actual, expected)
 
             result.checked_indices.append(k)
             result.cosine_sims.append(sim)
@@ -267,134 +288,83 @@ def verify_gradient_probes(
     return result
 
 
-@dataclass
-class GradientConsistencyResult:
-    """Result of cross-checking compressed gradients against replayed gradients.
-
-    For each checked parameter, the validator decompresses the miner's
-    submitted compressed gradient, extracts the values at the top-K
-    indices, and compares them to the validator's own gradient at those
-    same indices.  Honest miners produce near-identical values.
-    """
-
-    param_names: list[str] = field(default_factory=list)
-    cosine_sims: list[float] = field(default_factory=list)
-
-    @property
-    def min_similarity(self) -> float:
-        return min(self.cosine_sims) if self.cosine_sims else 0.0
-
-    @property
-    def mean_similarity(self) -> float:
-        return (
-            sum(self.cosine_sims) / len(self.cosine_sims)
-            if self.cosine_sims
-            else 0.0
-        )
-
-
 def verify_gradient_consistency(
-    model: nn.Module,
-    dataset: Any,
-    sampler: MinerSampler,
+    grad_probes: dict[int, dict[str, torch.Tensor]],
     compressed_gradients: dict[str, dict[str, Any]],
+    probe_spec: ProbeSpec,
     n_batches_trained: int,
-    max_grad_norm: float,
-    device: torch.device | str = "cpu",
 ) -> GradientConsistencyResult:
-    """Replay all batches, then cross-check submitted compressed gradients.
+    """Cross-check compressed gradients against summed per-batch probes.
 
-    Mirrors the miner's training pipeline: accumulate gradients over all
-    batches, scale by ``1/n``, clip by ``max_grad_norm``.  Then for each
-    parameter with a submitted compressed gradient, extract the values
-    at the submitted top-K indices and compare to the replayed gradient
-    at those same indices via cosine similarity.
-
-    If the miner honestly compressed their real gradients, these values
-    match closely.  If they substituted fake compressed gradients after
-    passing probe checks, this catches them.
+    For each probed parameter, sums the miner's per-batch gradient probes
+    across all batches to get the expected mean gradient at the probe slice.
+    Then finds the compressed gradient's top-K indices that fall within
+    the probe slice, and compares those values.  No model replay needed.
     """
-    model.train()
-    model.zero_grad()
     result = GradientConsistencyResult()
 
-    raw_grads = 0
-    for k in range(n_batches_trained):
-        batch_idx = sampler.get_micro_batch_indices(k)
-        tokens = torch.stack([dataset[int(i)] for i in batch_idx]).to(device)
-        inputs = tokens[:, :-1]
-        targets = tokens[:, 1:]
+    for pp in probe_spec.params:
+        probe_sum = None
+        n_summed = 0
+        for k in range(n_batches_trained):
+            batch_dict = grad_probes.get(k)
+            if batch_dict is None or pp.param_name not in batch_dict:
+                continue
+            probe_val = batch_dict[pp.param_name].float()
+            if probe_sum is None:
+                probe_sum = probe_val.clone()
+            else:
+                probe_sum += probe_val
+            n_summed += 1
 
-        logits = model(inputs)
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
-        )
-        loss_val = loss.item()
-        if not math.isfinite(loss_val):
-            continue
-        loss.backward()
-        raw_grads += 1
-
-    if raw_grads == 0:
-        model.zero_grad()
-        return result
-
-    if raw_grads > 1:
-        scale = 1.0 / raw_grads
-        for p in model.parameters():
-            if p.grad is not None:
-                p.grad.mul_(scale)
-
-    if max_grad_norm > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-
-    for name, p in model.named_parameters():
-        if name not in compressed_gradients:
-            continue
-        if p.grad is None:
-            continue
-
-        comp = compressed_gradients[name]
-        idxs = comp.get("idxs")
-        submitted_vals = comp.get("vals")
-        if idxs is None or submitted_vals is None:
-            continue
-
-        idxs = idxs.long().cpu()
-        submitted_vals = submitted_vals.float().cpu()
-
-        if idxs.numel() == 0:
-            continue
-
-        expected_grad = p.grad.flatten().detach().cpu()
-        if idxs.max() >= expected_grad.numel():
-            result.param_names.append(name)
+        if probe_sum is None or n_summed == 0:
+            result.param_names.append(pp.param_name)
             result.cosine_sims.append(-1.0)
-            logger.warning("verify.consistency.oob", param=name)
             continue
 
-        expected_vals = expected_grad[idxs].float()
+        if n_summed > 1:
+            probe_sum /= n_summed
 
-        sub_norm = submitted_vals.norm().item()
-        exp_norm = expected_vals.norm().item()
-        if sub_norm < 1e-12 and exp_norm < 1e-12:
-            sim = 1.0
-        else:
-            sim = F.cosine_similarity(
-                submitted_vals.unsqueeze(0), expected_vals.unsqueeze(0)
-            ).item()
+        comp = compressed_gradients.get(pp.param_name)
+        if comp is None:
+            result.param_names.append(pp.param_name)
+            result.cosine_sims.append(-1.0)
+            continue
 
-        if not math.isfinite(sim):
-            sim = -1.0
+        idxs = comp.get("idxs")
+        vals = comp.get("vals")
+        if idxs is None or vals is None:
+            result.param_names.append(pp.param_name)
+            result.cosine_sims.append(-1.0)
+            continue
 
-        result.param_names.append(name)
+        idxs_cpu = idxs.long().cpu()
+        vals_cpu = vals.float().cpu()
+
+        mask = (idxs_cpu >= pp.slice_start) & (idxs_cpu < pp.slice_end)
+        overlap_count = mask.sum().item()
+
+        if overlap_count == 0:
+            logger.debug(
+                "verify.consistency.no_overlap",
+                param=pp.param_name,
+            )
+            continue
+
+        overlap_idxs = idxs_cpu[mask] - pp.slice_start
+        comp_vals_at_overlap = vals_cpu[mask]
+        probe_vals_at_overlap = probe_sum[overlap_idxs]
+
+        sim = _cosine_sim(comp_vals_at_overlap, probe_vals_at_overlap)
+
+        result.param_names.append(pp.param_name)
         result.cosine_sims.append(sim)
         logger.debug(
             "verify.consistency.result",
-            param=name, cosine_sim=round(sim, 4),
+            param=pp.param_name, overlap=overlap_count,
+            cosine_sim=round(sim, 4),
         )
 
-    model.zero_grad()
     logger.info(
         "verify.consistency.summary",
         n_params=len(result.param_names),

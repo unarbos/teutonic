@@ -36,6 +36,7 @@ from teutonic.dataset.synthetic import SyntheticDataset
 from teutonic.hparams import HParams
 from teutonic.logging import setup_logging
 from teutonic.model import LlamaConfig, TinyLlama
+from teutonic.probe_spec import select_probe_params
 from teutonic.sampler import MinerSampler
 from teutonic.storage.local import LocalFileStorage
 from teutonic.submission import MinerSubmission
@@ -78,6 +79,12 @@ class CheatingMiner:
             max_batches=self.hp.max_batches, micro_bs=self.hp.micro_bs,
         )
 
+        param_info = {name: p.numel() for name, p in self.model.named_parameters()}
+        probe_params = select_probe_params(
+            window, self.uid, param_info,
+            self.hp.n_probe_params, self.hp.probe_slice_size,
+        )
+
         train_ds = self.dataset
         if self.cheat_mode == "wrong_data":
             train_ds = SyntheticDataset(
@@ -89,7 +96,7 @@ class CheatingMiner:
             self.model, train_ds, sampler, optimizer,
             device=self.device,
             deadline=deadline, upload_budget_s=self.hp.upload_budget_s,
-            probe_slice_size=self.hp.probe_slice_size,
+            probe_params=probe_params,
         )
 
         compressed = compress_model_gradients(self.model, self.compressor)

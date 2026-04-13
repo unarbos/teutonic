@@ -1,15 +1,17 @@
 """Deterministic probe specification generation.
 
-The validator selects WHICH parameters and WHICH batch indices to verify
-using entropy that is unavailable to the miner during training:
+Two kinds of selection, using different entropy sources:
 
-- **Batch indices** are derived from (window, uid, nonce).  The nonce is
-  a validator secret committed before miners train.
-- **Parameter selection** is derived from the block hash of the
-  window-terminating block, which is only known after the window ends.
+- **Parameter selection** is derived from ``(window, uid)`` -- known to
+  the miner at training time.  This is safe because ``backward()``
+  computes all parameters regardless; knowing which are checked doesn't
+  help a cheater skip work.  The miner only needs to capture probes for
+  the selected parameters, keeping overhead small.
 
-Because miners cannot predict either, they must capture probes for ALL
-parameters at ALL batch indices.
+- **Batch indices** are derived from the block hash of the window-
+  terminating block, which is only available after the window ends.
+  The miner cannot predict which batches will be spot-checked and must
+  record probes for every batch.
 """
 
 from __future__ import annotations
@@ -33,9 +35,9 @@ class ProbeParam:
 class ProbeSpec:
     """Describes which gradient slices to verify.
 
-    ``params`` lists the randomly selected parameters (and their slice
-    ranges) that the validator will check.  ``batch_indices`` lists the
-    randomly selected micro-batch indices.
+    ``params`` lists the deterministically selected parameters (and
+    their slice ranges).  ``batch_indices`` lists the randomly selected
+    micro-batch indices for spot-checking.
     """
 
     params: tuple[ProbeParam, ...]
@@ -59,20 +61,34 @@ def _deterministic_indices(
     return tuple(sorted(int(i) for i in chosen))
 
 
-def _select_params(
-    block_hash: str,
+def select_probe_params(
     window: int,
     uid: int,
-    param_names: list[str],
-    k: int,
-) -> list[str]:
-    """Select *k* random parameter names using the block hash as entropy."""
-    payload = f"paramselect:{window}:{uid}:{block_hash}".encode()
+    param_info: dict[str, int],
+    n_probe_params: int = 3,
+    probe_slice_size: int = 128,
+) -> tuple[ProbeParam, ...]:
+    """Select which parameters to probe -- deterministic from (window, uid).
+
+    The miner calls this at training time to know which params to capture
+    probes for.  The validator calls it at eval time and gets the same result.
+    """
+    param_names = sorted(param_info.keys())
+    payload = f"paramselect:{window}:{uid}".encode()
     digest = hashlib.blake2b(payload, digest_size=32).digest()
     seed = int.from_bytes(digest[:8], "little")
     rng = np.random.default_rng(seed)
-    chosen = rng.choice(len(param_names), size=min(k, len(param_names)), replace=False)
-    return [param_names[int(i)] for i in chosen]
+    chosen = rng.choice(len(param_names), size=min(n_probe_params, len(param_names)), replace=False)
+    selected = [param_names[int(i)] for i in chosen]
+
+    return tuple(
+        ProbeParam(
+            param_name=name,
+            slice_start=0,
+            slice_end=min(probe_slice_size, param_info[name]),
+        )
+        for name in selected
+    )
 
 
 def make_probe_spec(
@@ -80,7 +96,6 @@ def make_probe_spec(
     uid: int,
     n_microbatches: int,
     *,
-    nonce: str = "",
     block_hash: str = "",
     param_info: dict[str, int],
     n_probes: int = 3,
@@ -89,24 +104,15 @@ def make_probe_spec(
 ) -> ProbeSpec:
     """Build a probe spec for the validator.
 
-    ``param_info`` maps parameter names to their total element count.
-    The block hash selects which parameters to verify; the nonce selects
-    which batch indices.
+    Batch indices use the block hash (unpredictable to miners).
+    Parameter selection uses (window, uid) (known to miners).
     """
     batch_indices = _deterministic_indices(
-        window, uid, n_microbatches, n_probes, nonce=nonce
+        window, uid, n_microbatches, n_probes, nonce=block_hash,
     )
 
-    param_names = sorted(param_info.keys())
-    selected = _select_params(block_hash, window, uid, param_names, n_probe_params)
-
-    params = tuple(
-        ProbeParam(
-            param_name=name,
-            slice_start=0,
-            slice_end=min(probe_slice_size, param_info[name]),
-        )
-        for name in selected
+    params = select_probe_params(
+        window, uid, param_info, n_probe_params, probe_slice_size,
     )
 
     return ProbeSpec(params=params, batch_indices=batch_indices)

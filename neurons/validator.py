@@ -1,15 +1,18 @@
 """Validator: pure proof-of-work verification with deadline-based discovery.
 
 After a window ends, the validator lists submissions from storage and
-filters by upload timestamp — only gradients uploaded before the window
+filters by upload timestamp -- only gradients uploaded before the window
 deadline are considered.  Submissions are variable-length: each miner
 trains as many batches as it can within the window.
+
+Verification is per-batch: since weights are frozen during a window,
+each batch's loss and gradient are independently reproducible with a
+single forward+backward pass.
 """
 
 from __future__ import annotations
 
 import asyncio
-import copy
 import functools
 import hashlib
 import math
@@ -29,7 +32,7 @@ import torch.nn as nn
 from teutonic.compress import TopKCompressor, decompress_and_apply
 from teutonic.hparams import HParams
 from teutonic.metrics import MetricsReporter, NullReporter
-from teutonic.probe_spec import make_probe_spec
+from teutonic.probe_spec import make_probe_spec, select_probe_params
 from teutonic.protocols import Dataset, StorageBackend, WindowClock
 from teutonic.sampler import MinerSampler
 from teutonic.submission import MinerSubmission
@@ -82,7 +85,7 @@ class MinerEvalResult:
 # ──────────────────────────────────────────────────────────────────────────
 
 class Validator:
-    """Pure PoW validator: loss ledger + gradient probe verification.
+    """Pure PoW validator: loss ledger + per-batch gradient probe verification.
 
     Uses storage timestamps to determine which submissions arrived before
     the window deadline.  No synchronous waiting for miners.
@@ -143,11 +146,7 @@ class Validator:
     async def discover_miners(
         self, window: int, deadline: float | None = None
     ) -> list[int]:
-        """Find UIDs whose submissions were uploaded before *deadline*.
-
-        If *deadline* is ``None``, all submissions for the window are
-        returned (useful for testing without a real clock).
-        """
+        """Find UIDs whose submissions were uploaded before *deadline*."""
         items = await self.storage.list_keys_with_metadata(f"gradient/{window}/")
         uids = []
         for item in items:
@@ -168,7 +167,7 @@ class Validator:
     # Evaluate a single miner
     # ------------------------------------------------------------------ #
     async def evaluate_miner(
-        self, miner_uid: int, window: int, nonce: str, block_hash: str
+        self, miner_uid: int, window: int, block_hash: str
     ) -> MinerEvalResult:
         t0 = time.monotonic()
         result = MinerEvalResult(uid=miner_uid)
@@ -195,7 +194,7 @@ class Validator:
             )
             return result
 
-        rejection = self._validate_submission(submission)
+        rejection = self._validate_submission(submission, miner_uid, window)
         if rejection:
             result.slash_fraction = self.slash_cfg.missing_submission_slash
             result.reason = f"invalid submission: {rejection}"
@@ -216,6 +215,7 @@ class Validator:
             micro_bs=self.hp.micro_bs,
         )
 
+        # Loss spot-checks (forward only, no grad)
         spot_indices = self._pick_spot_check_indices(
             miner_uid, window, n_trained, block_hash
         )
@@ -226,10 +226,10 @@ class Validator:
         result.loss_result = loss_result
         result.loss_score = loss_result.score(atol=self.slash_cfg.loss_atol)
 
+        # Probe spec: params from (window, uid), batch indices from block_hash
         param_info = self._param_info()
         probe_spec = make_probe_spec(
             window, miner_uid, n_trained,
-            nonce=nonce,
             block_hash=block_hash,
             param_info=param_info,
             n_probes=self.hp.n_probes,
@@ -237,7 +237,7 @@ class Validator:
             probe_slice_size=self.hp.probe_slice_size,
         )
 
-        saved_state = copy.deepcopy(self.model.state_dict())
+        # Per-batch probe verification (single fwd+bwd per checked batch)
         probe_result = verify_gradient_probes(
             self.model, self.dataset, sampler,
             submission.grad_probes, probe_spec, device=self.device,
@@ -246,12 +246,13 @@ class Validator:
         result.probe_result = probe_result
         result.probe_score = probe_result.mean_similarity
 
+        # Consistency: sum probes arithmetically, compare to compressed grads
         consistency_result = verify_gradient_consistency(
-            self.model, self.dataset, sampler,
+            submission.grad_probes,
             submission.compressed_gradients,
-            n_trained, self.hp.max_grad_norm, device=self.device,
+            probe_spec,
+            n_trained,
         )
-        self.model.load_state_dict(saved_state)
         result.consistency_result = consistency_result
         result.consistency_score = consistency_result.mean_similarity
 
@@ -295,8 +296,6 @@ class Validator:
         self, window: int, miner_uids: list[int] | None = None
     ) -> list[MinerEvalResult]:
         structlog.contextvars.bind_contextvars(window=window)
-        nonce = self._generate_nonce()
-        await self._commit_nonce(window, nonce)
 
         if miner_uids is None:
             deadline = None
@@ -322,7 +321,7 @@ class Validator:
         for uid in miner_uids:
             try:
                 r = await asyncio.wait_for(
-                    self.evaluate_miner(uid, window, nonce, block_hash),
+                    self.evaluate_miner(uid, window, block_hash),
                     timeout=self.hp.eval_timeout,
                 )
             except asyncio.TimeoutError:
@@ -437,15 +436,9 @@ class Validator:
         }, step=self.global_step)
 
     # ------------------------------------------------------------------ #
-    # Main run loop — evaluates previous window after its deadline passes
+    # Main run loop
     # ------------------------------------------------------------------ #
     async def run(self, start_window: int = 0, n_windows: int | None = None) -> None:
-        """Continuous evaluation loop driven by the WindowClock.
-
-        The validator waits for window W+1 to start, then evaluates
-        window W (whose deadline has now passed).  No synchronization
-        with miners is required.
-        """
         if self.clock is None:
             raise RuntimeError("Cannot run() without a WindowClock")
 
@@ -476,7 +469,6 @@ class Validator:
                     logger.info("validator.run.stopping", reason="signal")
                     break
 
-                # Wait until window W+1 starts so W's deadline has passed
                 await self.clock.wait_for_window(w + 1)
 
                 if self._stop_requested:
@@ -578,9 +570,11 @@ class Validator:
         return self.scores.get(uid, 0.0)
 
     # ------------------------------------------------------------------ #
-    # Submission validation (variable-length)
+    # Submission validation
     # ------------------------------------------------------------------ #
-    def _validate_submission(self, sub: MinerSubmission) -> str | None:
+    def _validate_submission(
+        self, sub: MinerSubmission, miner_uid: int, window: int
+    ) -> str | None:
         """Return a rejection reason string, or None if valid."""
         n = sub.n_batches_trained
         if n < 1:
@@ -598,24 +592,28 @@ class Validator:
         if len(sub.grad_probes) < n:
             return f"grad_probes has {len(sub.grad_probes)} entries, need {n} (one per batch trained)"
 
-        expected_params = {name for name, _ in self.model.named_parameters()}
-        probe_slice_size = self.hp.probe_slice_size
-        param_sizes = {name: p.numel() for name, p in self.model.named_parameters()}
+        param_info = self._param_info()
+        expected_params = select_probe_params(
+            window, miner_uid, param_info,
+            self.hp.n_probe_params, self.hp.probe_slice_size,
+        )
+        expected_names = {pp.param_name for pp in expected_params}
+        expected_sizes = {pp.param_name: pp.slice_end - pp.slice_start for pp in expected_params}
 
         for k, pdict in sub.grad_probes.items():
             if not isinstance(pdict, dict):
                 return f"grad_probes[{k}] is not a dict"
-            missing = expected_params - set(pdict.keys())
+            missing = expected_names - set(pdict.keys())
             if missing:
-                return f"grad_probes[{k}] missing params: {sorted(missing)[:3]}"
-            for pname, probe in pdict.items():
-                if pname not in expected_params:
+                return f"grad_probes[{k}] missing probed params: {sorted(missing)[:3]}"
+            for pname in expected_names:
+                probe = pdict.get(pname)
+                if probe is None:
                     continue
                 if not isinstance(probe, torch.Tensor):
                     return f"grad_probes[{k}][{pname}] is not a tensor"
-                expected_size = min(probe_slice_size, param_sizes[pname])
-                if probe.dim() != 1 or probe.numel() != expected_size:
-                    return f"grad_probes[{k}][{pname}] shape {probe.shape} != ({expected_size},)"
+                if probe.dim() != 1 or probe.numel() != expected_sizes[pname]:
+                    return f"grad_probes[{k}][{pname}] shape {probe.shape} != ({expected_sizes[pname]},)"
                 if not torch.isfinite(probe).all():
                     return f"grad_probes[{k}][{pname}] contains NaN/Inf"
 
@@ -634,11 +632,7 @@ class Validator:
     def _pick_spot_check_indices(
         self, miner_uid: int, window: int, n_total: int, block_hash: str
     ) -> list[int]:
-        """Pick loss spot-check indices using the window-terminating block hash.
-
-        The block hash is only available after the window ends, so miners
-        cannot predict which micro-batches will be checked during training.
-        """
+        """Pick loss spot-check indices using the window-terminating block hash."""
         digest = hashlib.blake2b(
             f"losscheck:{window}:{miner_uid}:{block_hash}".encode(),
             digest_size=8,
@@ -672,11 +666,7 @@ class Validator:
         return slash
 
     def _compute_final_score(self, result: MinerEvalResult) -> float:
-        """PoW score weighted by training volume.
-
-        Miners must train at least ``min_batches`` to score at all.
-        Above that floor, score scales linearly with ``n_batches_trained / max_batches``.
-        """
+        """PoW score weighted by training volume."""
         if result.slash_fraction >= 1.0:
             return 0.0
         if result.n_batches_trained < self.hp.min_batches:

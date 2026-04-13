@@ -41,6 +41,7 @@ from teutonic.dataset.synthetic import SyntheticDataset
 from teutonic.hparams import HParams
 from teutonic.logging import setup_logging
 from teutonic.model import LlamaConfig, TinyLlama
+from teutonic.probe_spec import select_probe_params
 from teutonic.sampler import MinerSampler
 from teutonic.storage.local import LocalFileStorage
 from teutonic.submission import MinerSubmission
@@ -167,9 +168,12 @@ class CheatingMiner:
     async def train_window(self, window: int) -> MinerSubmission:
         sampler = MinerSampler(self.dataset, self.uid, window,
                                max_batches=self.hp.max_batches, micro_bs=self.hp.micro_bs)
+        param_info = {name: p.numel() for name, p in self.model.named_parameters()}
+        pp = select_probe_params(window, self.uid, param_info,
+                                 self.hp.n_probe_params, self.hp.probe_slice_size)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.hp.lr)
         result = train_window(self.model, self.dataset, sampler, optimizer,
-                              device=self.device, probe_slice_size=self.hp.probe_slice_size)
+                              device=self.device, probe_params=pp)
         compressed = compress_model_gradients(self.model, self.compressor)
         compressed = {
             pname: {"idxs": comp["idxs"], "vals": torch.randn_like(comp["vals"]), "shape": comp["shape"]}

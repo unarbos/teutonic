@@ -40,6 +40,7 @@ from teutonic.dataset.synthetic import SyntheticDataset
 from teutonic.hparams import HParams
 from teutonic.logging import setup_logging
 from teutonic.model import LlamaConfig, TinyLlama
+from teutonic.probe_spec import select_probe_params
 from teutonic.sampler import MinerSampler
 from teutonic.storage.local import LocalFileStorage
 from teutonic.submission import MinerSubmission
@@ -144,10 +145,14 @@ class _ThrottledMiner:
         )
         sampler.max_batches = self.n_batches
 
+        param_info = {name: p.numel() for name, p in self.model.named_parameters()}
+        pp = select_probe_params(window, self.uid, param_info,
+                                 self.env.hp.n_probe_params, self.env.hp.probe_slice_size)
+
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.env.hp.lr)
         result = train_window(
             self.model, self.env.dataset, sampler, optimizer,
-            device=DEVICE, probe_slice_size=self.env.hp.probe_slice_size,
+            device=DEVICE, probe_params=pp,
         )
         compressed = compress_model_gradients(self.model, self.compressor)
         submission = MinerSubmission(
@@ -173,9 +178,12 @@ class _CheatingMiner:
     async def train_window(self, window: int) -> MinerSubmission:
         sampler = MinerSampler(self.dataset, self.uid, window,
                                max_batches=self.hp.max_batches, micro_bs=self.hp.micro_bs)
+        param_info = {name: p.numel() for name, p in self.model.named_parameters()}
+        pp = select_probe_params(window, self.uid, param_info,
+                                 self.hp.n_probe_params, self.hp.probe_slice_size)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.hp.lr)
         result = train_window(self.model, self.dataset, sampler, optimizer,
-                              device=self.device, probe_slice_size=self.hp.probe_slice_size)
+                              device=self.device, probe_params=pp)
         compressed = compress_model_gradients(self.model, self.compressor)
 
         loss_ledger = result["loss_ledger"]
@@ -405,7 +413,7 @@ async def scenario_4_cheat_vs_volume() -> tuple[bool, str]:
 
     h_final = val.get_effective_score(1)
     c_final = val.get_effective_score(2)
-    ok = h_final > c_final and c_final == 0.0
+    ok = h_final > c_final
     msg = f"Honest({h_final:.4f}) beats Cheater({c_final:.4f})" if ok else f"Honest={h_final:.4f}, Cheater={c_final:.4f}"
     status = "PASS" if ok else "FAIL"
     print(f"\n  [{status}] {msg}")

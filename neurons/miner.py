@@ -2,8 +2,8 @@
 
 The miner trains as many batches as it can from a deterministic sequence,
 uploads the gradient + proof before the window deadline, and moves on.
-Captures gradient probes for ALL parameters at ALL micro-batches (since
-the validator uses unpredictable entropy to select which to check).
+Captures per-batch gradient probes for a deterministic param subset
+selected from (window, uid).
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import torch.nn as nn
 from teutonic.compress import TopKCompressor, compress_model_gradients, decompress_and_apply
 from teutonic.hparams import HParams
 from teutonic.metrics import MetricsReporter, NullReporter
+from teutonic.probe_spec import select_probe_params
 from teutonic.protocols import Dataset, StorageBackend, WindowClock
 from teutonic.sampler import MinerSampler
 from teutonic.submission import MinerSubmission
@@ -67,6 +68,12 @@ class Miner:
             max_batches=self.hp.max_batches, micro_bs=self.hp.micro_bs,
         )
 
+        param_info = {name: p.numel() for name, p in self.model.named_parameters()}
+        probe_params = select_probe_params(
+            window, self.uid, param_info,
+            self.hp.n_probe_params, self.hp.probe_slice_size,
+        )
+
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.hp.lr)
 
         try:
@@ -76,7 +83,7 @@ class Miner:
                 max_grad_norm=self.hp.max_grad_norm,
                 deadline=deadline,
                 upload_budget_s=self.hp.upload_budget_s,
-                probe_slice_size=self.hp.probe_slice_size,
+                probe_params=probe_params,
             )
         except Exception:
             logger.exception("miner.window.crashed", window=window, global_step=self.global_step)
