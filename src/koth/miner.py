@@ -1,8 +1,8 @@
 """Reference miner for King of the Hill.
 
 Downloads the current king, trains on pretraining data, uploads the
-improved model to the miner's own HuggingFace repo, and commits
-on-chain.
+improved model to the miner's own HuggingFace repo, and submits a
+reveal commit on-chain (hidden until blocks_until_reveal elapses).
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ class Miner:
         sequence_length: int = 2048,
         batch_size: int = 4,
         dataset_path: str = "",
+        blocks_until_reveal: int = 360,
     ):
         self.king_repo = king_repo
         self.miner_repo = miner_repo
@@ -56,6 +57,7 @@ class Miner:
         self.seq_len = sequence_length
         self.batch_size = batch_size
         self.dataset_path = dataset_path
+        self.blocks_until_reveal = blocks_until_reveal
 
         self.wallet = bt.wallet(name=wallet_name, hotkey=wallet_hotkey)
         self.subtensor = bt.subtensor(network=network)
@@ -184,14 +186,20 @@ class Miner:
         return model_hash
 
     def _commit(self, king_hash: str, model_hash: str) -> None:
-        """Commit on-chain: king_hash:hf_repo:model_hash."""
-        # Truncate king hash to 16 chars for the commit
-        payload = f"{king_hash[:16]}:{self.miner_repo}:{model_hash}"
-        logger.info("Committing: %s", payload[:80])
+        """Submit a reveal commit on-chain: king_hash:hf_repo:model_hash.
 
-        self.subtensor.commit(
+        Data is hidden for blocks_until_reveal blocks, then auto-revealed.
+        """
+        payload = f"{king_hash[:16]}:{self.miner_repo}:{model_hash}"
+        logger.info(
+            "Submitting reveal commit (hidden for %d blocks): %s",
+            self.blocks_until_reveal, payload[:80],
+        )
+
+        self.subtensor.set_reveal_commitment(
             wallet=self.wallet,
             netuid=self.netuid,
             data=payload,
+            blocks_until_reveal=self.blocks_until_reveal,
         )
-        logger.info("Commit successful.")
+        logger.info("Reveal commit submitted.")

@@ -60,6 +60,7 @@ class ChainConfig:
     network: str = "finney"
     wallet_name: str = "default"
     wallet_hotkey: str = "default"
+    blocks_until_reveal: int = 360
 
 
 @dataclass

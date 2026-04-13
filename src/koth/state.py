@@ -14,6 +14,7 @@ STATE_KEY = "state/validator_state.json"
 HISTORY_KEY = "state/history.jsonl"
 QUEUE_KEY = "state/queue.json"
 KING_KEY = "king/current.json"
+SEEN_HOTKEYS_KEY = "state/seen_hotkeys.json"
 
 
 def _now() -> str:
@@ -32,6 +33,7 @@ class ValidatorState:
         self.king: dict[str, Any] = {}
         self.current_eval: dict[str, Any] | None = None
         self.queue: list[dict[str, Any]] = []
+        self.seen_hotkeys: set[str] = set()
         self.stats = {
             "total_challenges": 0,
             "total_accepted": 0,
@@ -61,6 +63,11 @@ class ValidatorState:
         if queue_data:
             self.queue = queue_data.get("pending", [])
 
+        seen_data = self.r2.get_json(SEEN_HOTKEYS_KEY)
+        if seen_data:
+            self.seen_hotkeys = set(seen_data.get("hotkeys", []))
+            logger.info("Loaded %d seen hotkeys from R2", len(self.seen_hotkeys))
+
     def _flush(self) -> None:
         """Write current state snapshot to R2."""
         self.r2.put_json(STATE_KEY, {
@@ -80,6 +87,20 @@ class ValidatorState:
 
     def _flush_king(self) -> None:
         self.r2.put_json(KING_KEY, self.king)
+
+    def _flush_seen_hotkeys(self) -> None:
+        self.r2.put_json(SEEN_HOTKEYS_KEY, {
+            "hotkeys": sorted(self.seen_hotkeys),
+            "updated_at": _now(),
+        })
+
+    def mark_seen(self, hotkey: str) -> None:
+        """Record a hotkey as permanently seen (never re-evaluate)."""
+        self.seen_hotkeys.add(hotkey)
+        self._flush_seen_hotkeys()
+
+    def is_seen(self, hotkey: str) -> bool:
+        return hotkey in self.seen_hotkeys
 
     # -- Public event methods --
 

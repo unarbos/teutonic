@@ -1,8 +1,8 @@
 """Main validator coordinator loop for King of the Hill.
 
 The coordinator runs on the validator host (no GPU needed). It:
-1. Polls the Bittensor chain for new miner commits
-2. Queues challenges in block order
+1. Polls the Bittensor chain for newly revealed miner commits
+2. Queues challenges in block order (each hotkey evaluated at most once)
 3. For each challenge:
    a. Checks staleness (king_hash match)
    b. Spins up an ephemeral Lium pod
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import bittensor as bt
 
-from .commit import CommitScanner, MinerCommit
+from .commit import RevealScanner
 from .config import KOTHConfig
 from .king import KingManager
 from .orchestrator import PodOrchestrator, poll_for_verdict
@@ -52,18 +52,23 @@ class Validator:
             hotkey=config.chain.wallet_hotkey,
         )
         self.subtensor = bt.subtensor(network=config.chain.network)
-        self.scanner = CommitScanner(self.subtensor, config.chain.netuid)
+        self.scanner: RevealScanner | None = None
 
     def _next_challenge_id(self) -> str:
         self._challenge_counter += 1
         return f"eval-{self._challenge_counter:04d}"
 
     def initialize(self) -> None:
-        """Initialize the validator: load state, download king."""
+        """Initialize the validator: load state, download king, wire up scanner."""
         logger.info("Initializing KOTH validator...")
         self.state.load()
 
-        # Download or verify king
+        self.scanner = RevealScanner(
+            self.subtensor,
+            self.config.chain.netuid,
+            seen_hotkeys=self.state.seen_hotkeys,
+        )
+
         king_dir = self.king_mgr.download_king()
         logger.info("King loaded: hash=%s", self.king_mgr.king_hash[:16])
 
@@ -92,25 +97,29 @@ class Validator:
             time.sleep(self.config.poll_interval_s)
 
     def _tick(self) -> None:
-        """One iteration: scan for commits, process queue."""
-        # Scan for new commits
-        new_commits = self.scanner.scan()
-        for commit in new_commits:
+        """One iteration: scan for revealed commits, process queue."""
+        new_reveals = self.scanner.scan()
+
+        if new_reveals:
+            # Scanner already added hotkeys to its seen set; persist to R2
+            self.state.seen_hotkeys = self.scanner.seen_hotkeys
+            self.state._flush_seen_hotkeys()
+
+        for reveal in new_reveals:
             challenge_id = self._next_challenge_id()
             self.state.enqueue_challenge(
                 challenge_id=challenge_id,
-                hotkey=commit.hotkey,
-                hf_repo=commit.hf_repo,
-                commit_block=commit.block,
-                king_hash=commit.king_hash,
-                model_hash=commit.model_hash,
+                hotkey=reveal.hotkey,
+                hf_repo=reveal.hf_repo,
+                commit_block=reveal.block,
+                king_hash=reveal.king_hash,
+                model_hash=reveal.model_hash,
             )
             logger.info(
-                "Queued challenge %s from %s (block %d, repo %s)",
-                challenge_id, commit.hotkey[:16], commit.block, commit.hf_repo,
+                "Queued reveal %s from %s (block %d, repo %s)",
+                challenge_id, reveal.hotkey[:16], reveal.block, reveal.hf_repo,
             )
 
-        # Process the queue
         while True:
             entry = self.state.dequeue()
             if entry is None:
