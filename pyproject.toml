@@ -1,30 +1,24 @@
 [project]
 name = "teutonic"
 version = "0.1.0"
-description = "King of the Hill: decentralized pretraining via sequential sign test"
+description = "Pretraining on subnet 3."
 requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.2",
-    "numpy>=1.26",
-    "safetensors>=0.4",
-    "huggingface-hub>=0.20",
-    "boto3>=1.34",
-    "scipy>=1.12",
-    "structlog>=24.1",
-    "bittensor>=8.0",
+    "bittensor",
+    "boto3",
+    "httpx",
+    "numpy",
+    "scipy",
+    "huggingface-hub",
 ]
 
 [project.scripts]
-teutonic = "teutonic.cli:main"
-teutonic-validator = "teutonic.cli:run_validator"
-teutonic-miner = "teutonic.cli:run_miner"
-teutonic-seed = "teutonic.cli:seed_king"
-teutonic-state = "teutonic.cli:show_state"
-teutonic-dataset = "teutonic.cli:run_dataset"
+teutonic-validator = "validator:main_sync"
 
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+only-include = ["validator.py"]
