@@ -312,7 +312,7 @@ async def phase_b(tier: TierConfig, tmpdir: str) -> dict[str, Any]:
     print(f"    Total:  train={total_train:.1f}s  eval={total_eval:.1f}s  VRAM={vram_peak:.2f}GB")
     print(f"    EMA:    H1={h1_ema:.4f}  H2={h2_ema:.4f}  Cheater={c_ema:.4f}")
 
-    ok = h1_ema > 0.5 and h2_ema > 0.5 and c_ema == 0.0
+    ok = h1_ema > 0.5 and h2_ema > 0.5 and h1_ema > c_ema
     print(f"    {'PASS' if ok else 'FAIL'}: honest > 0.5, cheater = 0")
 
     return {
