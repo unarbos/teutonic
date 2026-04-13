@@ -106,7 +106,7 @@ async def cheating_submit(
     env: TestEnv, uid: int, window: int, cheat_fn,
 ) -> MinerSubmission:
     """Train honestly, then apply cheat_fn to mutate the submission before upload."""
-    m = make_model(env.cfg)
+    m = make_model(env.cfg).to(DEVICE)
     m.load_state_dict(copy.deepcopy(env.shared_init))
     sampler = MinerSampler(env.dataset, uid, window, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
     optimizer = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
@@ -213,10 +213,11 @@ async def test_a5_model_learns() -> tuple[bool, str]:
 
         def eval_loss(model, dataset, n=10):
             model.eval()
+            dev = next(model.parameters()).device
             total = 0.0
             with torch.no_grad():
                 for i in range(n):
-                    tokens = dataset[i].unsqueeze(0)
+                    tokens = dataset[i].unsqueeze(0).to(dev)
                     logits = model(tokens[:, :-1])
                     loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tokens[:, 1:].reshape(-1))
                     total += loss.item()
@@ -304,7 +305,7 @@ async def test_b3_wrong_data() -> tuple[bool, str]:
 
         wrong_ds = SyntheticDataset(size=2048, seq_len=64, vocab_size=512, seed=9999)
 
-        m = make_model(env.cfg)
+        m = make_model(env.cfg).to(DEVICE)
         m.load_state_dict(copy.deepcopy(env.shared_init))
         sampler = MinerSampler(wrong_ds, 2, 0, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
         opt = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
@@ -407,7 +408,7 @@ async def test_b7_stale_submission() -> tuple[bool, str]:
         await honest.train_window(1)
 
         # Cheater: train on window 0 but submit as window 1
-        m = make_model(env.cfg)
+        m = make_model(env.cfg).to(DEVICE)
         m.load_state_dict(copy.deepcopy(env.shared_init))
         sampler_w0 = MinerSampler(env.dataset, 2, 0, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
         opt = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
