@@ -37,7 +37,6 @@ from teutonic.compress import TopKCompressor, compress_model_gradients
 from teutonic.dataset.synthetic import SyntheticDataset
 from teutonic.hparams import HParams
 from teutonic.model import LlamaConfig, TinyLlama
-from teutonic.probe_spec import ProbeSpec
 from teutonic.sampler import MinerSampler
 from teutonic.storage.r2 import R2Storage
 from teutonic.submission import MinerSubmission
@@ -99,7 +98,7 @@ DEFAULT_CFG = LlamaConfig(
     n_layers=2, n_heads=2, seq_len=64,
 )
 
-DEFAULT_HP = HParams(n_batches=6, micro_bs=2, topk=32, lr=1e-3, outer_lr=0.4)
+DEFAULT_HP = HParams(max_batches=6, micro_bs=2, topk=32, lr=1e-3, outer_lr=0.4)
 
 
 def make_model(cfg: LlamaConfig = DEFAULT_CFG, seed: int = 0) -> TinyLlama:
@@ -145,15 +144,10 @@ def make_validator(env: TestEnv, uid: int = 0, clock: Any = None) -> Validator:
 async def cheating_submit(env: TestEnv, uid: int, window: int, cheat_fn) -> MinerSubmission:
     m = make_model(env.cfg)
     m.load_state_dict(copy.deepcopy(env.shared_init))
-    sampler = MinerSampler(env.dataset, uid, window, n_batches=env.hp.n_batches, micro_bs=env.hp.micro_bs)
-    all_indices = set(range(sampler.total_micro_batches))
-    probe_spec = ProbeSpec(
-        param_name=env.hp.probe_param_name, slice_start=env.hp.probe_slice_start,
-        slice_end=env.hp.probe_slice_end, batch_indices=tuple(sorted(all_indices)),
-    )
+    sampler = MinerSampler(env.dataset, uid, window, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
     optimizer = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
     result = train_window(m, env.dataset, sampler, optimizer,
-                          probe_indices=all_indices, probe_spec=probe_spec, device="cpu")
+                          device="cpu", probe_slice_size=env.hp.probe_slice_size)
     compressed = compress_model_gradients(m, TopKCompressor(topk=env.hp.topk))
     sub = MinerSubmission(uid=uid, window=window, compressed_gradients=compressed,
                           loss_ledger=result["loss_ledger"], grad_probes=result["grad_probes"])
@@ -191,7 +185,7 @@ async def test_a1_baseline() -> tuple[bool, str]:
 
 
 async def test_a2_single_batch() -> tuple[bool, str]:
-    hp = replace(DEFAULT_HP, n_batches=1, n_loss_spot_checks=1, n_probes=1)
+    hp = replace(DEFAULT_HP, max_batches=1, min_batches=1, n_loss_spot_checks=1, n_probes=1)
     env = make_env("a2", hp=hp)
     try:
         miner = make_miner(env, uid=1)
@@ -211,7 +205,7 @@ async def test_a2_single_batch() -> tuple[bool, str]:
 
 
 async def test_a3_large_batch() -> tuple[bool, str]:
-    hp = replace(DEFAULT_HP, n_batches=20, micro_bs=4)
+    hp = replace(DEFAULT_HP, max_batches=20, micro_bs=4)
     env = make_env("a3", hp=hp)
     try:
         miner = make_miner(env, uid=1)
@@ -313,7 +307,10 @@ async def test_b2_fake_gradients() -> tuple[bool, str]:
         honest = make_miner(env, uid=1)
         await honest.train_window(0)
         def cheat(sub):
-            sub.grad_probes = {k: torch.randn_like(v) for k, v in sub.grad_probes.items()}
+            sub.grad_probes = {
+                k: {pn: torch.randn_like(t) for pn, t in pdict.items()}
+                for k, pdict in sub.grad_probes.items()
+            }
             return sub
         await cheating_submit(env, uid=2, window=0, cheat_fn=cheat)
         val = make_validator(env)
@@ -339,12 +336,10 @@ async def test_b3_wrong_data() -> tuple[bool, str]:
         wrong_ds = SyntheticDataset(size=2048, seq_len=64, vocab_size=512, seed=9999)
         m = make_model(env.cfg)
         m.load_state_dict(copy.deepcopy(env.shared_init))
-        sampler = MinerSampler(wrong_ds, 2, 0, n_batches=env.hp.n_batches, micro_bs=env.hp.micro_bs)
-        all_idx = set(range(sampler.total_micro_batches))
-        ps = ProbeSpec(param_name=env.hp.probe_param_name, slice_start=env.hp.probe_slice_start,
-                       slice_end=env.hp.probe_slice_end, batch_indices=tuple(sorted(all_idx)))
+        sampler = MinerSampler(wrong_ds, 2, 0, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
         opt = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
-        result = train_window(m, wrong_ds, sampler, opt, probe_indices=all_idx, probe_spec=ps, device="cpu")
+        result = train_window(m, wrong_ds, sampler, opt, device="cpu",
+                              probe_slice_size=env.hp.probe_slice_size)
         compressed = compress_model_gradients(m, TopKCompressor(topk=env.hp.topk))
         sub = MinerSubmission(uid=2, window=0, compressed_gradients=compressed,
                               loss_ledger=result["loss_ledger"], grad_probes=result["grad_probes"])
@@ -417,9 +412,11 @@ async def test_b6_zero_gradient() -> tuple[bool, str]:
             return False, f"Loss score {c.loss_score:.4f} < 0.9"
         if c.probe_score < 0.9:
             return False, f"Probe score {c.probe_score:.4f} < 0.9"
-        if c.final_score <= 0.0:
-            return False, f"Score {c.final_score:.4f} <= 0"
-        return True, f"score={c.final_score:.4f} (PoW passes)"
+        if c.consistency_score > 0.5:
+            return False, f"Consistency {c.consistency_score:.4f} > 0.5 (zeroed grads should fail)"
+        if c.final_score > 0.0:
+            return False, f"Score {c.final_score:.4f} > 0 (zeroed grads should be caught)"
+        return True, f"score={c.final_score:.4f}, consistency={c.consistency_score:.4f} (correctly caught)"
     finally:
         await cleanup_env(env)
 
@@ -432,12 +429,10 @@ async def test_b7_stale_submission() -> tuple[bool, str]:
         await honest.train_window(1)
         m = make_model(env.cfg)
         m.load_state_dict(copy.deepcopy(env.shared_init))
-        sampler_w0 = MinerSampler(env.dataset, 2, 0, n_batches=env.hp.n_batches, micro_bs=env.hp.micro_bs)
-        all_idx = set(range(sampler_w0.total_micro_batches))
-        ps = ProbeSpec(param_name=env.hp.probe_param_name, slice_start=env.hp.probe_slice_start,
-                       slice_end=env.hp.probe_slice_end, batch_indices=tuple(sorted(all_idx)))
+        sampler_w0 = MinerSampler(env.dataset, 2, 0, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
         opt = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
-        result = train_window(m, env.dataset, sampler_w0, opt, probe_indices=all_idx, probe_spec=ps, device="cpu")
+        result = train_window(m, env.dataset, sampler_w0, opt, device="cpu",
+                              probe_slice_size=env.hp.probe_slice_size)
         compressed = compress_model_gradients(m, TopKCompressor(topk=env.hp.topk))
         sub = MinerSubmission(uid=2, window=1, compressed_gradients=compressed,
                               loss_ledger=result["loss_ledger"], grad_probes=result["grad_probes"])
@@ -457,7 +452,7 @@ async def test_b7_stale_submission() -> tuple[bool, str]:
 # ──────────────────────────────────────────────────────────────────────────
 
 async def test_c1_single_batch() -> tuple[bool, str]:
-    hp = replace(DEFAULT_HP, n_batches=1, n_loss_spot_checks=1, n_probes=1)
+    hp = replace(DEFAULT_HP, max_batches=1, min_batches=1, n_loss_spot_checks=1, n_probes=1)
     env = make_env("c1", hp=hp)
     try:
         miner = make_miner(env, uid=1)
@@ -590,11 +585,11 @@ async def test_c8_spot_checks_exceed_batches() -> tuple[bool, str]:
         results = await val.evaluate_window(0, [1])
         r = results[0]
         n_checked = len(r.loss_result.checked_indices) if r.loss_result else 0
-        if n_checked > env.hp.n_batches:
-            return False, f"Checked {n_checked} > {env.hp.n_batches}"
+        if n_checked > env.hp.max_batches:
+            return False, f"Checked {n_checked} > {env.hp.max_batches}"
         if r.final_score <= 0:
             return False, f"Score {r.final_score:.4f} <= 0"
-        return True, f"checked={n_checked}/{env.hp.n_batches}, score={r.final_score:.4f}"
+        return True, f"checked={n_checked}/{env.hp.max_batches}, score={r.final_score:.4f}"
     finally:
         await cleanup_env(env)
 
@@ -668,7 +663,7 @@ async def test_r2_2_rapid_windows() -> tuple[bool, str]:
 
 async def test_r2_3_large_submission() -> tuple[bool, str]:
     """Large submissions (n_batches=20, micro_bs=4). Measure R2 payload times."""
-    hp = replace(DEFAULT_HP, n_batches=20, micro_bs=4)
+    hp = replace(DEFAULT_HP, max_batches=20, micro_bs=4)
     env = make_env("r2_3", hp=hp)
     try:
         miner = make_miner(env, uid=1)

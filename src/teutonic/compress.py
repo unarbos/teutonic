@@ -8,12 +8,12 @@ in production.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
+import structlog
 import torch
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class TopKCompressor:
@@ -52,8 +52,10 @@ class TopKCompressor:
 
         # Bounds check: indices must be within [0, numel)
         if idxs.numel() > 0 and (idxs.max() >= numel or idxs.min() < 0):
-            logger.warning("Compressed indices out of bounds (max=%d, numel=%d), skipping",
-                          idxs.max().item(), numel)
+            logger.warning(
+                "compress.decompress.oob",
+                max_idx=idxs.max().item(), numel=numel,
+            )
             return dense.reshape(shape)
 
         dense.scatter_(0, idxs, vals)
@@ -67,7 +69,15 @@ def compress_model_gradients(
     result: dict[str, dict[str, Any]] = {}
     for name, p in model.named_parameters():
         if p.grad is not None:
-            result[name] = compressor.compress(p.grad)
+            comp = compressor.compress(p.grad)
+            result[name] = comp
+            logger.debug(
+                "compress.param",
+                param=name,
+                topk=compressor.topk,
+                numel=p.grad.numel(),
+                max_val=round(comp["vals"].abs().max().item(), 6),
+            )
     return result
 
 
@@ -86,6 +96,6 @@ def decompress_and_apply(
             if name in compressed_grads:
                 grad = compressor.decompress(compressed_grads[name], device=p.device)
                 if not torch.isfinite(grad).all():
-                    logger.warning("Non-finite gradient for %s, skipping apply", name)
+                    logger.warning("compress.apply.nonfinite", param=name)
                     continue
                 p.data.sub_(grad, alpha=lr)

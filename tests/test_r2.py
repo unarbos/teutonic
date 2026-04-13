@@ -186,7 +186,7 @@ async def test_7_full_pipeline(r2: R2Storage) -> tuple[bool, str]:
 
     cfg = LlamaConfig(vocab_size=512, hidden_dim=64, intermediate_dim=128,
                        n_layers=2, n_heads=2, seq_len=64)
-    hp = HParams(n_batches=4, micro_bs=2, topk=32, lr=1e-3, outer_lr=0.4)
+    hp = HParams(max_batches=4, micro_bs=2, topk=32, lr=1e-3, outer_lr=0.4)
     dataset = SyntheticDataset(size=2048, seq_len=64, vocab_size=512, seed=42)
 
     # Use a unique prefix per run to avoid collisions

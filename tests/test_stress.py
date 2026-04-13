@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import math
+import os
 import random
 import sys
 import tempfile
@@ -21,6 +22,8 @@ import traceback
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+DEVICE = os.environ.get("TEUTONIC_DEVICE", "cpu")
 
 import torch
 import torch.nn as nn
@@ -34,7 +37,6 @@ from teutonic.compress import TopKCompressor, compress_model_gradients
 from teutonic.dataset.synthetic import SyntheticDataset
 from teutonic.hparams import HParams
 from teutonic.model import LlamaConfig, TinyLlama
-from teutonic.probe_spec import ProbeSpec
 from teutonic.sampler import MinerSampler
 from teutonic.storage.local import LocalFileStorage
 from teutonic.submission import MinerSubmission
@@ -53,7 +55,7 @@ DEFAULT_CFG = LlamaConfig(
     n_layers=2, n_heads=2, seq_len=64,
 )
 
-DEFAULT_HP = HParams(n_batches=6, micro_bs=2, topk=32, lr=1e-3, outer_lr=0.4)
+DEFAULT_HP = HParams(max_batches=6, micro_bs=2, topk=32, lr=1e-3, outer_lr=0.4)
 
 
 def make_model(cfg: LlamaConfig = DEFAULT_CFG, seed: int = 0) -> TinyLlama:
@@ -90,14 +92,14 @@ def make_env(
 def make_miner(env: TestEnv, uid: int) -> Miner:
     m = make_model(env.cfg)
     m.load_state_dict(copy.deepcopy(env.shared_init))
-    return Miner(uid=uid, model=m, dataset=env.dataset, storage=env.storage, hparams=env.hp, device="cpu")
+    return Miner(uid=uid, model=m, dataset=env.dataset, storage=env.storage, hparams=env.hp, device=DEVICE)
 
 
 def make_validator(env: TestEnv, uid: int = 0, clock: Any = None) -> Validator:
     m = make_model(env.cfg)
     m.load_state_dict(copy.deepcopy(env.shared_init))
     return Validator(uid=uid, model=m, dataset=env.dataset, storage=env.storage,
-                     hparams=env.hp, clock=clock, device="cpu")
+                     hparams=env.hp, clock=clock, device=DEVICE)
 
 
 async def cheating_submit(
@@ -106,17 +108,10 @@ async def cheating_submit(
     """Train honestly, then apply cheat_fn to mutate the submission before upload."""
     m = make_model(env.cfg)
     m.load_state_dict(copy.deepcopy(env.shared_init))
-    sampler = MinerSampler(env.dataset, uid, window, n_batches=env.hp.n_batches, micro_bs=env.hp.micro_bs)
-    all_indices = set(range(sampler.total_micro_batches))
-    probe_spec = ProbeSpec(
-        param_name=env.hp.probe_param_name,
-        slice_start=env.hp.probe_slice_start,
-        slice_end=env.hp.probe_slice_end,
-        batch_indices=tuple(sorted(all_indices)),
-    )
+    sampler = MinerSampler(env.dataset, uid, window, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
     optimizer = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
     result = train_window(m, env.dataset, sampler, optimizer,
-                          probe_indices=all_indices, probe_spec=probe_spec, device="cpu")
+                          device=DEVICE, probe_slice_size=env.hp.probe_slice_size)
     compressed = compress_model_gradients(m, TopKCompressor(topk=env.hp.topk))
     sub = MinerSubmission(uid=uid, window=window,
                           compressed_gradients=compressed,
@@ -153,7 +148,7 @@ async def test_a1_baseline() -> tuple[bool, str]:
 
 async def test_a2_single_batch() -> tuple[bool, str]:
     """n_batches=1. Loss error < 0.001, probe cosine > 0.999."""
-    hp = replace(DEFAULT_HP, n_batches=1, n_loss_spot_checks=1, n_probes=1)
+    hp = replace(DEFAULT_HP, max_batches=1, min_batches=1, n_loss_spot_checks=1, n_probes=1)
     with tempfile.TemporaryDirectory() as td:
         env = make_env(hp=hp, tmpdir=td)
         miner = make_miner(env, uid=1)
@@ -172,8 +167,8 @@ async def test_a2_single_batch() -> tuple[bool, str]:
 
 
 async def test_a3_large_batch() -> tuple[bool, str]:
-    """n_batches=20, micro_bs=4. Honest miners pass."""
-    hp = replace(DEFAULT_HP, n_batches=20, micro_bs=4)
+    """max_batches=20, micro_bs=4. Honest miners pass."""
+    hp = replace(DEFAULT_HP, max_batches=20, micro_bs=4)
     with tempfile.TemporaryDirectory() as td:
         env = make_env(hp=hp, tmpdir=td)
         miner = make_miner(env, uid=1)
@@ -280,7 +275,10 @@ async def test_b2_fake_gradients() -> tuple[bool, str]:
         await honest.train_window(0)
 
         def cheat(sub):
-            sub.grad_probes = {k: torch.randn_like(v) for k, v in sub.grad_probes.items()}
+            sub.grad_probes = {
+                k: {pn: torch.randn_like(t) for pn, t in pdict.items()}
+                for k, pdict in sub.grad_probes.items()
+            }
             return sub
         await cheating_submit(env, uid=2, window=0, cheat_fn=cheat)
 
@@ -308,12 +306,10 @@ async def test_b3_wrong_data() -> tuple[bool, str]:
 
         m = make_model(env.cfg)
         m.load_state_dict(copy.deepcopy(env.shared_init))
-        sampler = MinerSampler(wrong_ds, 2, 0, n_batches=env.hp.n_batches, micro_bs=env.hp.micro_bs)
-        all_idx = set(range(sampler.total_micro_batches))
-        ps = ProbeSpec(param_name=env.hp.probe_param_name, slice_start=env.hp.probe_slice_start,
-                       slice_end=env.hp.probe_slice_end, batch_indices=tuple(sorted(all_idx)))
+        sampler = MinerSampler(wrong_ds, 2, 0, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
         opt = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
-        result = train_window(m, wrong_ds, sampler, opt, probe_indices=all_idx, probe_spec=ps, device="cpu")
+        result = train_window(m, wrong_ds, sampler, opt, device=DEVICE,
+                              probe_slice_size=env.hp.probe_slice_size)
         compressed = compress_model_gradients(m, TopKCompressor(topk=env.hp.topk))
         sub = MinerSubmission(uid=2, window=0, compressed_gradients=compressed,
                               loss_ledger=result["loss_ledger"], grad_probes=result["grad_probes"])
@@ -372,7 +368,7 @@ async def test_b5_partial_cheater() -> tuple[bool, str]:
 
 
 async def test_b6_zero_gradient() -> tuple[bool, str]:
-    """Real PoW but zeroed compressed gradients. Should PASS verification."""
+    """Real PoW but zeroed compressed gradients. Consistency check catches the mismatch."""
     with tempfile.TemporaryDirectory() as td:
         env = make_env(tmpdir=td)
         honest = make_miner(env, uid=1)
@@ -389,14 +385,15 @@ async def test_b6_zero_gradient() -> tuple[bool, str]:
         val = make_validator(env)
         results = await val.evaluate_window(0, [1, 2])
         c = results[1]
-        # PoW is decoupled from gradient quality -- losses and probes should still pass
         if c.loss_score < 0.9:
             return False, f"Loss score {c.loss_score:.4f} < 0.9 (PoW should pass)"
         if c.probe_score < 0.9:
             return False, f"Probe score {c.probe_score:.4f} < 0.9 (PoW should pass)"
-        if c.final_score <= 0.0:
-            return False, f"Score {c.final_score:.4f} <= 0 (zeroed grads should still pass PoW)"
-        return True, f"score={c.final_score:.4f} (PoW passes, gradient is just weak)"
+        if c.consistency_score > 0.5:
+            return False, f"Consistency {c.consistency_score:.4f} > 0.5 (zeroed grads should fail consistency)"
+        if c.final_score > 0.0:
+            return False, f"Score {c.final_score:.4f} > 0 (zeroed grads should be caught)"
+        return True, f"score={c.final_score:.4f}, consistency={c.consistency_score:.4f} (correctly caught)"
 
 
 async def test_b7_stale_submission() -> tuple[bool, str]:
@@ -412,12 +409,10 @@ async def test_b7_stale_submission() -> tuple[bool, str]:
         # Cheater: train on window 0 but submit as window 1
         m = make_model(env.cfg)
         m.load_state_dict(copy.deepcopy(env.shared_init))
-        sampler_w0 = MinerSampler(env.dataset, 2, 0, n_batches=env.hp.n_batches, micro_bs=env.hp.micro_bs)
-        all_idx = set(range(sampler_w0.total_micro_batches))
-        ps = ProbeSpec(param_name=env.hp.probe_param_name, slice_start=env.hp.probe_slice_start,
-                       slice_end=env.hp.probe_slice_end, batch_indices=tuple(sorted(all_idx)))
+        sampler_w0 = MinerSampler(env.dataset, 2, 0, max_batches=env.hp.max_batches, micro_bs=env.hp.micro_bs)
         opt = torch.optim.AdamW(m.parameters(), lr=env.hp.lr)
-        result = train_window(m, env.dataset, sampler_w0, opt, probe_indices=all_idx, probe_spec=ps, device="cpu")
+        result = train_window(m, env.dataset, sampler_w0, opt, device=DEVICE,
+                              probe_slice_size=env.hp.probe_slice_size)
         compressed = compress_model_gradients(m, TopKCompressor(topk=env.hp.topk))
         # Upload as window=1 with uid=2
         sub = MinerSubmission(uid=2, window=1, compressed_gradients=compressed,
@@ -437,8 +432,8 @@ async def test_b7_stale_submission() -> tuple[bool, str]:
 # ──────────────────────────────────────────────────────────────────────────
 
 async def test_c1_single_batch() -> tuple[bool, str]:
-    """n_batches=1 doesn't crash, honest passes."""
-    hp = replace(DEFAULT_HP, n_batches=1, n_loss_spot_checks=1, n_probes=1)
+    """max_batches=1 doesn't crash, honest passes."""
+    hp = replace(DEFAULT_HP, max_batches=1, min_batches=1, n_loss_spot_checks=1, n_probes=1)
     with tempfile.TemporaryDirectory() as td:
         env = make_env(hp=hp, tmpdir=td)
         miner = make_miner(env, uid=1)
@@ -576,11 +571,11 @@ async def test_c8_spot_checks_exceed_batches() -> tuple[bool, str]:
         results = await val.evaluate_window(0, [1])
         r = results[0]
         n_checked = len(r.loss_result.checked_indices) if r.loss_result else 0
-        if n_checked > env.hp.n_batches:
-            return False, f"Checked {n_checked} > {env.hp.n_batches} batches"
+        if n_checked > env.hp.max_batches:
+            return False, f"Checked {n_checked} > {env.hp.max_batches} batches"
         if r.final_score <= 0:
             return False, f"Score {r.final_score:.4f} <= 0"
-        return True, f"checked={n_checked}/{env.hp.n_batches}, score={r.final_score:.4f}"
+        return True, f"checked={n_checked}/{env.hp.max_batches}, score={r.final_score:.4f}"
 
 
 async def test_c9_clock_run_loop() -> tuple[bool, str]:

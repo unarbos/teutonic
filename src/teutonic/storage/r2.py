@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import io
-import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
+import structlog
 import torch
 
 try:
@@ -24,7 +25,7 @@ except ImportError:
 import aioboto3
 from botocore.config import Config as BotoConfig
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _RETRIES = 3
 _BACKOFF_BASE = 0.1
@@ -108,6 +109,7 @@ class R2Storage:
                 config=self._boto_cfg,
             )
             self._client = await self._client_cm.__aenter__()
+            logger.info("storage.r2.connected", endpoint=self._endpoint, bucket=self._bucket)
             return self._client
 
     def _s3_key(self, key: str) -> str:
@@ -124,7 +126,7 @@ class R2Storage:
                 break
         return k
 
-    async def _retry(self, fn, *args, **kwargs):
+    async def _retry(self, fn, *args, op: str = "unknown", key: str = "", **kwargs):
         last_exc = None
         for attempt in range(_RETRIES):
             try:
@@ -132,29 +134,47 @@ class R2Storage:
             except Exception as exc:
                 last_exc = exc
                 wait = _BACKOFF_BASE * (2**attempt)
-                logger.warning("R2 retry %d/%d: %s", attempt + 1, _RETRIES, exc)
+                logger.warning(
+                    "storage.r2.retry",
+                    op=op, key=key,
+                    attempt=attempt + 1, max_retries=_RETRIES,
+                    error=str(exc),
+                )
                 await asyncio.sleep(wait)
+        logger.error("storage.r2.failed", op=op, key=key, retries=_RETRIES, error=str(last_exc))
         raise last_exc
 
     async def put(self, key: str, data: dict[str, Any]) -> None:
         s3_key = self._s3_key(key)
+        t0 = time.monotonic()
         body = await asyncio.to_thread(_serialize, data)
+        size_bytes = len(body)
         client = await self._get_client()
         try:
             async with self._sem:
                 await asyncio.wait_for(
                     self._retry(
-                        client.put_object, Bucket=self._bucket, Key=s3_key, Body=body
+                        client.put_object, Bucket=self._bucket, Key=s3_key, Body=body,
+                        op="put", key=key,
                     ),
                     timeout=self._put_timeout,
                 )
         except asyncio.TimeoutError:
-            logger.error("R2 put timed out after %.0fs for %s", self._put_timeout, key)
+            logger.error(
+                "storage.r2.put.timeout",
+                key=key, timeout_s=self._put_timeout, size_bytes=size_bytes,
+            )
             raise
+        logger.debug(
+            "storage.r2.put",
+            key=key, size_bytes=size_bytes,
+            duration_s=round(time.monotonic() - t0, 3),
+        )
 
     async def get(self, key: str) -> dict[str, Any] | None:
         s3_key = self._s3_key(key)
         client = await self._get_client()
+        t0 = time.monotonic()
 
         async def _do_get():
             try:
@@ -181,32 +201,52 @@ class R2Storage:
                         last_exc = asyncio.TimeoutError(
                             f"R2 get timed out after {self._get_timeout}s for {key}"
                         )
-                        logger.warning("R2 get timeout %d/%d for %s", attempt + 1, _RETRIES, key)
+                        logger.warning(
+                            "storage.r2.get.timeout",
+                            key=key, attempt=attempt + 1, max_retries=_RETRIES,
+                        )
                     except Exception as exc:
                         last_exc = exc
                         wait = _BACKOFF_BASE * (2**attempt)
-                        logger.warning("R2 get retry %d/%d: %s", attempt + 1, _RETRIES, exc)
+                        logger.warning(
+                            "storage.r2.get.retry",
+                            key=key, attempt=attempt + 1, max_retries=_RETRIES,
+                            error=str(exc),
+                        )
                         await asyncio.sleep(wait)
                 else:
                     if last_exc is not None:
-                        logger.error("R2 get failed after %d retries for %s", _RETRIES, key)
+                        logger.error(
+                            "storage.r2.get.failed",
+                            key=key, retries=_RETRIES, error=str(last_exc),
+                        )
                         return None
 
                 if blob is None:
                     return None
         except asyncio.TimeoutError:
-            logger.error("R2 get timed out for %s", key)
+            logger.error("storage.r2.get.timeout", key=key)
             return None
 
         try:
-            return await asyncio.to_thread(_deserialize, blob)
+            result = await asyncio.to_thread(_deserialize, blob)
+            logger.debug(
+                "storage.r2.get",
+                key=key, size_bytes=len(blob),
+                duration_s=round(time.monotonic() - t0, 3),
+            )
+            return result
         except Exception:
-            logger.warning("Corrupt R2 object at %s", s3_key)
+            logger.warning("storage.r2.get.corrupt", key=key, s3_key=s3_key)
             return None
 
     async def list_keys(self, prefix: str) -> list[str]:
+        items = await self.list_keys_with_metadata(prefix)
+        return [item["key"] for item in items]
+
+    async def list_keys_with_metadata(self, prefix: str) -> list[dict[str, Any]]:
         s3_prefix = f"{self._prefix}{prefix}"
-        keys: list[str] = []
+        items: list[dict[str, Any]] = []
         client = await self._get_client()
 
         async def _do_list():
@@ -215,14 +255,22 @@ class R2Storage:
                 Bucket=self._bucket, Prefix=s3_prefix
             ):
                 for obj in page.get("Contents", []):
-                    keys.append(self._key_from_s3(obj["Key"]))
+                    lm = obj.get("LastModified")
+                    items.append({
+                        "key": self._key_from_s3(obj["Key"]),
+                        "last_modified": lm.timestamp() if lm else 0.0,
+                    })
 
         try:
             async with self._sem:
                 await asyncio.wait_for(_do_list(), timeout=self._list_timeout)
         except asyncio.TimeoutError:
-            logger.error("R2 list_keys timed out after %.0fs for prefix %s", self._list_timeout, prefix)
-        return sorted(keys)
+            logger.error(
+                "storage.r2.list.timeout",
+                prefix=prefix, timeout_s=self._list_timeout,
+            )
+        logger.debug("storage.r2.list", prefix=prefix, n_keys=len(items))
+        return sorted(items, key=lambda x: x["key"])
 
     async def delete(self, key: str) -> None:
         s3_key = self._s3_key(key)
@@ -254,3 +302,4 @@ class R2Storage:
             await self._client_cm.__aexit__(None, None, None)
             self._client = None
             self._client_cm = None
+            logger.info("storage.r2.closed")

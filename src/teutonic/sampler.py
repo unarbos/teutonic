@@ -1,8 +1,9 @@
 """Deterministic batch assignment sampler with micro-batch index resolution.
 
-For each (uid, window) pair, draws ``n_batches * micro_bs`` unique dataset
-indices.  All micro-batches are accumulated against a frozen model --
-there is no concept of ``inner_steps`` or intermediate optimizer updates.
+For each (uid, window) pair, draws ``max_batches * micro_bs`` unique dataset
+indices.  The full sequence is deterministic so both miner and validator can
+reproduce it.  A miner may train on fewer than ``max_batches`` depending on
+how much time remains in the window.
 """
 
 from __future__ import annotations
@@ -26,12 +27,11 @@ class MinerSampler:
     """Deterministic sampler that assigns micro-batches to a (uid, window).
 
     Given a dataset of length *N*, for each (uid, window) pair this sampler
-    draws ``n_batches * micro_bs`` unique indices, ordered into *n_batches*
-    micro-batches of size *micro_bs* each.
+    draws ``max_batches * micro_bs`` unique indices, ordered into
+    *max_batches* micro-batches of size *micro_bs* each.
 
-    All micro-batches are computed against the same frozen model weights
-    (pure gradient accumulation), so any micro-batch is verifiable by the
-    validator replaying against its start-of-window model state.
+    The miner trains on as many as it can before the window deadline.  The
+    validator replays only the batches the miner claims to have trained.
     """
 
     def __init__(
@@ -40,18 +40,18 @@ class MinerSampler:
         uid: int,
         window: int,
         *,
-        n_batches: int,
+        max_batches: int,
         micro_bs: int,
     ):
         self.dataset_len = len(dataset)
-        self.n_batches = n_batches
+        self.max_batches = max_batches
         self.micro_bs = micro_bs
 
         self.set_window_uid(uid, window)
 
     @property
     def total_micro_batches(self) -> int:
-        return self.n_batches
+        return self.max_batches
 
     def set_window_uid(self, uid: int, window: int) -> None:
         self.uid = uid
@@ -59,7 +59,7 @@ class MinerSampler:
         self._indices = self._compute_indices()
 
     def _compute_indices(self) -> np.ndarray:
-        wanted = self.n_batches * self.micro_bs
+        wanted = self.max_batches * self.micro_bs
         if wanted > self.dataset_len:
             raise ValueError(
                 f"Window needs {wanted} samples but dataset has only {self.dataset_len}"
@@ -69,8 +69,8 @@ class MinerSampler:
 
     def get_micro_batch_indices(self, k: int) -> np.ndarray:
         """Return dataset indices for the *k*-th micro-batch."""
-        if k < 0 or k >= self.n_batches:
-            raise IndexError(f"k={k} out of range [0, {self.n_batches})")
+        if k < 0 or k >= self.max_batches:
+            raise IndexError(f"k={k} out of range [0, {self.max_batches})")
         start = k * self.micro_bs
         return self._indices[start : start + self.micro_bs]
 
