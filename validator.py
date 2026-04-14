@@ -97,6 +97,11 @@ class R2:
             ContentType="application/x-ndjson",
         )
 
+    def put_raw(self, key, body, content_type):
+        self.client.put_object(
+            Bucket=R2_BUCKET, Key=key, Body=body, ContentType=content_type,
+        )
+
     def range_get(self, key, start, end):
         return self.client.get_object(
             Bucket=R2_BUCKET, Key=key, Range=f"bytes={start}-{end}"
@@ -139,15 +144,35 @@ def ensure_tunnel(host, local_port):
     log.info("tunnel %s -> localhost:%d", host, local_port)
 
 
+def gpu_clean(host):
+    """Kill everything holding GPU memory on a remote host. Retries until free."""
+    for attempt in range(5):
+        pids = ssh(host,
+            "nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null",
+            timeout=10)
+        if not pids.strip():
+            log.info("gpu clean on %s (no GPU processes, attempt %d)", host, attempt + 1)
+            return
+        for pid in pids.strip().split("\n"):
+            pid = pid.strip()
+            if pid.isdigit():
+                ssh(host, f"kill -9 {pid} 2>/dev/null", timeout=5)
+        time.sleep(3)
+        used = ssh(host, "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits", timeout=10)
+        try:
+            used_mb = int(used.strip().split()[0])
+            if used_mb < 500:
+                log.info("gpu clean on %s (%dMB used, attempt %d)", host, used_mb, attempt + 1)
+                return
+        except (ValueError, IndexError):
+            pass
+    log.warning("gpu_clean: could not free GPU on %s after 5 attempts", host)
+
+
 def deploy_model(host, hf_repo, local_port):
     """Kill vLLM, download model, patch config, restart vLLM on remote host."""
     log.info("deploying %s on %s", hf_repo, host)
-    ssh(host, (
-        "pkill -9 -f 'vllm' 2>/dev/null; sleep 1; "
-        "for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null); "
-        "do kill -9 $pid 2>/dev/null; done; "
-        "pkill -9 -f 'multiprocessing' 2>/dev/null; sleep 3"
-    ), timeout=30)
+    gpu_clean(host)
 
     dl_cmd = (
         f"HF_TOKEN={HF_TOKEN} python3 -c \""
@@ -295,7 +320,7 @@ def get_shard_info(r2, shard_key):
 # ---------------------------------------------------------------------------
 
 async def run_sign_test(r2, king_url, challenger_url, shard_key, challenge_id,
-                        block_hash, hotkey):
+                        block_hash, hotkey, on_progress=None):
     N = EVAL_N
     K = int(binom.isf(EVAL_ALPHA, N, 0.5))
     log.info("sign test: N=%d K=%d alpha=%s", N, K, EVAL_ALPHA)
@@ -351,6 +376,9 @@ async def run_sign_test(r2, king_url, challenger_url, shard_key, challenge_id,
             for rec in batch_buf:
                 r2.append_jsonl(outcomes_key, rec)
             batch_buf = []
+            if on_progress:
+                total_done = i + 1
+                on_progress(total_done, actual_N, s, n, king_sum, chall_sum, n_ties)
 
         if n > 0:
             if s >= K:
@@ -457,6 +485,8 @@ class State:
         self.seen = set()
         self.stats = {"challenges": 0, "accepted": 0, "rejected": 0}
         self.counter = 0
+        self.current_eval = None
+        self.history = []
 
     def load(self):
         k = self.r2.get("king/current.json")
@@ -472,6 +502,9 @@ class State:
         if st:
             self.stats = st.get("stats", self.stats)
             self.counter = st.get("counter", 0)
+        h = self.r2.get("state/dashboard_history.json")
+        if h:
+            self.history = h.get("history", [])
         log.info("loaded state: king=%s queue=%d seen=%d",
                  self.king.get("king_hash", "none")[:16], len(self.queue), len(self.seen))
 
@@ -500,6 +533,7 @@ class State:
         self.queue.append(entry)
         self.stats["challenges"] += 1
         self.flush()
+        self.flush_dashboard()
         self.event({"event": "queued", **entry})
         return cid
 
@@ -511,8 +545,37 @@ class State:
             "crowned_block": block, "challenge_id": challenge_id,
         }
         self.flush()
+        self.flush_dashboard()
         self.event({"event": "king_changed", "hotkey": hotkey, "reign": reign,
                      "challenge_id": challenge_id})
+
+    def record_verdict(self, verdict, challenger_repo, hotkey):
+        self.history.insert(0, {
+            "challenge_id": verdict["challenge_id"],
+            "hotkey": hotkey,
+            "challenger_repo": challenger_repo,
+            "accepted": verdict["accepted"],
+            "verdict": verdict["verdict"],
+            "win_rate": verdict["win_rate"],
+            "avg_king_loss": verdict["avg_king_loss"],
+            "avg_challenger_loss": verdict["avg_challenger_loss"],
+            "wall_time_s": verdict["wall_time_s"],
+            "timestamp": verdict["timestamp"],
+        })
+        self.history = self.history[:50]
+        self.r2.put("state/dashboard_history.json", {"history": self.history})
+
+    def flush_dashboard(self):
+        self.r2.put("dashboard.json", {
+            "updated_at": _now(),
+            "king": self.king,
+            "stats": self.stats,
+            "current_eval": self.current_eval,
+            "queue": [{"challenge_id": e.get("challenge_id"), "hotkey": e.get("hotkey"),
+                        "hf_repo": e.get("hf_repo"), "queued_at": e.get("queued_at")}
+                       for e in self.queue],
+            "history": self.history,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +655,29 @@ async def process_challenge(state, r2, entry, subtensor, wallet):
         "N": EVAL_N, "alpha": EVAL_ALPHA, "shard": shard_key,
     })
 
-    verdict = await run_sign_test(r2, king_url, chall_url, shard_key, cid, block_hash, hotkey)
+    state.current_eval = {
+        "challenge_id": cid, "challenger_repo": hf_repo, "hotkey": hotkey,
+        "progress": 0, "total": EVAL_N, "s": 0, "n": 0,
+        "win_rate": 0, "avg_king_loss": 0, "avg_challenger_loss": 0,
+        "started_at": _now(),
+    }
+    state.flush_dashboard()
+
+    def _on_progress(done, total, s, n, king_sum, chall_sum, n_ties):
+        evaluated = n + n_ties
+        state.current_eval.update({
+            "progress": done, "total": total, "s": s, "n": n,
+            "win_rate": round(s / n, 6) if n else 0,
+            "avg_king_loss": round(king_sum / evaluated, 6) if evaluated else 0,
+            "avg_challenger_loss": round(chall_sum / evaluated, 6) if evaluated else 0,
+        })
+        state.flush_dashboard()
+
+    verdict = await run_sign_test(r2, king_url, chall_url, shard_key, cid,
+                                  block_hash, hotkey, on_progress=_on_progress)
+
+    state.current_eval = None
+    state.record_verdict(verdict, hf_repo, hotkey)
 
     accepted = verdict.get("accepted", False)
     if accepted:
@@ -600,6 +685,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet):
     else:
         state.stats["rejected"] += 1
 
+    state.flush_dashboard()
     state.event({"event": "eval_completed", "challenge_id": cid,
                  "hotkey": hotkey, "accepted": accepted, **verdict})
 
@@ -628,6 +714,14 @@ async def main():
     r2 = R2()
     state = State(r2)
     state.load()
+    state.flush_dashboard()
+
+    # Upload dashboard HTML to R2
+    html_path = os.path.join(os.path.dirname(__file__) or ".", "index.html")
+    if os.path.exists(html_path):
+        with open(html_path, "rb") as f:
+            r2.put_raw("index.html", f.read(), "text/html")
+        log.info("uploaded dashboard to R2")
 
     wallet = bt.wallet(name=WALLET_NAME, hotkey=WALLET_HOTKEY)
     subtensor = bt.subtensor(network=NETWORK)
@@ -644,31 +738,52 @@ async def main():
             pass
         state.set_king(wallet.hotkey.ss58_address, KING_REPO, king_hash, subtensor.block)
 
+    def cleanup():
+        log.info("cleaning up GPU on both boxes")
+        gpu_clean(SSH_KING)
+        gpu_clean(SSH_CHALLENGER)
+        for proc in _tunnels.values():
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        log.info("cleanup done")
+
+    import signal
+    def _on_signal(sig, frame):
+        log.info("received signal %d", sig)
+        cleanup()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
     deploy_model(SSH_KING, KING_REPO, KING_PORT)
 
     log.info("validator running | king=%s | poll=%ds", state.king.get("king_hash", "")[:16], POLL_INTERVAL)
 
-    while True:
-        try:
-            reveals = scan_reveals(subtensor, NETUID, state.seen)
-            if reveals:
-                state.flush()
-                for rev in reveals:
-                    cid = state.enqueue(rev)
-                    log.info("queued %s from %s", cid, rev["hotkey"][:16])
+    try:
+        while True:
+            try:
+                reveals = scan_reveals(subtensor, NETUID, state.seen)
+                if reveals:
+                    state.flush()
+                    for rev in reveals:
+                        cid = state.enqueue(rev)
+                        log.info("queued %s from %s", cid, rev["hotkey"][:16])
 
-            while state.queue:
-                entry = state.queue.pop(0)
-                state.flush()
-                await process_challenge(state, r2, entry, subtensor, wallet)
+                while state.queue:
+                    entry = state.queue.pop(0)
+                    state.flush()
+                    await process_challenge(state, r2, entry, subtensor, wallet)
 
-        except KeyboardInterrupt:
-            log.info("shutting down")
-            break
-        except Exception:
-            log.exception("tick error")
+            except KeyboardInterrupt:
+                break
+            except Exception:
+                log.exception("tick error")
 
-        await asyncio.sleep(POLL_INTERVAL)
+            await asyncio.sleep(POLL_INTERVAL)
+    finally:
+        cleanup()
 
 
 def main_sync():

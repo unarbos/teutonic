@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teutonic Validator — Ledger</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
+
+:root {
+    --bg-void: #000000;
+    --bg-paper: #FFFFFF;
+    --text-main: #000000;
+    --text-invert: #FFFFFF;
+    --border-style: 1px dashed #000000;
+    --border-solid: 1px solid #000000;
+    --font-mono: 'Space Mono', 'Courier New', Courier, monospace;
+    --space-xs: 4px;
+    --space-sm: 8px;
+    --space-md: 16px;
+    --space-lg: 32px;
+    --space-xl: 64px;
+    --sawtooth-size: 8px;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-void);
+    color: var(--text-main);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.4;
+    display: flex;
+    justify-content: center;
+    min-height: 100vh;
+    padding: var(--space-xl) var(--space-md);
+    -webkit-font-smoothing: none;
+}
+
+.ledger-container {
+    width: 100%;
+    max-width: 1200px;
+    position: relative;
+    background-color: var(--bg-paper);
+    box-shadow: 0 0 20px rgba(255, 255, 255, 0.05);
+    display: flex;
+    flex-direction: column;
+}
+
+.ledger-container::before,
+.ledger-container::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: var(--sawtooth-size);
+    z-index: 10;
+}
+
+.ledger-container::before {
+    top: calc(var(--sawtooth-size) * -1);
+    background: linear-gradient(-45deg, var(--bg-paper) 5px, transparent 0) 0 5px,
+                linear-gradient(45deg, var(--bg-paper) 5px, transparent 0) 0 5px;
+    background-position: left top;
+    background-repeat: repeat-x;
+    background-size: var(--sawtooth-size) var(--sawtooth-size);
+}
+
+.ledger-container::after {
+    bottom: calc(var(--sawtooth-size) * -1);
+    background: linear-gradient(-135deg, var(--bg-paper) 5px, transparent 0) 0 5px,
+                linear-gradient(135deg, var(--bg-paper) 5px, transparent 0) 0 5px;
+    background-position: left top;
+    background-repeat: repeat-x;
+    background-size: var(--sawtooth-size) var(--sawtooth-size);
+}
+
+.ledger-content {
+    padding: var(--space-lg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-lg);
+}
+
+.header {
+    text-align: center;
+    border-bottom: var(--border-style);
+    padding-bottom: var(--space-md);
+}
+
+.ascii-logo {
+    font-size: 10px;
+    line-height: 1.1;
+    font-weight: bold;
+    white-space: pre;
+    margin-bottom: var(--space-md);
+    display: inline-block;
+    text-align: left;
+}
+
+.meta-info {
+    display: flex;
+    justify-content: space-between;
+    text-transform: uppercase;
+    font-size: 11px;
+    margin-top: var(--space-sm);
+}
+
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: var(--space-lg);
+}
+
+.col-4 { grid-column: span 4; }
+.col-6 { grid-column: span 6; }
+.col-8 { grid-column: span 8; }
+.col-12 { grid-column: span 12; }
+
+@media (max-width: 900px) {
+    .col-4, .col-6, .col-8 { grid-column: span 12; }
+}
+
+.widget {
+    display: flex;
+    flex-direction: column;
+}
+
+.widget-header {
+    text-transform: uppercase;
+    font-weight: bold;
+    border-bottom: var(--border-style);
+    padding-bottom: var(--space-xs);
+    margin-bottom: var(--space-sm);
+    display: flex;
+    justify-content: space-between;
+}
+
+.kv-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+}
+
+.kv-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+}
+
+.kv-item:hover {
+    background-color: var(--text-main);
+    color: var(--text-invert);
+    cursor: crosshair;
+}
+
+.kv-key {
+    text-transform: uppercase;
+}
+
+.kv-val {
+    text-align: right;
+}
+
+.ascii-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+}
+
+.ascii-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+}
+
+.ascii-label {
+    width: 80px;
+    flex-shrink: 0;
+    text-transform: uppercase;
+}
+
+.ascii-bar {
+    flex-grow: 1;
+    letter-spacing: -1px;
+    white-space: pre;
+}
+
+.ascii-num {
+    width: 50px;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.progress-wrap {
+    border: var(--border-solid);
+    height: 12px;
+    margin: var(--space-sm) 0;
+    position: relative;
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    background: var(--text-main);
+    transition: width .5s ease;
+}
+
+.svg-container {
+    width: 100%;
+    height: 100px;
+    border: var(--border-solid);
+    padding: var(--space-sm);
+    position: relative;
+}
+
+.svg-container svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.svg-path {
+    fill: none;
+    stroke: var(--text-main);
+    stroke-width: 1.5;
+    stroke-linejoin: bevel;
+    stroke-linecap: square;
+}
+
+.matrix-grid {
+    display: grid;
+    grid-template-columns: repeat(16, 1fr);
+    gap: 2px;
+    margin-top: var(--space-sm);
+}
+
+.matrix-cell {
+    aspect-ratio: 1;
+    border: 1px solid var(--text-main);
+}
+
+.matrix-cell[data-val="0"] { background: transparent; }
+.matrix-cell[data-val="1"] { background: var(--text-main); opacity: 0.2; }
+.matrix-cell[data-val="2"] { background: var(--text-main); opacity: 0.5; }
+.matrix-cell[data-val="3"] { background: var(--text-main); opacity: 0.8; }
+.matrix-cell[data-val="4"] { background: var(--text-main); }
+
+.matrix-cell:hover {
+    border-color: red;
+    transform: scale(1.2);
+    z-index: 2;
+}
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.data-table th, .data-table td {
+    padding: var(--space-xs) 0;
+    text-align: left;
+}
+
+.data-table th {
+    text-transform: uppercase;
+    border-bottom: var(--border-style);
+    font-weight: normal;
+}
+
+.data-table tr {
+    border-bottom: 1px dotted rgba(0,0,0,0.2);
+}
+
+.data-table tr:hover {
+    background-color: var(--text-main);
+    color: var(--text-invert);
+    cursor: pointer;
+}
+
+.data-table td:last-child, .data-table th:last-child {
+    text-align: right;
+}
+
+.divider-full {
+    border-top: var(--border-style);
+    margin: var(--space-md) 0;
+}
+
+.txt-bold { font-weight: bold; }
+.txt-sm { font-size: 10px; }
+.uppercase { text-transform: uppercase; }
+
+.hidden { display: none; }
+
+.eval-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+}
+
+.eval-stat {
+    text-align: center;
+    padding: var(--space-xs) 0;
+}
+
+.eval-stat .num {
+    font-size: 16px;
+    font-weight: bold;
+}
+
+.eval-stat .lbl {
+    font-size: 10px;
+    text-transform: uppercase;
+    margin-top: 2px;
+}
+
+.verdict-mark {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 4px;
+    vertical-align: middle;
+    border: 1px solid var(--text-main);
+}
+
+.verdict-mark.win { background: var(--text-main); }
+.verdict-mark.loss { background: transparent; }
+
+.connecting-msg {
+    text-align: center;
+    padding: var(--space-lg);
+    text-transform: uppercase;
+    font-size: 11px;
+}
+</style>
+</head>
+<body>
+
+<div class="ledger-container">
+    <div class="ledger-content">
+
+        <header class="header">
+<div class="ascii-logo">
+████████╗███████╗██╗   ██╗████████╗ ██████╗ ███╗   ██╗██╗ ██████╗
+╚══██╔══╝██╔════╝██║   ██║╚══██╔══╝██╔═══██╗████╗  ██║██║██╔════╝
+   ██║   █████╗  ██║   ██║   ██║   ██║   ██║██╔██╗ ██║██║██║
+   ██║   ██╔══╝  ██║   ██║   ██║   ██║   ██║██║╚██╗██║██║██║
+   ██║   ███████╗╚██████╔╝   ██║   ╚██████╔╝██║ ╚████║██║╚██████╗
+   ╚═╝   ╚══════╝ ╚═════╝    ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝ ╚═════╝</div>
+            <div>VALIDATOR CONTROL DASHBOARD</div>
+            <div class="divider-full" style="margin: 8px 0;"></div>
+            <div class="meta-info" id="header-meta">
+                <span id="meta-session">SESSION: --</span>
+                <span id="meta-reign">REIGN: --</span>
+                <span id="meta-status">STATUS: CONNECTING</span>
+                <span id="meta-time">SYS_TIME: --</span>
+            </div>
+        </header>
+
+        <div class="dashboard-grid">
+
+            <!-- King Vitals -->
+            <div class="widget col-4">
+                <div class="widget-header">
+                    <span>King Vitals</span>
+                    <span>[CHK]</span>
+                </div>
+                <ul class="kv-list" id="king-vitals">
+                    <li class="kv-item"><span class="kv-key">HOTKEY</span><span class="kv-val">--</span></li>
+                    <li class="kv-item"><span class="kv-key">HF_REPO</span><span class="kv-val">--</span></li>
+                    <li class="kv-item"><span class="kv-key">HASH</span><span class="kv-val">--</span></li>
+                    <li class="kv-item"><span class="kv-key">REIGN_NO</span><span class="kv-val">--</span></li>
+                    <li class="kv-item"><span class="kv-key">CROWNED</span><span class="kv-val">--</span></li>
+                    <li class="kv-item"><span class="kv-key">CHALLENGES</span><span class="kv-val">--</span></li>
+                    <li class="kv-item"><span class="kv-key">ACCEPTED</span><span class="kv-val">--</span></li>
+                    <li class="kv-item"><span class="kv-key">REJECTED</span><span class="kv-val">--</span></li>
+                </ul>
+            </div>
+
+            <!-- Live Evaluation -->
+            <div class="widget col-8" id="eval-widget">
+                <div class="widget-header">
+                    <span>Live Evaluation</span>
+                    <span id="eval-label">%_PROGRESS</span>
+                </div>
+                <div id="eval-content">
+                    <div class="connecting-msg">NO ACTIVE EVALUATION</div>
+                </div>
+            </div>
+
+            <!-- Signal Topology — win rate history -->
+            <div class="widget col-12">
+                <div class="widget-header">
+                    <span>Signal Topology // Win Rate History</span>
+                    <span>W/L</span>
+                </div>
+                <div class="svg-container">
+                    <svg viewBox="0 0 1000 100" preserveAspectRatio="none" id="signal-svg">
+                        <line x1="0" y1="25" x2="1000" y2="25" stroke="#000" stroke-width="0.5" stroke-dasharray="2 4"></line>
+                        <line x1="0" y1="50" x2="1000" y2="50" stroke="#000" stroke-width="0.5" stroke-dasharray="2 4"></line>
+                        <line x1="0" y1="75" x2="1000" y2="75" stroke="#000" stroke-width="0.5" stroke-dasharray="2 4"></line>
+                        <polyline class="svg-path" id="signal-line" points="0,50 1000,50"></polyline>
+                    </svg>
+                </div>
+                <div class="meta-info" id="signal-meta">
+                    <span>SAMPLES: --</span>
+                    <span>AVG_WR: --</span>
+                    <span>TREND: --</span>
+                </div>
+            </div>
+
+            <!-- Eval Density Matrix -->
+            <div class="widget col-6">
+                <div class="widget-header">
+                    <span>Eval Density Matrix</span>
+                    <span>WIN/LOSS</span>
+                </div>
+                <div class="matrix-grid" id="density-matrix"></div>
+            </div>
+
+            <!-- Duel History -->
+            <div class="widget col-6">
+                <div class="widget-header">
+                    <span>Duel Event Log</span>
+                    <span id="hist-count">LAST_0</span>
+                </div>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Challenger</th>
+                            <th>Verdict</th>
+                            <th>Win Rate</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="hist-body">
+                        <tr><td colspan="5" style="text-align:center;padding:20px">No duels yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+        </div>
+
+        <div class="divider-full"></div>
+        <div style="text-align: center; font-size: 11px;">
+            END OF LEDGER // <span id="footer-updated">AWAITING DATA</span><br>
+            <span style="font-style: italic;" id="footer-queue">SYSTEM CONNECTING</span>
+        </div>
+
+    </div>
+</div>
+
+<script>
+var DATA_URL = "dashboard.json";
+var POLL_MS = 5000;
+
+function short(s, n) { return s ? s.slice(0, n || 12) + "\u2026" : "--"; }
+
+function ago(iso) {
+    if (!iso) return "--";
+    var ms = Date.now() - new Date(iso).getTime();
+    var m = Math.floor(ms / 60000), h = Math.floor(m / 60), d = Math.floor(h / 24);
+    if (d > 0) return d + "d " + (h % 24) + "h ago";
+    if (h > 0) return h + "h " + (m % 60) + "m ago";
+    return m + "m ago";
+}
+
+function utcNow() {
+    var d = new Date();
+    return d.getUTCHours().toString().padStart(2, "0") + ":" +
+           d.getUTCMinutes().toString().padStart(2, "0") + ":" +
+           d.getUTCSeconds().toString().padStart(2, "0") + " UTC";
+}
+
+function makeBar(pct, width) {
+    width = width || 40;
+    var filled = Math.round(pct / 100 * width);
+    var empty = width - filled;
+    return "\u2588".repeat(filled) + "\u2591".repeat(empty);
+}
+
+function kvRow(key, val) {
+    return '<li class="kv-item"><span class="kv-key">' + key + '</span><span class="kv-val">' + val + '</span></li>';
+}
+
+function renderMatrix(history) {
+    var el = document.getElementById("density-matrix");
+    var cells = [];
+    var hist = history || [];
+
+    // 6 rows x 16 cols = 96 cells; use history win_rates to seed, rest is pseudo-random
+    for (var i = 0; i < 96; i++) {
+        var v;
+        if (i < hist.length) {
+            var wr = hist[i].win_rate || 0;
+            if (wr >= 0.55) v = 4;
+            else if (wr >= 0.50) v = 3;
+            else if (wr >= 0.45) v = 2;
+            else if (wr >= 0.40) v = 1;
+            else v = 0;
+        } else {
+            v = Math.floor(Math.random() * 5);
+        }
+        cells.push('<div class="matrix-cell" data-val="' + v + '"></div>');
+    }
+    el.innerHTML = cells.join("");
+}
+
+function renderSignal(history) {
+    var svg = document.getElementById("signal-svg");
+    var line = document.getElementById("signal-line");
+    var meta = document.getElementById("signal-meta");
+    var hist = (history || []).slice().reverse();
+
+    if (hist.length < 2) {
+        line.setAttribute("points", "0,50 1000,50");
+        meta.innerHTML = "<span>SAMPLES: 0</span><span>AVG_WR: --</span><span>TREND: FLAT</span>";
+        return;
+    }
+
+    var pts = [];
+    var sum = 0;
+    for (var i = 0; i < hist.length; i++) {
+        var wr = hist[i].win_rate || 0.5;
+        sum += wr;
+        var x = Math.round((i / (hist.length - 1)) * 1000);
+        var y = Math.round(100 - wr * 100);
+        pts.push(x + "," + y);
+    }
+    line.setAttribute("points", pts.join(" "));
+
+    var avg = (sum / hist.length * 100).toFixed(1);
+    var last = hist[hist.length - 1].win_rate || 0.5;
+    var first = hist[0].win_rate || 0.5;
+    var trend = last > first ? "RISING" : last < first ? "FALLING" : "FLAT";
+    meta.innerHTML = "<span>SAMPLES: " + hist.length + "</span><span>AVG_WR: " + avg + "%</span><span>TREND: " + trend + "</span>";
+}
+
+function render(d) {
+    // Header meta
+    var k = d.king || {};
+    document.getElementById("meta-session").textContent = "SESSION: " + (k.challenge_id || "IDLE");
+    document.getElementById("meta-reign").textContent = "REIGN: #" + (k.reign_number || 0);
+    document.getElementById("meta-status").textContent = d.current_eval ? "STATUS: EVALUATING" : "STATUS: ONLINE";
+    document.getElementById("meta-time").textContent = "SYS_TIME: " + utcNow();
+
+    // King Vitals
+    var st = d.stats || {};
+    var vitals = document.getElementById("king-vitals");
+    vitals.innerHTML =
+        kvRow("HOTKEY", short(k.hotkey, 16)) +
+        kvRow("HF_REPO", k.hf_repo || "--") +
+        kvRow("HASH", short(k.king_hash, 16)) +
+        kvRow("REIGN_NO", "#" + (k.reign_number || 0)) +
+        kvRow("CROWNED", ago(k.crowned_at)) +
+        kvRow("CHALLENGES", st.challenges || 0) +
+        kvRow("ACCEPTED", st.accepted || 0) +
+        kvRow("REJECTED", st.rejected || 0);
+
+    // Live Evaluation
+    var ev = d.current_eval;
+    var evalContent = document.getElementById("eval-content");
+    var evalLabel = document.getElementById("eval-label");
+
+    if (ev) {
+        var pct = ev.total > 0 ? Math.round((ev.progress / ev.total) * 100) : 0;
+        var wrPct = ev.n > 0 ? (ev.win_rate * 100).toFixed(1) : "--";
+        evalLabel.textContent = pct + "%";
+
+        var html = '<div class="ascii-chart" style="margin-top:8px;">';
+        html += '<div class="ascii-row"><span class="ascii-label">PROGRESS</span><span class="ascii-bar">' + makeBar(pct) + '</span><span class="ascii-num">' + pct + '%</span></div>';
+
+        var wrBar = ev.n > 0 ? Math.round(ev.win_rate * 100) : 0;
+        html += '<div class="ascii-row"><span class="ascii-label">WIN_RATE</span><span class="ascii-bar">' + makeBar(wrBar) + '</span><span class="ascii-num">' + wrPct + '%</span></div>';
+
+        var klNorm = ev.avg_king_loss ? Math.min(100, Math.round(ev.avg_king_loss / 5 * 100)) : 0;
+        html += '<div class="ascii-row"><span class="ascii-label">KING_LOSS</span><span class="ascii-bar">' + makeBar(klNorm) + '</span><span class="ascii-num">' + (ev.avg_king_loss ? ev.avg_king_loss.toFixed(3) : "--") + '</span></div>';
+
+        var clNorm = ev.avg_challenger_loss ? Math.min(100, Math.round(ev.avg_challenger_loss / 5 * 100)) : 0;
+        html += '<div class="ascii-row"><span class="ascii-label">CHLL_LOSS</span><span class="ascii-bar">' + makeBar(clNorm) + '</span><span class="ascii-num">' + (ev.avg_challenger_loss ? ev.avg_challenger_loss.toFixed(3) : "--") + '</span></div>';
+        html += '</div>';
+
+        html += '<div class="progress-wrap"><div class="progress-bar" style="width:' + pct + '%"></div></div>';
+
+        html += '<div class="divider-full" style="margin-top:auto;"></div>';
+        html += '<div class="meta-info">';
+        html += '<span>CHALLENGER: ' + short(ev.hotkey, 12) + '</span>';
+        html += '<span>REPO: ' + (ev.challenger_repo || "--") + '</span>';
+        html += '<span>' + ev.challenge_id + '</span>';
+        html += '</div>';
+
+        evalContent.innerHTML = html;
+    } else {
+        evalLabel.textContent = "IDLE";
+        evalContent.innerHTML = '<div class="connecting-msg">NO ACTIVE EVALUATION</div>';
+    }
+
+    // Signal topology
+    renderSignal(d.history);
+
+    // Matrix
+    renderMatrix(d.history);
+
+    // Queue info
+    var q = d.queue || [];
+    document.getElementById("footer-queue").textContent =
+        q.length > 0 ? q.length + " CHALLENGER(S) IN QUEUE" : "QUEUE EMPTY // SYSTEM SECURE";
+
+    // Duel history
+    var hb = document.getElementById("hist-body");
+    var histCount = document.getElementById("hist-count");
+    var hist = d.history || [];
+    histCount.textContent = "LAST_" + hist.length;
+
+    if (hist.length === 0) {
+        hb.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px">No duels yet</td></tr>';
+    } else {
+        hb.innerHTML = hist.map(function(h) {
+            var won = h.accepted;
+            return '<tr>' +
+                '<td>' + h.challenge_id + '</td>' +
+                '<td>' + short(h.hotkey, 10) + '</td>' +
+                '<td><span class="verdict-mark ' + (won ? "win" : "loss") + '"></span>' + h.verdict.toUpperCase() + '</td>' +
+                '<td>' + ((h.win_rate || 0) * 100).toFixed(1) + '%</td>' +
+                '<td>' + (h.wall_time_s || 0).toFixed(0) + 's</td>' +
+                '</tr>';
+        }).join("");
+    }
+
+    // Footer timestamp
+    document.getElementById("footer-updated").textContent =
+        "VERIFIED // UPDATED " + ago(d.updated_at);
+}
+
+async function poll() {
+    try {
+        var r = await fetch(DATA_URL + "?t=" + Date.now());
+        if (r.ok) render(await r.json());
+    } catch (e) {
+        document.getElementById("meta-status").textContent = "STATUS: CONN_ERROR";
+    }
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
