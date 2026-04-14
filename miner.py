@@ -44,6 +44,7 @@ def sha256_dir(path):
     return h.hexdigest()
 
 
+
 def main():
     parser = argparse.ArgumentParser(description="Teutonic miner")
     parser.add_argument("--hotkey", default="h0", help="Wallet hotkey name")

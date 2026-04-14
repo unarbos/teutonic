@@ -1,0 +1,3767 @@
+{
+  "version": "v1",
+  "created": "2026-04-14T12:54:27Z",
+  "tokenizer": "google/gemma-3-1b",
+  "dtype": "uint32",
+  "total_tokens": 335942187008,
+  "total_shards": 626,
+  "shard_prefix": "dataset/v1/shards/",
+  "shards": [
+    {
+      "key": "dataset/v1/shards/shard_000000.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000001.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000002.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000003.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000004.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000005.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000006.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000007.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000008.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000009.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000010.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000011.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000012.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000013.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000014.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000015.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000016.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000017.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000018.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000019.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000020.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000021.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000022.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000023.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000024.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000025.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000026.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000027.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000028.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000029.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000030.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000031.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000032.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000033.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000034.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000035.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000036.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000037.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000038.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000039.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000040.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000041.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000042.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000043.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000044.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000045.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000046.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000047.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000048.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000049.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000050.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000051.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000052.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000053.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000054.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000055.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000056.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000057.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000058.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000059.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000060.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000061.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000062.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000063.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000064.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000065.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000066.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000067.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000068.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000069.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000070.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000071.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000072.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000073.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000074.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000075.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000076.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000077.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000078.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000079.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000080.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000081.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000082.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000083.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000084.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000085.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000086.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000087.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000088.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000089.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000090.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000091.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000092.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000093.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000094.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000095.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000096.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000097.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000098.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000099.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000100.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000101.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000102.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000103.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000104.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000105.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000106.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000107.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000108.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000109.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000110.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000111.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000112.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000113.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000114.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000115.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000116.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000117.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000118.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000119.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000120.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000121.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000122.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000123.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000124.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000125.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000126.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000127.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000128.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000129.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000130.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000131.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000132.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000133.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000134.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000135.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000136.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000137.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000138.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000139.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000140.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000141.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000142.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000143.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000144.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000145.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000146.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000147.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000148.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000149.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000150.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000151.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000152.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000153.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000154.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000155.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000156.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000157.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000158.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000159.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000160.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000161.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000162.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000163.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000164.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000165.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000166.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000167.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000168.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000169.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000170.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000171.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000172.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000173.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000174.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000175.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000176.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000177.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000178.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000179.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000180.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000181.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000182.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000183.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000184.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000185.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000186.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000187.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000188.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000189.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000190.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000191.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000192.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000193.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000194.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000195.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000196.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000197.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000198.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000199.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000200.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000201.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000202.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000203.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000204.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000205.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000206.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000207.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000208.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000209.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000210.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000211.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000212.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000213.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000214.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000215.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000216.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000217.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000218.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000219.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000220.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000221.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000222.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000223.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000224.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000225.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000226.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000227.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000228.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000229.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000230.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000231.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000232.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000233.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000234.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000235.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000236.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000237.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000238.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000239.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000240.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000241.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000242.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000243.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000244.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000245.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000246.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000247.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000248.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000249.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000250.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000251.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000252.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000253.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000254.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000255.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000256.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000257.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000258.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000259.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000260.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000261.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000262.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000263.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000264.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000265.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000266.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000267.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000268.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000269.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000270.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000271.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000272.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000273.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000274.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000275.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000276.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000277.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000278.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000279.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000280.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000281.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000282.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000283.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000284.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000285.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000286.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000287.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000288.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000289.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000290.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000291.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000292.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000293.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000294.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000295.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000296.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000297.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000298.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000299.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000300.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000301.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000302.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000303.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": ""
+    },
+    {
+      "key": "dataset/v1/shards/shard_000304.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "136ff902df1437cd2efb51431b4c0112bdad31242fa3a9f789be0a627481e8f2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000305.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b62d86d66ca062c08a0c709c50b461b5e32b5c0f87b2e6b634008bfce823a98d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000306.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "95c4dc01dfd0ba6827a92ae01fb9675f4e72813a21ff51a439b7c0423404b9e0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000307.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "331320897b537f6ce3e7ce1e171681785aeda9532cf7a6a39b82243032969646"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000308.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "cb26c8f874c781dc1931316794307834e6f2808ca11b43c792d0e7d191bf08fb"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000309.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "6665ff9350e1cf869185b15f8c7aecb854522f37409ba972f5ed9f7411e1215d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000310.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b7308d3bd1dd29f556159abe3cec554811c9be749826196cea383680ac0615ea"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000311.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b4bdd22a39d06abb1da2d10931ad5d3a7a17f47ce4ca8be93cafd149170b3849"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000312.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4d035badaa40c7c952b831cde0b500e5b577be13520596c80820a4874816034e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000313.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "957f033af9b28f970bd2eccc1351991e131ed9785fd12c5e6302ea975c483352"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000314.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4d46a31d42a5aab725b6088999ac143a7394f9f51838f6c3444795bbd7a80413"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000315.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "c557d8bc0eb346baba55da4086affd8195dbf54afdd4b4787765d75fc330dd9a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000316.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "48557f40714fa1272b2fbb7e62354d87ed4c769a375a317c2645c27e72a3c6a2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000317.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "fc846d17211931d3dc96bf8226ea80516c7b628d5c4061e668e83beb5dcc89e9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000318.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "122fb78dcee61c7290e080daa78409581db42976c8d782253e8ce35f8c17adbe"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000319.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "126efa9d4cce9c5d4b687ec809fd6a12093e4fc3e81f7cbb88270e5c6cc5b7ce"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000320.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "715f19e64274fc3b52a57bd9ebdcb54f5fffab421d7fbe2441fde4d5b6b99242"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000321.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4415457f00ef65bd8a005ee3383a5c3780164999a3572ffe51f45b7c4b12c4a8"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000322.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "109f1eda50cf0b67ea1831f6cd6fa4501510fe004e23cc437d8d8bce7954639d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000323.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "796ada5e782b978dc6a9af431460b07623c81560d374136a352765c0823dbc9c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000324.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "6c7bd553cf7918a83d81f75211e2334c5c137cc4451875abfe36ebb7827a7fb1"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000325.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4e7011412705c283aec65e17df07c9750c8e711cccd8f7aa66790bc59b2bc970"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000326.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d5c069ca4cdd1eb16895f1d436fbf08d487301eee23b226c0b818f452ddfc651"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000327.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "5e9bfe19836d2a8f336a2c1874d15b97c3f3b627f2bc64c2ab6c710977408f92"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000328.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "2dda5c59871cbc3f6d6404f3acc97dbb55843bcbfde0ab4ab8a3510d48272988"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000329.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9b129e27c9dc739e909cfe66d7ee72f9ea22807c0a3e9946eb7512917ccbd2b0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000330.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "80ae885bef62aec3af1ddc473e1bb1992fc0dcd8867360f0a3b7e94e8fafecf9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000331.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "720b3a75aeb1987e98ebef65f48eb60cf2a226c04225539464b6109365b898d4"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000332.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "2c56bcf93d7d2630348b121b701c204619dbc763f06a12f42d9e9eaf8c2b24fa"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000333.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9c1a754b120ae754037108f801e8e163eaf17f7c05d34627358db2314848c7a2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000334.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9749f3f36775607c5872bfe29a6d5b8b08a94f2a0aac35f16cd0e76d915bf389"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000335.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d68819617ac574b178986ff151f877f36226d5693f9d491cc743e3bac342738a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000336.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "86dae9331f28e77ed94d5c1e39a29597f8d0ea21589af93572e68316f1578bc2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000337.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7a198bbdce95a996e19f401a6212d62981df32babb62d4dd12b63162c32dff60"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000338.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9de0af338c50f83771aae1ac1e877554de97d560908c311f9cc35e6540b69cd2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000339.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8b0fce6fff97a9aec4dbdffae0c0dda9be72616508b080af30baa047acdf1bc4"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000340.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "753149fbcc137263b7721afc7a6c147ecde4bdea1fa5e170e8f2097f27fceede"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000341.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "0b8e7b6dc8e26c54ffdf467518c6a7e9ea2ead611c4642d12df1d87e82e0bf45"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000342.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3e45bc3c771b1123a78fabbb222f3b22eaf302f498483390ea4a49c799020ac1"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000343.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "edbe6c7fd064be825d965436500a1930cfb49928a9cfa245d31ef243016bbd22"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000344.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "99eb403eb3bea5c72d0527d8762a0afb98cf4bea592a86cbe03d13d6d38191b0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000345.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7f535dcd200239123a46ff588f78e809311fbe8c6c21b32e952ba9226999d79b"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000346.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "794bbec53c6705e07ada445e9dd2e7cac71c0a077887ebffc288a395ffa72212"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000347.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "192b5439f62411f2a4f4966f04119c2b30660ca249d60324ba837cdc06ea1fe2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000348.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ed8e1b83c73c0dd539c12f8b62c26bce28c0cb7acc6aa61eba14cc73390300c7"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000349.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "30547cf999aa0cc23cac7c381a7fb8061273652b95dbcd173b40b16e8f97aa3d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000350.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "844f132a9aa71fc5d7c7809c1c57ca69d71cc820a24364535169ec3df52726f6"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000351.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "02aa3635df859c9155e073e42dc3d63ca88777b645d7d2d2396e71d8f672d186"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000352.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "985f3aa51613d112b97e18b899baf474ff52a75b0a23c14a6957790288f097a1"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000353.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d1d9d8ae2acb5c619093d96475f3d0a2a2abc360a4788e8e8d4f93c2d711b145"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000354.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "71b22a781023bce26363a6c675c889eb11ca6fba6c002a70d4417a9c2cf22211"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000355.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "cee1008ca71032f50b64f2792e857397ae4fd27bd6571acce5ddb497e6cebeb1"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000356.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "2baa33b9bfd4385d9b4fefed7ca6cd207e9c6c43b91237657d2906da3fd69973"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000357.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "352760572dd49dd0df1a838f5f2755746e278a07f882899045275ddb825c3251"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000358.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "86decbf51d80a24e64170ba881c91dbb5ee12a3cacde91c51414e57cf1fbbc73"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000359.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b8ae4c08b94b9d6a2fe39c0c73e5b52625b2dad72e3f1d9b39316a12634361d1"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000360.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e901138344cb5da0a5b15eafc84313888b53cfe816380f1bfbad351904142111"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000361.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "c727d0e6117f39f9978f445d610e2cae9d37a11d9ab873c354e07e9a8ac6b955"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000362.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "17bfedf525f263af48c15864d4a224d8afcfa25da9db3b55d40b20b6920abd9c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000363.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3e8ad29bfa7ca12d1c31345bd1c5c3f5ee75c0115e6e79a16fefb05e40659e1f"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000364.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4baa12cde8f4851b4927ff5e8960818e2b26e7d2ff87f6e1436db6281e56a0ee"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000365.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "6ecb826d7877d83dea06d6a077020e0fd1fb6490258e79def26383915ac0e302"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000366.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "1813c179e255204c9b31e9cd9f90e81d6ada1f7dd74263fcc8a8365abd15c3cd"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000367.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8a9a177b13c561e4b4ba8ed4da097779b5653b2a9cb13d8e947bfd0537da32a6"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000368.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8a0b557efb7c98002ecb196b0e08ab0b816dc210606129db3a91166a6d786e7c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000369.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "cc91b3bdb4c08fbb732ca7691ced360d3620f3e670b568f51d0094efd5986a3a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000370.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "85c39ee3b8d8683f654559a428b4a69beb0b1657fa48310351376396ba88a3e0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000371.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3613493cadb7bfddd8c01579f4724248178ce15bb6393feb304bcf05d9052b68"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000372.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "66a15bd870a3385e9eb3244cb43f92d16492738393ea8da49a4e35ef95b17c70"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000373.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "18ba8707c64c5ef7255340fd9d9812a1f7ee773c7f9d59a3ee8333faad2722eb"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000374.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "fd7c92542e395d0688efdedc23ed337b593cbf3136d95d081d8152ad5ebaa5b3"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000375.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "c78868c9673ccc2e627d03b5d247937b94e4e508ef8ad6a1da07501356ea9bae"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000376.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8ba7bba459463e7b1ad4639eac8b3164f9ece642ab32fcaa767a01c100ba49a8"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000377.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "468b6790e4e2298b3f09aaf6daecc06b3c706b7a78c19dcc1750edd8f3c7c319"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000378.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "87231ba25f866c797bf5ddb158d406d1c18fcfb2962c1082bdcb0513dfad300a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000379.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "993be36b624209ce9dcf6496924c95e25aabf5d396597ebbf2c9b8b8df38173e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000380.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "813bcc6858f4b3dd224e55176c05fd4da17ae44644e1a9cb2f7d5ecf7b1daa55"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000381.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e6db762ff6cd941d1ed206b3527d0c484d82434c4195f43052dd95ad8790b5f0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000382.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "81b26fa6fdfecc21323248517181d92fd11da97ffb21878d249b5aed5b57eb27"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000383.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "dbfabd5f9dd95aefa538a5de6929c9c4ef6d6fb7c3cca85b62473a8abd772c46"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000384.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "714cda079f5ac8203d31bde1afe4d12788abbeffc92670844c2f3400c4193f37"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000385.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d43ffc28b27ce7e7d06ca4fa4b0c10d9f56ce37bf6f598bc068e415a56b82172"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000386.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9a721e694e2ad56aa08a3b60b7d80c10293bcd6e3bb51b23995f213da7f5f761"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000387.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ee96adb27bcf060d9e09045e254a9f7185b9d7aa07057e880de0e1aedab7c58c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000388.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "5233b97da6699283eb9e92cc1fa234e6bc1d3ea0b0925a1441fc336d058c734a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000389.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "07b7b5d4b823c529298d0b6e7b03c2eedda7b0990f125ddd9fe81a77d51c1bc2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000390.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "25990b021506a6297ced7f6da942f1f613e48af86955f6ec5416c12bf7eed6d8"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000391.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "a5b76af296a6a385a1d82046fe9109c1e6b4ec6fe0f356a7916b4ff5a2d0db0d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000392.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ac090a11a83f5ba17025dac76f031166fb23ac890ba2b957a27921d1378e99be"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000393.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "a25a7df95e4f2c56b64ecb6ca13fa384a42d488bf18697478a6c5900caa0386e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000394.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "5527dd7de286db3267b67a7ff398505ebe09b5981305f108f2107ea3a3ab7b5d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000395.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "611933645362a5527cef9dee1cc9e034bbb1ba4c455fffac068271ed6775a800"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000396.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "0113ad2c3d5486af4a87c76e63dcd506537aaeb6cea713712bbcd4c814df38ba"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000397.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "1349f6e9bf95a873b36d0bf638972be1955922ac8c45633a7fd32f2d088d8b5c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000398.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "be1050abcdac0ce453665874ad510c9f849554d2ab23dc2bf1c0061e64c7567c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000399.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7c63ac4312088d2f57370ba6be20c55cc941190205b283df45c27ab1042a06d1"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000400.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9d036a096a8e0c04f873d6d42c995a83cbb3c17dd4c497f7c5363ceda71c2d5f"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000401.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "38480b923a2b5d091800dcf4449089360791a56f51777d1b5365a5b2ff29555a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000402.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "508488950b26994d97704755db6cbc87a461e10e0ef269e61dc03622a2200992"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000403.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "f492cea0923e61336c8d0779bbe92e5443f69fb00caad33fba3104ec1b410270"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000404.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d6fa260465e3370525657f5bdc62765fff587cdfd9a87ccc6a9d8d0bc65c0c5d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000405.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "416d2ca29ebf67ddbeb72749ddd06c720732aa41746c8db8e62aa8ab1c61eafa"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000406.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b9cd151e951e51ec3470121c56d91278cce1501e9b898ef92115451ef0362f6c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000407.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "5c173b920326f2970ded7dbe7c6159d3c3adf09128625b6516ad2443346c6cef"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000408.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e0a755e42952ff517757e8702b7ca0e571d2d93a2c5c5eadc43e62627ca9d372"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000409.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9fa6617fb6a918fc36c2ea0dfd574f49acff8c4fd5deeb56c8c58dfdfc351b48"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000410.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "73809b0c4fdc975101759c31639c8bdfce3610f9535db64a3d5293dbb32f72e2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000411.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "020062553a0e7c22e1d2db7acd51660c82977559dae192e19ad76b0b0705944a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000412.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "acccae84baac75d3b5c974e9a062b4bf23d17587af0394497b565ae4aa4e3a0e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000413.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "0df294468a33fd38a645fb8071208f1e6d6317198f2191028e417a5a50e9afb8"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000414.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7f5cc704d9b9c8d41f5917fda332845eff9bb97396a41b10d4c611e12d9ef969"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000415.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b97e53c4b1a03fc7408b6df510367a1b3b9e9389b7f647fd67f78f15e796c2ef"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000416.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "02a658b6350e23f63f3c38a8ee57ec2aa71362b17ebf4f7a169f0f135cccbb49"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000417.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "44c6dcf2ff998f8c978498f45ad95ac3b0953d736e0d38f81c9fe41e4277c07b"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000418.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "12cc3243ed0fddffd9e299290232f46f68f549dca12030a8f51e5f723732bfa7"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000419.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "c4e4e680e9ff2a632a188260b7556f7493b21df71c1c836927b34940cce96fb4"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000420.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "c8bd9fc71d20d0485b4e7c7efed00d442271021484292aa28eaee07b1870a695"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000421.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e2a2069e38c54807447065e84bbe1390483dbdfea71280fee38963fc65070e52"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000422.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "fb1098ea5fe4c73afe5bd9b5b9726ec0fc6bf64b16827e8d65e19f88fb2a64d5"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000423.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "76dd0c24d842df17c78c73eccdf7c44efe40caead9932933282f8478b8653c5d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000424.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "97293bfe7e5111d5402fb2755001c214b4be79eb7b3d35478b242a03875d8156"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000425.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "6cdb4ee0898735b290c56c31a92eef77573d553a5a45482c8adaf4077a9c844c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000426.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8a01049daa677d10af0bff4c823df29bd7c293ff10335624d7049664a4af19db"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000427.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8f2ad4dc97eb70f5e07e42796699af2cb02ead35f74997ae59d3548a895339f3"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000428.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7b3c334d4005a9dfba2848dc8009bc783bd690146e20d6d7e890d9ecacb2dc38"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000429.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b252ae4b915d113c302d482b4a26f2a60f03d0aa79df14cec2ab73d6ee7099e6"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000430.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "637b25b0945a7978e0d63da3cecc50002df0a2e1c40f7073f83b7316e25706ee"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000431.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "16f505a9c4d6ade5799e15dc57bae4233402d161440a52bf472be587f4ea6e7b"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000432.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9b7f5345e93e5d90b59968f66310f91f629d436bde8fb3edee3bd0a2fbe1a3c7"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000433.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d66115c157e7f375df745722d57fab757fa806d788ae244634a1ea57767ad389"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000434.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "f62b18273afb83e5b4fa9cb45048a0a41fa2352b8f3414be854daceb2d19d959"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000435.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "15b4a0258eb2c6e4539709e808a6cd696e8241031b06bbfdea8d72f4f8405def"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000436.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "82700bab6fe454d8ed820144e5f503018d17da6bba77682effdefa120880df14"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000437.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9d9c6f912b2dc257bcebcc8a5bf27d38743cd5e814bb8b9d81b53e98f4a176dc"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000438.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3ff12eff60c8ac72a1d6b2a8fa5bdf8d17fc1589921a7db1a3160e3975ca51a2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000439.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9221d2d412512fb9b7e3068c9258167dd4e10615d2723304c0064c97bb50e8cd"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000440.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "c7bfcd2f716a7e7b7057f2b701ba0b56ff5d3092c5f6267b4e9dd8573a4e0439"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000441.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ab7ee259054a8ededd2c3748485994b0ec023b754a25dbe9c4192e43a203baf0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000442.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ea24de2ce3e838b1912d789d98117037d3bd33bbce5815e424ff40ab416cab30"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000443.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ae7dd2bccac01355e521d228f714926a7fef50e0c2b6d2f940fc1737226cda10"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000444.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "512253d0b584e30613d6726c04fa8dc79d35c06ef486934cd0e4e5bf614b26a0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000445.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7851674ccc9e4b73d79bc8b8238244727d44b8731e2a0e41452d344039c2ac86"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000446.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e6ae179530d1530e589cc30bded158c6d49ff7e4a8cdd6e9ae13728ae66f7c92"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000447.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "673adba7f667613128cf88b22c8461c3b343386c6d05e617fb73408a00c54bdf"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000448.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "5ff39351d90c02e6276db99727550ee00fa65fe155cb33c1bded4646e63a769f"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000449.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d942d9ae8e6e9d194e43120d420946d010b43aab67db20c61b4c0abfadd4c11d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000450.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "22b78ee76a38a039ac46c08ea1c935a84c8c23bdaf433b91300aa5592fff1adc"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000451.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3b18e748d4d3ccce41c237703713a44a74cf70d2d43f8d6123ccab50f7a714bf"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000452.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "71e917ad8447a321a6a7e65ed3f35f2782ed98b6a409bc47b6b22862549de6a7"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000453.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7c09d707c79bf59d63af93477055b803070f00d2aa4a48c9a0e7ccaf83fd2b21"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000454.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "1afbc903b58830e9c11605ec7103d3973bbb271248c5d6e423947f2d9fce027a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000455.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "5bbaab1f4ecf31c092cdb845187b0747dd102e30c82bfa2100bf23dcc689dc33"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000456.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "1843af4a39d1b3e5b6f41ca6a6108811e694692e9c34cc53b9a0998f211ac2fb"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000457.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "35801b8621351c478f3e48c77f6eeff16b5b684093f98cec996e3cdf6542e60d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000458.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "5dc95c13c64cac723071a7109b40af8447570f335a996ff4da52d921cfff63bb"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000459.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "373735a8c861823b2242896b15c72d0dd26f28de9342fb2204d9eb691bd937b9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000460.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9f035d20d8c4967fef7ecc93154c1dbd6fe3766553be7fec414644bea81c30bf"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000461.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "159a0dfb41b939f508028600b9c73f4d4ab613799959eee7a2fe7cb337351823"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000462.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8c32a8fcb18db063e6c357e38c598b9a82c17569d9dfb1258153c373445bb62d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000463.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "773d4c9d4c5089223a1bf6e5d89a550698ecb2a3dcc3fdbf9405574d9f4cab27"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000464.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "93f1c8a7f74268826d5cf2fc3a66aba179926672ce0fdc5218834e4def0eacf0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000465.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b76cbd436d84238f0ff0262471f9089b3662b97003da37fc325dbaf454fcbda5"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000466.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "04a25fc1d1f696eaed0105f8f567b45abc40c29090e0a8d2f5428cd296c5133b"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000467.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "a9e3b46d2a25c20c64613c924b9a906d4a174bbac4584cb25af2f1be2cc3fca4"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000468.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "6146f058f1db10ff72bd6bf9e74589784d73be26b2e2e714112334a27855a234"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000469.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d78d341da83f43ccf9903d6f0d0c99cfbc70dd4284c65d371053a51561220ccd"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000470.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9172ce40e93486fd68554d092681d8955e960def1f3f7d038187c0b83e8a0b9f"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000471.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "0281c558177637d762134b6ac8a00d148fcb6f93b2ebc10be9b998847f106fbc"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000472.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "229d2037f52a004188bced6f9fa1c1882dc306062d44e3b00e79329d7c391731"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000473.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "57c3a322ce04fc2b3284c20a55d6fc9a258a686db0d029c095d348ea0fbb5b29"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000474.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "48b5bf606eaeae545caa43fc96f08ec0e3ee70d77b196c3da9a2fe28766d7c4a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000475.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7ec777db0068c8f7d367929987ff35e91cd835318ebc579092dd17fac3781a49"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000476.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "76b365ec119f4598c735c15ad1adadbafa86c516d9d49ad74196ba2b3e1caa69"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000477.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "0656588811f12eadca6024073d182212210f1e90948ed0701380d61f4b133a05"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000478.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "92c427081ae31807eabcfb4646314f57939aa8a2b876c11a469674f041bd65c2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000479.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b76144bc72e6de19f60fd04571af2099d0911b9c4758ddf9b272a4a1cd1e9ca8"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000480.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9d486900c7f8c44ecf85f9334c122e53cb70eaf473ca6736788b09c6acdda12a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000481.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "644028d3d37e0dbafb31d285bf8da1402020a7d70f78bacba57f76efd7b22b14"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000482.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "1800f3a6f10238bd56112dad56d31ce8260b4fdb90c46180291b7d6de51d4551"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000483.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "2c162c8b99c4dc9b59a0ca7a5319ea4f0d4b52b26e35a19ef23d0723a10f5bc5"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000484.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "a7ad3b3c39a19a0ebfc6106313e2c91c01e9f938542e56d610011101814f5a45"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000485.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "73ae3209602fb4ba35b6e309b2dba50989dab40daa607b1dd47d0c34907c008f"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000486.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4639503e8d1ae1e5d4d92f4378d02590ec8bbadd97b85b7e55f5fc15a294f8ee"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000487.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "71b1e29ec32b2afb77ac18f50c106c8f15a093effc4f00bf772d279eed89c961"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000488.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "32b9b150eb80bc310bdc77a5fc251f5524ad706e96e0e6684ddf09f0a2e69117"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000489.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7f42d5267583d1a0dcb1c3dad31d5c5ca3dfe5fb88c1bcec6954ed9ed0df405d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000490.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "961c1235353772adc8e2024df04f7ca56f19afd8ab1752e99d33c353da529173"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000491.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3f9af9d3cbc8b81faa82d2d2ffa617ea78c9e4a088f8cd58ae919354e347ea5e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000492.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7b4536d180ff277436d2427589ae34dc51350295164a292326bc4600a767a32a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000493.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "6281aff51e13c727e5ad2a7ed14f67e08d00e0a4b66c3748249b06348168ab96"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000494.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ececcc0dcfc4ca36244c62dea9c055a5bec721d49e39fb1a5f393515662bd6c0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000495.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "5e37b9100281786fb015b05793ee6d0249a26d85c598a6ddf07c6ceeaf2525e6"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000496.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9b1bc02785a40d6130a2848e2cb380c67da70326640e28d6e2a6957602ad9122"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000497.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "944b6c682720def387a01ce41fbe0d1a7ec37c819f6ec4bd96321f6a31ffe4e9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000498.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "99e3e215083239d49f4c4394eb18c894167f2ce966e4f341084a223b1b90f4b9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000499.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "bcca61bee5c857ed279e542b7450d177f96a8fd3b6e4b3d984cb0b187e244def"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000500.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "5f3be0a872488f891ebd00450ad81caad998456b00a6a8047413b7133ce8639e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000501.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "44274cdb619902f0312a258d2e3262bc0bd759e9b256056877d4ce1322c29e41"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000502.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9b26c25c6b558c936b945220ba60d3e8d6a3f303deac24a9b0b6ac3a3710fc52"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000503.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "78704063513abd76bca7e59575a0594550132a595242cb318e40c71c38034e60"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000504.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "a723bd07fb8cf117619d6666ecb7e817a6989117c85d695e5b7cfcb5715cdddd"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000505.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ae8ca6934ce5e136d2bfe9ed82b5440d64a692a1eb56e42c389fbda4198b013d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000506.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "316584add8c76bb7cc166e09b9d2da7559b16ff935a99260047bec2c8ac597a0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000507.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "99e9c58aade57c02c80b31c48099bb4f855173367464ffbbc76bcefc19edef82"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000508.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8582d3d68fbf2d6ce0e902b3e4f399e2cde0d3e19ced9a9a78b4f623694ae424"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000509.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4bac982615472ecdaa42fdddd166e9fee413dec42dfcdb74ec92f3e569c5dd72"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000510.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "77786d3c50a4d11d5081b9bf49b184ce96439aba7d90a801c52e99b937f4d152"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000511.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "660ecbc99785cac35ec5771b6761e4a157037a72d29ced3c268d3fa14d0127e0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000512.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9498728beaa65e7c0b1ddbb7ce608e4aa0594d74f4662d3c0acbc8fb88fd26d9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000513.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "bb89311dcb7061eb2a94770bfc25e0d2092d32449cbc1eb75b586ae8f7e30afa"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000514.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "47da3342f3341285ee638aa2d9b222fd3ce81e5e321f0d0bdf265126e0049df6"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000515.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3c2b9c48d18869e99e6714d904768d593691786ab67665a684d1b788151297d1"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000516.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e792bae59300bea2a00ac8b502eccb5a09811e10a3afb1b1209751e2337008d5"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000517.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b7a07a53902415efb162028da63032b2b9fdcf791200b41218d6255c5c3e7bda"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000518.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b943436733273bccf251a4fc3cc05db6f43e0220e2ab03c00f5d68ecb6f68977"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000519.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9e3ac886418f63f9cd8dfe8815ef34adeb6e624c40e5d0d841c6c82c3394e008"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000520.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "62063c842bce4a22889a694699666cde76528ae80d2d9f4744ebb3e3221b5eb8"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000521.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7d14187b8dcd529a5ffa6c9a31f1426ca6b6714edede99e7d26e941c6af68c57"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000522.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "1fdac429513d863d65203228b8ce950ad1fcc7e8072a759345194de99e6b9878"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000523.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "9ec7562c38edebe1b7b5110b38a20ac1f3973817e253184b7154300558228afe"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000524.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3f19beca4f1acf6d62b8f605f785ea7ee6553c4272ba6a034c0935a8b18900cd"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000525.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "6f2cbc5cafe59d719d0992a50df7c3fe83321f2d3526ebd60dd37acd578a3add"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000526.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "23d0b034e6d8b76f3bc10a43d30b38ce391c1a05db6ae0608e3e09d60c32c55e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000527.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "668de5514cd4aa47e1ded4e33e4e9b2afa52c368bf26ded4d17dafd6e063ca86"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000528.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "39be8e3468d1ff6b56028a78e60a0accfa85db59dc941be39798d43ed87f887a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000529.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "da96de200a5758600b4312c0d68cd413535a37cfdaaececbb6830425e86fb6e2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000530.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4deaee56e8d46f68cddd6088d06f3e009db346649c805147be94dd549b69d28e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000531.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ad0691401c2f587feb513ae4df676431404f77e26c8174497784c2a851761afe"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000532.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "fe8ef36733584e7c586f8f7359bde5102e80155e34bef72461a6a93c5bede703"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000533.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "632eb83926e3d6be098d6102a2569fc3a61f6d84c22a6ebf2386c8e52307a47a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000534.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ce7a60b0fcd15e0b5496e68887a5174ccfec9225f14df3680a51fad0ba823c53"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000535.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4d542497c062960a8e8cef054ceecf1af9e0a116e90f67e74ab6880ff805ab0a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000536.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "f2820c9a4961131fccf78be0faabe91fcf5978bb1893dd2c751c884956d7ea74"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000537.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "678812898c1eddf7a2fb7cf62c99492a7ff51aab5b9df2b213ac4e416b720192"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000538.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7ff8a9b2ba06934412e321c20694ebf90c6150c9c5fcdec5af067d000eef3465"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000539.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "c5cbee73cf471091272792d3b9cf978ec1342d6537097cae45208514fab355e9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000540.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "bff0b5e31606350af7f7f21221921957316ffa13fdcafee1e6b5f8737ebb3b6f"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000541.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7abcc5604144230084a132342ca2977cd128af02b4e060dade4d346ad4512a22"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000542.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8cce5cfc76a441609d9cd0b7b55bc358626421b8538992b776bf587e74a4e0a4"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000543.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3312833bbf3fb5768d46b1f5620b9eefb9644dd2eb689fa9b3d72446abaf1ccb"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000544.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "52cbf50f31cfa11f710a16a79c33f03e76849f33e5be070d3bee3717d92592c0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000545.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "2f078acee5d7d9251a8b3cff4a45bcfb7b10bd8dedb1dcc8a7013bd49b5d192a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000546.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8aa62cb06b3c80a5b71be29530ca4dba841209a4fb9fedfb14ae1f4b6f8523af"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000547.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "599096842b7733190abbc3e3aed0f6250a68d902d87cd7ea953c3a2bc6576ff4"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000548.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3c91347caa9d8c28cd682bab8e6fd88ae00d07a5780b992b1c2e2b9e647012c1"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000549.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "2499fc9b88063d46c9611280245f69a63be562147fadc230f3d4be39d74c5abb"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000550.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "14299a1835eb4f9756f4909353eab3df7b587a66644771478c2c872c80d7da5c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000551.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "86e59ae86410b1487d8656e31fdbfe08afe9eb54088e81c48223814cec48b7a9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000552.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "11ab2cb880564d41c54c67b0cc8b710cf0cf9536c653d75bbbea20adc1ce3e81"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000553.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b6e8167b494caadb70d6a179063088fa4f4d2472cd67e4a0a3be3653f9c3a304"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000554.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "f35dcf0a3805a158b0cecbab518407c90bc069bbe9da8506332f2a24827af54d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000555.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3d052829fc71ab2cfe1d86edfdce070877ea33651dbf73cdd8fe499d31038ef5"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000556.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "62e7e954335eb1df9535c66ebbacb4e0dd46cc2f27e6c27c8767ff2780d7907a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000557.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "f42f3320b48f821d05398c2209175dc9777777bd21e84a700489a6156a576d83"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000558.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "23ecac7beaaa8cf3c5970a34dee2a0bac5f75c2cc2e23f6f4aca44ace308cb14"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000559.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "0fc18f8dd6626223716122702b47f0c1dca3a8ab38826de5161fbbe33f383a10"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000560.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "585f896f79b4b2f31a14c896575f9e4934e7f27f435fcc077d30648cfcf14078"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000561.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "cbe0238faaf18377cb52aa347079467d45e5ff1f1ee3976cba1bec2fd1f555cb"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000562.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "012ac01fe2cc1821deaeacb930b40771befce9db442b82e24a122cbd9b9ff6b7"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000563.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "10ab6ba3e0dbcb0ee1599ceb53416438c30ded91558b87d797815d13dbe20bd5"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000564.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "20ee879881e856e094ce8c5d07a653877a1a461490fa2abfe4a6641fbcf44fb3"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000565.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "96c061aca52f37f956582834133aaa3daceda91bb4b415f19b79674170375e6f"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000566.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "f66e70c4cfdb4b243d11a24da5a5a769b0f1820e9daee9ecbd4b1c9ff9873caf"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000567.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "837a3301f636b75b7ab0c77fb12673a3f6d3822e3e4472d2125edcc4c7bcc1ba"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000568.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "bdb8b2b09661c5dd1a6d7a8add39730d453d2bc46037113a025e41b84417f616"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000569.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "a22d2d10e535ef5eccee4944f2bdd4ec442870a6b539d1cdfa178bded2a575c9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000570.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7c6208f4ab9cc2473c2d55351a5adee5b5103b799f36855f00e61cdc40f42de3"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000571.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d0632699de45e524e56625c4342ddf6bd52b0ee779d2a2fa46cd1687a3321344"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000572.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "fd7e987d1f45825d193a2c2332fda4cfdceee56a24691dc9b6a9881ca931cf70"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000573.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "f4478f3e60da10b7b3bf98dfc1b220f3ca03daaeb56fc344c038df80af3a2d84"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000574.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3d2dc693a9ee7d50d49be3520b76e83129cc5f3eadee61458dbaf1237338f416"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000575.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ac6cbec08b29a5eccc07b042cb8d1551d3e243df3ec1752f4fd518b1e48e879f"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000576.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "32fa4aacd827f2c3643dd5d8ac357bf744697d2a642d0c026d7a160deb770b58"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000577.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7cacce64a18c49fde2160cdd8d1baf6df640580740526fde55ad24908c47a175"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000578.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "23eb872988a054af28c7841acb63a1b50fa3fb34fb05b5b6b06c17e7c04025ed"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000579.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "96299b9e36d101d9cb5f0be0d3e09cdef996e60a0b8e52bb69a0a09b6f9086c3"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000580.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "99b59a8790cecc14380821031304e4ad4828f2872804b7e935fa48ef028bcae9"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000581.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "4562b1040c20d6b46eac82b5fe405190407e4bef970c9b206c917202f9a8eafb"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000582.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "cb897df630f58227027dc633b5015642f338b22365201a2d64c79a45614a8d19"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000583.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "1b448828a6c1112178b8cb8e3f50eb10606b64341e461457e8e3b8a8c9174706"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000584.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e653b97c031362c826f75c89deb08d3f5c0bd73cf736b99bc9cced78bb813490"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000585.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "93c48a824da28909567561fa80a6e4e96f57f160a9708fa0dcd6e1fd9e5eeadb"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000586.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e20fe0406f4534dd4a4d254cff06e38cf6aa174703f8f9ff1d46c7e35d02185a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000587.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "fb97433915e56ecc47d42782ff285f4987a5fea3626a553ce0a04cd4801632b0"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000588.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "29720d09e35b3933baea3d6a1f64a658202dbcda136518852ab13092a8283d9d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000589.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "f6a1716f1ac41bcb7e187e5984658856f47d4b7c5df5f37ff08652d4806bd99d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000590.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "38fb671e15d89ac348a194a7982282ac665a20da66ef2aa4d565cb07b7bc6233"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000591.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e6991afa65df70c7ebe7f703e6b49cd8d044621d712b4bcdc124e455718d61ae"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000592.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8011cd1cbb25d8835203e4c569d2d43f4fcd40532687cfe033292cbf9325f669"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000593.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e56d3f1f56a17bdeee47de66bbdb463f80d5989b9699fd42600600501af3e04e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000594.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "f50ec12873632ffa6e9c01e79ce213cb443e4d88ae48dbe0479c39ccff4d845b"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000595.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "ef132e2f77e3eebb20ec7ede3b3bd7f190680dd75fb2d6d3c2df9514ca897213"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000596.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "52066bd2fc582f3adc8d637ac0287fa49264d10a277817f4a25dacdd02584e04"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000597.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "cfa6ac45595da404322be08bf95651331fa674e28637e2ffa943c2816bb81343"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000598.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "a633e06feb2b042056decf35c51a8625bce4e0fc444a1394e01d39906fe81bba"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000599.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "03d596845de2bd60f5e73388ba7b0af9a615f94840291501831fb64ff9bc46b1"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000600.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e80c86596bbe5899a728481229c880adb38751ab798f3d5dd7d9bbfd65e2f9ab"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000601.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "1c5a9eca122d6d4533325a7d43617a4ab3fd9efa86c133b0ecb060e785369404"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000602.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "feeb577dd614ea2521c43c87fa059b79207967a37efb96ac36719c75072223a8"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000603.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "871468824c882908c1cde4da2357bd79b13bdc37536820a434e88ec8ee614c4e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000604.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "16d084b2b25c7908bdab09d59916746a9a42875e5687a833649ec9949f0a394c"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000605.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "3d772e7af6d18fe7e92ffa36f954c8d11f961563eebb5ab1fd394df05a182d78"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000606.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "cca0eff744ad904d346673c1571870a3cbf756c0e633ea8cdb317b3ffa2b7945"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000607.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "03e026c211740a25494e3e6d5089769a491b472dcf593ab52d741441cc392323"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000608.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8f3b18d76755de83d17e2d50a06c849745619e431a2fcf95715c4bb19e4ecc28"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000609.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "071e640f05033dccaae01cc2b1db098728f0a7659f0d012e25459da4d2df1de2"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000610.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "57eea9d6557fcd2e6d92e907b6a26080e90c1034cfef207ef6574daa661554f7"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000611.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d11bee53e1bb3f888be7adc6477030a9df73feb0f34d68198bda4cfe62d8b954"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000612.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e1cbc5f075801d2c4f65ae82a2c597ebb0a7d219f60561114c4a6244d1542f9a"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000613.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "b2a214dbb6ce96be977438b4db4dddd1649fbbc987217f33dd6caf377ebe8f27"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000614.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "6f93b9c1e274aa393f2903797ec95a77db56a12e20dfa48978760eca3e5c8ec3"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000615.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "810b56e90f4ab1d674db133550e3ee10234b4b1e1d19a4bbf57dcc496a0c827d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000616.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7cc8e25988b6bccef722825828493a9e3abbe5d8969bfa03cd6393cefec9c3fc"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000617.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "26657b8ed954b047b4a8cbaf8b331bab9e77e7a8b8800e34199878564f58eb7d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000618.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e1ea32cbd06a856bd7f65b9f8a5682f3cdd883b8c50e4ffec3cd5e01233f69f7"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000619.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "d4e49dfad73b58ce8033f44eaa72956daebf7ed14c57e0363932436f52cbe1e5"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000620.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "e198e271b9e0f264e88d1ca87e08faaef47fa49e1384aae596a2003a025f6679"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000621.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "0f18b818cd00b460ade540b0e07af27e2956672a68509a8869f3a04f65cf545d"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000622.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "7afc71144630ffaf99e321220f57767fabb96c5767c93f7f172493e53562022e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000623.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "98752ed1783acb8c6a22bcef157774af4b86ec6950c6188f7e811759ddc57397"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000624.npy",
+      "n_tokens": 536870912,
+      "size_bytes": 2147483776,
+      "sha256": "8a85533f756f0f3de2a607239aa44f8405418f50cf75efc1e8e2e13e1449ab3e"
+    },
+    {
+      "key": "dataset/v1/shards/shard_000625.npy",
+      "n_tokens": 397867008,
+      "size_bytes": 1591468160,
+      "sha256": "5723dc01b3087c609b2767b09f6f435dcd1226a6e4a733304059f103cd190ed2"
+    }
+  ]
+}

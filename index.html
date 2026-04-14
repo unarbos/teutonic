@@ -147,6 +147,7 @@ th:last-child, td:last-child { text-align: right; }
     <div style="text-align:center;margin-bottom:8px;">
         <img src="favicon.png" alt="Teuton" style="width:80px;height:80px;margin-bottom:8px;">
         <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;">Teutonic-I</div>
+        <div style="font-size:11px;margin-top:4px;"><a href="https://github.com/unarbos/teutonic" target="_blank" style="color:var(--ink);text-decoration:none;text-transform:uppercase;border-bottom:1px dashed #000;">GitHub</a></div>
         <div id="king-info" style="font-size:11px;text-transform:uppercase;">
             <span id="king-health" title="King repo status"></span>
             <a id="king-link" href="#" target="_blank" style="color:var(--ink);"></a>
@@ -156,7 +157,7 @@ th:last-child, td:last-child { text-align: right; }
     </div>
 
     <div>
-        <div class="section-label">Best Loss</div>
+        <div class="section-label">Loss</div>
         <div class="chart-wrap">
             <svg id="chart"></svg>
         </div>
@@ -181,6 +182,7 @@ th:last-child, td:last-child { text-align: right; }
         <div class="scroll-box scroll-queue">
             <table>
                 <thead><tr>
+                    <th>UID</th>
                     <th>Repo</th>
                     <th>Hotkey</th>
                     <th>Block</th>
@@ -195,11 +197,12 @@ th:last-child, td:last-child { text-align: right; }
         <div class="scroll-box scroll-hist">
             <table>
                 <thead><tr>
+                    <th>UID</th>
                     <th>Repo</th>
                     <th>Hotkey</th>
                     <th>Verdict</th>
-                    <th>Win Rate</th>
-                    <th>Best Loss</th>
+                    <th>mu_hat</th>
+                    <th>LCB</th>
                     <th>King Loss</th>
                     <th>Chall Loss</th>
                     <th>Time</th>
@@ -263,19 +266,21 @@ function render(d) {
     var hist = (d.history || []).slice().reverse();
     var ev = d.current_eval;
 
-    // --- 1. Best Loss Chart with axes ---
-    var losses = [];
+    // --- 1. Loss Chart (king + challenger) ---
+    var kingLosses = [], challLosses = [];
     for (var i = 0; i < hist.length; i++) {
         var kl = hist[i].avg_king_loss || 0;
         var cl = hist[i].avg_challenger_loss || 0;
-        var best = hist[i].best_loss || (kl && cl ? Math.min(kl, cl) : kl || cl);
-        if (best) losses.push(best);
+        if (kl || cl) {
+            kingLosses.push(kl || cl);
+            challLosses.push(cl || kl);
+        }
     }
     if (ev && ev.avg_king_loss) {
-        var ekl = ev.avg_king_loss;
-        var ecl = ev.avg_challenger_loss || ekl;
-        losses.push(Math.min(ekl, ecl));
+        kingLosses.push(ev.avg_king_loss);
+        challLosses.push(ev.avg_challenger_loss || ev.avg_king_loss);
     }
+    var nPts = kingLosses.length;
 
     var SVG = document.getElementById("chart");
     var rect = SVG.parentElement.getBoundingClientRect();
@@ -291,17 +296,18 @@ function render(d) {
 
     SVG.setAttribute("viewBox", "0 0 " + W + " " + H);
 
-    if (losses.length < 1) {
+    if (nPts < 1) {
         SVG.innerHTML = '<text x="' + (W/2) + '" y="' + (H/2) + '" text-anchor="middle" font-family="Space Mono,monospace" font-size="' + (13*dpr) + '" fill="#000">NO DATA</text>';
         document.getElementById("chart-meta").innerHTML = "<span>--</span>";
     } else {
 
-    var minL = Math.min.apply(null, losses);
-    var maxL = Math.max.apply(null, losses);
-    var padV = (maxL - minL) * 0.15 || 0.5;
+    var allVals = kingLosses.concat(challLosses);
+    var minL = Math.min.apply(null, allVals);
+    var maxL = Math.max.apply(null, allVals);
+    var padV = (maxL - minL) * 0.08 || 0.5;
     minL -= padV; maxL += padV;
 
-    function toX(i) { return ML + (losses.length > 1 ? (i / (losses.length - 1)) * pw : pw / 2); }
+    function toX(i) { return ML + (nPts > 1 ? (i / (nPts - 1)) * pw : pw / 2); }
     function toY(v) { return MT + ph - ((v - minL) / (maxL - minL)) * ph; }
 
     var svg = '';
@@ -321,52 +327,99 @@ function render(d) {
         }
     }
 
-    for (var i = 0; i < losses.length; i++) {
+    for (var i = 0; i < nPts; i++) {
         var xx = toX(i);
         svg += '<line x1="' + xx + '" y1="' + (MT + ph) + '" x2="' + xx + '" y2="' + (MT + ph + 5*dpr) + '" stroke="#000" stroke-width="' + lw + '"/>';
-        var label = (ev && i === losses.length - 1) ? "NOW" : "";
+        var label = (ev && i === nPts - 1) ? "NOW" : "";
         svg += '<text x="' + xx + '" y="' + (MT + ph + 20*dpr) + '" text-anchor="middle" ' + font + '>' + label + '</text>';
     }
 
-    var pts = [];
-    for (var i = 0; i < losses.length; i++) {
-        pts.push(toX(i).toFixed(1) + "," + toY(losses[i]).toFixed(1));
+    // Challenger loss line (dashed gray)
+    var cpts = [];
+    for (var i = 0; i < nPts; i++) {
+        cpts.push(toX(i).toFixed(1) + "," + toY(challLosses[i]).toFixed(1));
     }
-    svg += '<polyline points="' + pts.join(" ") + '" fill="none" stroke="#000" stroke-width="' + (1.5*dpr) + '" stroke-linejoin="round"/>';
+    svg += '<polyline points="' + cpts.join(" ") + '" fill="none" stroke="#999" stroke-width="' + (1*dpr) + '" stroke-dasharray="' + (4*dpr) + ' ' + (3*dpr) + '" stroke-linejoin="round"/>';
+    for (var i = 0; i < nPts; i++) {
+        svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(challLosses[i]).toFixed(1) + '" r="' + (2*dpr) + '" fill="#999"/>';
+    }
 
-    for (var i = 0; i < losses.length; i++) {
-        svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(losses[i]).toFixed(1) + '" r="' + (3*dpr) + '" fill="#000"/>';
+    // King loss line (solid black)
+    var kpts = [];
+    for (var i = 0; i < nPts; i++) {
+        kpts.push(toX(i).toFixed(1) + "," + toY(kingLosses[i]).toFixed(1));
     }
+    svg += '<polyline points="' + kpts.join(" ") + '" fill="none" stroke="#000" stroke-width="' + (1.5*dpr) + '" stroke-linejoin="round"/>';
+    for (var i = 0; i < nPts; i++) {
+        svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(kingLosses[i]).toFixed(1) + '" r="' + (3*dpr) + '" fill="#000"/>';
+    }
+
+    // Legend
+    var legX = ML + 12*dpr, legY = MT + 14*dpr;
+    svg += '<line x1="' + legX + '" y1="' + legY + '" x2="' + (legX + 20*dpr) + '" y2="' + legY + '" stroke="#000" stroke-width="' + (1.5*dpr) + '"/>';
+    svg += '<text x="' + (legX + 24*dpr) + '" y="' + (legY + fs*0.35) + '" ' + font + '>KING</text>';
+    var leg2X = legX + 80*dpr;
+    svg += '<line x1="' + leg2X + '" y1="' + legY + '" x2="' + (leg2X + 20*dpr) + '" y2="' + legY + '" stroke="#999" stroke-width="' + (1*dpr) + '" stroke-dasharray="' + (4*dpr) + ' ' + (3*dpr) + '"/>';
+    svg += '<text x="' + (leg2X + 24*dpr) + '" y="' + (legY + fs*0.35) + '" ' + font + ' fill="#999">CHALLENGER</text>';
 
     SVG.innerHTML = svg;
 
-    var latest = losses[losses.length - 1];
+    var latestK = kingLosses[nPts - 1];
     document.getElementById("chart-meta").innerHTML =
-        "<span>CURRENT: " + latest.toFixed(4) + "</span><span>EVALS: " + losses.length + "</span>";
+        "<span>KING: " + latestK.toFixed(4) + "</span><span>EVALS: " + nPts + "</span>";
 
     } // end chart data block
 
     // --- Current Duel ---
     var duelSec = document.getElementById("duel-section");
+    var duelLabel = document.getElementById("duel-label");
+    var duelBar = document.getElementById("duel-bar");
+    var duelProgress = document.getElementById("duel-progress");
+    var duelWr = document.getElementById("duel-wr");
     if (ev) {
         duelSec.classList.remove("duel-idle");
-        var pct = ev.total > 0 ? Math.round((ev.progress / ev.total) * 100) : 0;
-        var duelName = ev.challenger_repo || short(ev.hotkey, 12);
-        var duelLabel = document.getElementById("duel-label");
-        if (ev.challenger_repo) {
-            duelLabel.innerHTML = '<a href="https://huggingface.co/' + ev.challenger_repo + '" target="_blank" style="color:var(--ink)">' + duelName + '</a>';
+        if (ev.loading) {
+            var loadingName = ev.challenger_repo || short(ev.hotkey, 12);
+            if (ev.challenger_repo) {
+                duelLabel.innerHTML = '<a href="https://huggingface.co/' + ev.challenger_repo + '" target="_blank" style="color:var(--ink)">' + loadingName + '</a>';
+            } else {
+                duelLabel.textContent = loadingName;
+            }
+            duelBar.style.width = "0%";
+            duelProgress.textContent = "Loading model \u2026";
+            duelWr.textContent = "--";
         } else {
-            duelLabel.textContent = duelName;
+            var pct = ev.total > 0 ? Math.round((ev.progress / ev.total) * 100) : 0;
+            var duelName = ev.challenger_repo || short(ev.hotkey, 12);
+            if (ev.challenger_repo) {
+                duelLabel.innerHTML = '<a href="https://huggingface.co/' + ev.challenger_repo + '" target="_blank" style="color:var(--ink)">' + duelName + '</a>';
+            } else {
+                duelLabel.textContent = duelName;
+            }
+            duelBar.style.width = pct + "%";
+            duelProgress.textContent = ev.progress + " / " + ev.total + "  (" + pct + "%)";
+            duelWr.textContent = "MU: " + (ev.mu_hat || 0).toFixed(6);
         }
-        document.getElementById("duel-bar").style.width = pct + "%";
-        document.getElementById("duel-progress").textContent = ev.progress + " / " + ev.total + "  (" + pct + "%)";
-        document.getElementById("duel-wr").textContent = ev.n > 0 ? "WR: " + (ev.win_rate * 100).toFixed(1) + "%" : "";
     } else {
-        duelSec.classList.add("duel-idle");
-        document.getElementById("duel-label").textContent = "Idle";
-        document.getElementById("duel-bar").style.width = "0%";
-        document.getElementById("duel-progress").textContent = "--";
-        document.getElementById("duel-wr").textContent = "--";
+        var q = d.queue || [];
+        if (q.length > 0) {
+            duelSec.classList.remove("duel-idle");
+            var nextRepo = q[0].hf_repo || "--";
+            if (q[0].hf_repo) {
+                duelLabel.innerHTML = '<a href="https://huggingface.co/' + q[0].hf_repo + '" target="_blank" style="color:var(--ink)">' + nextRepo + '</a>';
+            } else {
+                duelLabel.textContent = nextRepo;
+            }
+            duelBar.style.width = "0%";
+            duelProgress.textContent = "Loading model \u2026";
+            duelWr.textContent = "--";
+        } else {
+            duelSec.classList.add("duel-idle");
+            duelLabel.textContent = "Idle";
+            duelBar.style.width = "0%";
+            duelProgress.textContent = "--";
+            duelWr.textContent = "--";
+        }
     }
 
     // --- Last Winner ---
@@ -379,7 +432,9 @@ function render(d) {
         var repo = winner.challenger_repo || "--";
         var link = winner.challenger_repo ? '<a href="https://huggingface.co/' + repo + '" target="_blank" style="color:var(--ink)">' + repo + '</a>' : repo;
         lwEl.innerHTML = link + '<br>' +
-            'WIN_RATE: ' + ((winner.win_rate || 0) * 100).toFixed(1) + '% &nbsp; ' +
+            'MU_HAT: ' + (winner.mu_hat || 0).toFixed(6) + ' &nbsp; ' +
+            'LCB: ' + (winner.lcb || 0).toFixed(6) + ' &nbsp; ' +
+            'DELTA: ' + (winner.delta || 0).toFixed(4) + ' &nbsp; ' +
             'KING_LOSS: ' + (winner.avg_king_loss || 0).toFixed(4) + ' &nbsp; ' +
             'CHALL_LOSS: ' + (winner.avg_challenger_loss || 0).toFixed(4) + ' &nbsp; ' +
             (winner.wall_time_s ? winner.wall_time_s.toFixed(0) + 's' : '');
@@ -391,12 +446,14 @@ function render(d) {
     var qEl = document.getElementById("queue");
     var q = d.queue || [];
     if (q.length === 0) {
-        qEl.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:16px">Queue empty</td></tr>';
+        qEl.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:16px">Queue empty</td></tr>';
     } else {
         qEl.innerHTML = q.map(function(e) {
             var repo = e.hf_repo || "--";
             var repoLink = e.hf_repo ? '<a href="https://huggingface.co/' + e.hf_repo + '" target="_blank" style="color:var(--ink)">' + repo + '</a>' : repo;
+            var uid = e.uid != null ? e.uid : "--";
             return '<tr>' +
+                '<td>' + uid + '</td>' +
                 '<td>' + repoLink + '</td>' +
                 '<td>' + (e.hotkey ? '<a href="https://taomarketcap.com/hotkey/' + e.hotkey + '/mining_hotkeys" target="_blank" style="color:var(--ink)">' + short(e.hotkey, 16) + '</a>' : '--') + '</td>' +
                 '<td>' + (e.block ? '#' + e.block : '--') + '</td>' +
@@ -408,20 +465,21 @@ function render(d) {
     var hb = document.getElementById("hist");
     var history = d.history || [];
     if (history.length === 0) {
-        hb.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:16px">No duels yet</td></tr>';
+        hb.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:16px">No duels yet</td></tr>';
     } else {
         hb.innerHTML = history.map(function(h) {
             var kl = h.avg_king_loss || 0;
             var cl = h.avg_challenger_loss || 0;
-            var best = h.best_loss || (kl && cl ? Math.min(kl, cl) : kl || cl);
             var repo = h.challenger_repo || "--";
             var repoLink = h.challenger_repo ? '<a href="https://huggingface.co/' + h.challenger_repo + '" target="_blank" style="color:var(--ink)">' + repo + '</a>' : repo;
+            var uid = h.uid != null ? h.uid : "--";
             return '<tr>' +
+                '<td>' + uid + '</td>' +
                 '<td>' + repoLink + '</td>' +
                 '<td>' + (h.hotkey ? '<a href="https://taomarketcap.com/hotkey/' + h.hotkey + '/mining_hotkeys" target="_blank" style="color:var(--ink)">' + short(h.hotkey, 16) + '</a>' : '--') + '</td>' +
                 '<td>' + (h.accepted ? "CHALLENGER" : "KING") + '</td>' +
-                '<td>' + ((h.win_rate || 0) * 100).toFixed(1) + '%</td>' +
-                '<td>' + best.toFixed(4) + '</td>' +
+                '<td>' + (h.mu_hat || 0).toFixed(6) + '</td>' +
+                '<td>' + (h.lcb || 0).toFixed(6) + '</td>' +
                 '<td>' + kl.toFixed(4) + '</td>' +
                 '<td>' + cl.toFixed(4) + '</td>' +
                 '<td>' + (h.wall_time_s || 0).toFixed(0) + 's</td>' +

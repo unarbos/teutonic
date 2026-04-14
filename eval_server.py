@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from eval_torch import (
-    R2, MultiGPUEvaluator, run_sign_test, parse_gpu_ids,
+    R2, MultiGPUEvaluator, run_bootstrap_test, parse_gpu_ids,
 )
 
 log = logging.getLogger("eval_server")
@@ -47,6 +47,8 @@ DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "256"))
 DEFAULT_EVAL_N = int(os.environ.get("EVAL_N", "10000"))
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
+DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.01"))
+DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
 
 
 # ---------------------------------------------------------------------------
@@ -88,8 +90,10 @@ class EvalRequest(BaseModel):
     challenger_revision: str = ""
     eval_n: int = DEFAULT_EVAL_N
     alpha: float = DEFAULT_ALPHA
+    delta: float = DEFAULT_DELTA
     seq_len: int = DEFAULT_SEQ_LEN
     batch_size: int = DEFAULT_BATCH_SIZE
+    n_bootstrap: int = DEFAULT_BOOTSTRAP_B
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +163,11 @@ def _run_eval(eval_id: str, req: EvalRequest):
             record["progress"] = info
             event_q.put({"type": "progress", "data": info})
 
-        verdict = run_sign_test(
+        verdict = run_bootstrap_test(
             king_eval, challenger_eval,
-            _r2, req.shard_key, req.eval_n, req.alpha,
+            _r2, req.shard_key, req.eval_n, req.alpha, req.delta,
             req.seq_len, req.batch_size, seed_str,
+            n_bootstrap=req.n_bootstrap,
             on_progress=_on_progress,
         )
 

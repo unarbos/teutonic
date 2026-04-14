@@ -27,6 +27,7 @@ from huggingface_hub import HfApi
 
 EVAL_N = 10_000
 EVAL_ALPHA = 0.001
+EVAL_DELTA = float(os.environ.get("TEUTONIC_EVAL_DELTA", "0.01"))
 SEQ_LEN = 2048
 POLL_INTERVAL = 30
 WEIGHT_INTERVAL = 300
@@ -294,6 +295,7 @@ class State:
         self.last_weight_block = 0
         self.last_winner_hotkey: str | None = None
         self.market: dict | None = None
+        self.uid_map: dict[str, int] = {}
 
     def load(self):
         k = self.r2.get("king/current.json")
@@ -396,18 +398,27 @@ class State:
         self.history.insert(0, {
             "challenge_id": verdict["challenge_id"],
             "hotkey": hotkey,
+            "uid": self.uid_map.get(hotkey, "?"),
             "challenger_repo": challenger_repo,
             "accepted": verdict["accepted"],
             "verdict": verdict["verdict"],
-            "win_rate": verdict["win_rate"],
+            "mu_hat": verdict.get("mu_hat", 0),
+            "lcb": verdict.get("lcb", 0),
+            "delta": verdict.get("delta", 0),
             "avg_king_loss": king_loss,
             "avg_challenger_loss": chall_loss,
             "best_loss": min(king_loss, chall_loss),
             "wall_time_s": verdict["wall_time_s"],
             "timestamp": verdict["timestamp"],
         })
-        self.history = self.history[:50]
         self.r2.put("state/dashboard_history.json", {"history": self.history})
+
+    def refresh_uid_map(self, subtensor, netuid):
+        try:
+            meta = subtensor.metagraph(netuid)
+            self.uid_map = {hk: uid for uid, hk in enumerate(meta.hotkeys)}
+        except Exception:
+            log.warning("failed to refresh uid_map", exc_info=True)
 
     def flush_dashboard(self):
         payload = {
@@ -416,6 +427,7 @@ class State:
             "stats": self.stats,
             "current_eval": self.current_eval,
             "queue": [{"challenge_id": e.get("challenge_id"), "hotkey": e.get("hotkey"),
+                        "uid": self.uid_map.get(e.get("hotkey", ""), "?"),
                         "hf_repo": e.get("hf_repo"), "queued_at": e.get("queued_at"),
                         "block": e.get("block")}
                        for e in self.queue],
@@ -532,13 +544,13 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         "king_revision": king_revision,
         "challenger_repo": hf_repo, "challenger_revision": challenger_revision,
         "hotkey": hotkey,
-        "N": EVAL_N, "alpha": EVAL_ALPHA, "shard": shard_key,
+        "N": EVAL_N, "alpha": EVAL_ALPHA, "delta": EVAL_DELTA, "shard": shard_key,
     })
 
     state.current_eval = {
         "challenge_id": cid, "challenger_repo": hf_repo, "hotkey": hotkey,
-        "progress": 0, "total": EVAL_N, "s": 0, "n": 0,
-        "win_rate": 0, "avg_king_loss": 0, "avg_challenger_loss": 0,
+        "progress": 0, "total": EVAL_N, "mu_hat": 0,
+        "avg_king_loss": 0, "avg_challenger_loss": 0,
         "started_at": _now(),
     }
     state.flush_dashboard()
@@ -556,6 +568,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "challenger_revision": challenger_revision,
             "eval_n": EVAL_N,
             "alpha": EVAL_ALPHA,
+            "delta": EVAL_DELTA,
             "seq_len": SEQ_LEN,
         })
         resp.raise_for_status()
@@ -574,9 +587,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
                     state.current_eval.update({
                         "progress": d.get("done", 0),
                         "total": d.get("total", EVAL_N),
-                        "s": d.get("s", 0),
-                        "n": d.get("n", 0),
-                        "win_rate": d.get("win_rate", 0),
+                        "mu_hat": d.get("mu_hat", 0),
                         "avg_king_loss": d.get("avg_king_loss", 0),
                         "avg_challenger_loss": d.get("avg_challenger_loss", 0),
                     })
@@ -594,9 +605,9 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         raise RuntimeError("eval stream ended without verdict")
 
     r2.put(f"eval/{cid}/verdict.json", verdict)
-    log.info("verdict: %s (s=%d K=%d wr=%.4f %.1fs)",
-             verdict["verdict"], verdict["S_N"], verdict["K"],
-             verdict["win_rate"], verdict["wall_time_s"])
+    log.info("verdict: %s (mu_hat=%.6f lcb=%.6f delta=%.6f %.1fs)",
+             verdict["verdict"], verdict.get("mu_hat", 0), verdict.get("lcb", 0),
+             verdict.get("delta", 0), verdict["wall_time_s"])
 
     state.current_eval = None
     state.evaluated_repos.add(hf_repo)
@@ -693,20 +704,33 @@ async def main():
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
 
+            state.refresh_uid_map(subtensor, NETUID)
+
             tmc = await fetch_tmc_data()
             if tmc:
                 state.market = tmc
 
+            # Phase 1: process new (unseen) challengers first
             reveals = scan_reveals(subtensor, NETUID, state.seen)
             if reveals:
                 state.flush()
                 for rev in reveals:
                     cid = state.enqueue(rev)
                     if cid:
-                        log.info("queued %s from %s", cid, rev["hotkey"][:16])
+                        log.info("queued %s from %s (new)", cid, rev["hotkey"][:16])
 
             while state.queue:
                 entry = state.queue.pop(0)
+                state.current_eval = {
+                    "challenge_id": entry.get("challenge_id", "?"),
+                    "challenger_repo": entry.get("hf_repo", ""),
+                    "hotkey": entry.get("hotkey", ""),
+                    "progress": 0, "total": EVAL_N, "mu_hat": 0,
+                    "avg_king_loss": 0, "avg_challenger_loss": 0,
+                    "loading": True,
+                    "started_at": _now(),
+                }
+                state.flush_dashboard()
                 state.flush()
                 try:
                     await process_challenge(state, r2, entry, subtensor, wallet,
@@ -716,6 +740,66 @@ async def main():
                     state.stats["failed"] += 1
                     state.current_eval = None
                     state.flush_dashboard()
+
+                fresh = scan_reveals(subtensor, NETUID, state.seen)
+                if fresh:
+                    state.flush()
+                    for rev in fresh:
+                        cid = state.enqueue(rev)
+                        if cid:
+                            log.info("queued %s from %s (new, mid-cycle)", cid, rev["hotkey"][:16])
+
+            state.current_eval = None
+            state.flush_dashboard()
+
+            # Phase 2: re-evaluate already-seen challengers when none are unseen
+            if args.seen and not state.queue:
+                log.info("all miners seen — starting re-evaluation cycle")
+                state.evaluated_repos.clear()
+                throwaway_seen = set()
+                reeval_reveals = scan_reveals(subtensor, NETUID, throwaway_seen)
+                king_hk = state.king.get("hotkey", "")
+                reeval_reveals = [r for r in reeval_reveals
+                                  if r["hotkey"] != king_hk
+                                  and r["hf_repo"] not in state.failed_repos]
+                for rev in reeval_reveals:
+                    cid = state.enqueue(rev)
+                    if cid:
+                        log.info("queued %s from %s (re-eval)", cid, rev["hotkey"][:16])
+
+                while state.queue:
+                    entry = state.queue.pop(0)
+                    state.current_eval = {
+                        "challenge_id": entry.get("challenge_id", "?"),
+                        "challenger_repo": entry.get("hf_repo", ""),
+                        "hotkey": entry.get("hotkey", ""),
+                        "progress": 0, "total": EVAL_N, "mu_hat": 0,
+                        "avg_king_loss": 0, "avg_challenger_loss": 0,
+                        "loading": True,
+                        "started_at": _now(),
+                    }
+                    state.flush_dashboard()
+                    state.flush()
+                    try:
+                        await process_challenge(state, r2, entry, subtensor, wallet,
+                                                check_stale=False)
+                    except Exception:
+                        log.exception("eval failed: %s", entry.get("challenge_id"))
+                        state.stats["failed"] += 1
+                        state.current_eval = None
+                        state.flush_dashboard()
+
+                    fresh = scan_reveals(subtensor, NETUID, state.seen)
+                    if fresh:
+                        log.info("new miners appeared during re-eval, prioritizing them")
+                        for rev in fresh:
+                            cid = state.enqueue(rev)
+                            if cid:
+                                log.info("queued %s from %s (new, interrupt)", cid, rev["hotkey"][:16])
+                        break
+
+                state.current_eval = None
+                state.flush_dashboard()
 
             if not args.seen:
                 state.seen.clear()

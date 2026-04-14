@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Standalone multi-GPU PyTorch eval — king-vs-challenger sign test.
+"""Standalone multi-GPU PyTorch eval — king-vs-challenger paired bootstrap test.
 
 Loads model replicas across all available GPUs, fetches sequences from R2
 with prefetch overlap, and computes cross-entropy loss via chunked lm_head
-forward passes to minimize VRAM. No vLLM, no HTTP, no SSH tunnels.
+forward passes to minimize VRAM. Accepts the challenger only when the
+bootstrapped lower confidence bound on the per-token log-loss advantage
+exceeds a configurable delta threshold.
 
 Usage:
     python eval_torch.py \
         --king unconst/Teutonic-I \
         --challenger unconst/Teutonic-I \
-        --n 100 --batch-size 64 --seq-len 2048 --gpus 0,1,2,3,4,5,6,7
+        --n 100 --delta 0.01 --batch-size 64 --seq-len 2048 --gpus 0,1,2,3,4,5,6,7
 
 Env vars:
     HF_TOKEN              HuggingFace token for gated repos
@@ -35,7 +37,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from botocore.config import Config as BotoConfig
-from scipy.stats import binom
 from transformers import AutoModelForCausalLM
 
 log = logging.getLogger("eval_torch")
@@ -195,6 +196,54 @@ def compute_batch_losses(model, token_batches, device, chunk_size=LM_HEAD_CHUNK)
 
 
 # ---------------------------------------------------------------------------
+# Paired losses — runs both models' lm_heads per chunk
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def compute_paired_losses(king_model, chall_model, token_batches,
+                          king_device, chall_device,
+                          chunk_size=LM_HEAD_CHUNK):
+    """Compute per-sequence mean cross-entropy for both models on the same tokens.
+
+    Returns (king_losses, chall_losses) as lists of floats (nats/token).
+    """
+    B = len(token_batches)
+    input_ids_k = torch.tensor(token_batches, dtype=torch.long, device=king_device)
+    input_ids_c = torch.tensor(token_batches, dtype=torch.long, device=chall_device)
+
+    hidden_k = king_model.model(input_ids_k).last_hidden_state
+    hidden_c = chall_model.model(input_ids_c).last_hidden_state
+
+    n_pos = input_ids_k.size(1) - 1
+    king_loss = torch.zeros(B, device=king_device)
+    chall_loss = torch.zeros(B, device=chall_device)
+
+    for i in range(0, n_pos, chunk_size):
+        end = min(i + chunk_size, n_pos)
+
+        logits_k = king_model.lm_head(hidden_k[:, i:end, :])
+        logits_c = chall_model.lm_head(hidden_c[:, i:end, :])
+
+        labels_k = input_ids_k[:, i + 1 : end + 1]
+        labels_c = input_ids_c[:, i + 1 : end + 1]
+        king_loss += F.cross_entropy(
+            logits_k.reshape(-1, logits_k.size(-1)), labels_k.reshape(-1),
+            reduction="none",
+        ).reshape(B, -1).sum(1)
+        chall_loss += F.cross_entropy(
+            logits_c.reshape(-1, logits_c.size(-1)), labels_c.reshape(-1),
+            reduction="none",
+        ).reshape(B, -1).sum(1)
+
+        del logits_k, logits_c
+
+    return (
+        (king_loss / n_pos).cpu().tolist(),
+        (chall_loss / n_pos).cpu().tolist(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
 
@@ -289,18 +338,68 @@ class MultiGPUEvaluator:
         self.pool.shutdown(wait=False)
 
 
+def compute_paired_multi_gpu(king_eval, chall_eval, token_batches):
+    """Pair king GPUs with challenger GPUs to compute losses in parallel."""
+    if not token_batches:
+        return [], []
+
+    n_pairs = min(len(king_eval.gpu_ids), len(chall_eval.gpu_ids))
+    per_pair = [[] for _ in range(n_pairs)]
+    idx_map = [[] for _ in range(n_pairs)]
+    for i, batch in enumerate(token_batches):
+        p = i % n_pairs
+        per_pair[p].append(batch)
+        idx_map[p].append(i)
+
+    futures = {}
+    pool = ThreadPoolExecutor(max_workers=n_pairs)
+    for p_idx in range(n_pairs):
+        if not per_pair[p_idx]:
+            continue
+        k_gid = king_eval.gpu_ids[p_idx]
+        c_gid = chall_eval.gpu_ids[p_idx]
+        fut = pool.submit(
+            compute_paired_losses,
+            king_eval.models[k_gid], chall_eval.models[c_gid],
+            per_pair[p_idx],
+            king_eval.devices[k_gid], chall_eval.devices[c_gid],
+        )
+        futures[fut] = p_idx
+
+    king_results = [None] * len(token_batches)
+    chall_results = [None] * len(token_batches)
+    for fut in as_completed(futures):
+        p_idx = futures[fut]
+        k_losses, c_losses = fut.result()
+        for local_i, global_i in enumerate(idx_map[p_idx]):
+            king_results[global_i] = k_losses[local_i]
+            chall_results[global_i] = c_losses[local_i]
+
+    pool.shutdown(wait=False)
+    return king_results, chall_results
+
+
 # ---------------------------------------------------------------------------
-# Sign test
+# Bootstrap test
 # ---------------------------------------------------------------------------
 
-def run_sign_test(king_eval, challenger_eval, r2, shard_key, eval_n, alpha,
-                  seq_len, batch_size, seed_str, on_progress=None):
-    """Run sign test. Calls on_progress(info_dict) after each batch if provided."""
+def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
+                       alpha, delta, seq_len, batch_size, seed_str,
+                       n_bootstrap=10000, on_progress=None):
+    """Paired bootstrap test on per-token log-loss differences.
+
+    Scores M fixed-length blocks on both models, computes d_i = king_loss_i -
+    challenger_loss_i (positive means challenger is better), then bootstraps the
+    mean to get a one-sided lower confidence bound (LCB).  Accepts only if
+    LCB > delta.
+
+    Calls on_progress(info_dict) after each batch if provided.
+    """
     n_tokens = get_shard_info(r2, shard_key)
     n_sequences = n_tokens // seq_len
     actual_N = min(eval_n, n_sequences)
-    K = int(binom.isf(alpha, actual_N, 0.5))
-    log.info("sign test: N=%d actual_N=%d K=%d alpha=%s", eval_n, actual_N, K, alpha)
+    log.info("bootstrap test: N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
+             eval_n, actual_N, alpha, delta, n_bootstrap)
 
     seed_material = seed_str.encode()
     seed = int.from_bytes(hashlib.blake2b(seed_material, digest_size=8).digest(), "little")
@@ -319,7 +418,7 @@ def run_sign_test(king_eval, challenger_eval, r2, shard_key, eval_n, alpha,
         for i in range(0, len(eval_indices), batch_size)
     ]
 
-    s, n, n_ties = 0, 0, 0
+    all_diffs = []
     king_sum, chall_sum = 0.0, 0.0
     total_done = 0
     t0 = time.time()
@@ -333,70 +432,61 @@ def run_sign_test(king_eval, challenger_eval, r2, shard_key, eval_n, alpha,
             king_losses = king_eval.compute_losses(token_batches)
             chall_losses = king_losses
         else:
-            with ThreadPoolExecutor(max_workers=2) as pair_pool:
-                kf = pair_pool.submit(king_eval.compute_losses, token_batches)
-                cf = pair_pool.submit(challenger_eval.compute_losses, token_batches)
-                king_losses = kf.result()
-                chall_losses = cf.result()
+            king_losses, chall_losses = compute_paired_multi_gpu(
+                king_eval, challenger_eval, token_batches,
+            )
 
-        for kl, cl in zip(king_losses, chall_losses):
+        for k_loss, c_loss in zip(king_losses, chall_losses):
             total_done += 1
-            king_sum += kl
-            chall_sum += cl
-            if kl == cl:
-                n_ties += 1
-            else:
-                n += 1
-                if cl < kl:
-                    s += 1
+            king_sum += k_loss
+            chall_sum += c_loss
+            all_diffs.append(k_loss - c_loss)
 
         elapsed = time.time() - t0
         seqs_per_sec = total_done / elapsed if elapsed > 0 else 0
-        wr = s / n if n else 0
+        mu_hat = np.mean(all_diffs) if all_diffs else 0.0
         log.info(
-            "batch %d/%d | done=%d/%d | s=%d n=%d ties=%d wr=%.3f | %.1f seq/s",
-            bi + 1, len(batches), total_done, actual_N, s, n, n_ties, wr, seqs_per_sec,
+            "batch %d/%d | done=%d/%d | mu_hat=%.6f | %.1f seq/s",
+            bi + 1, len(batches), total_done, actual_N, mu_hat, seqs_per_sec,
         )
 
-        evaluated = n + n_ties
         if on_progress:
             on_progress({
                 "done": total_done, "total": actual_N,
-                "s": s, "n": n, "n_ties": n_ties,
-                "win_rate": round(wr, 6),
-                "avg_king_loss": round(king_sum / evaluated, 6) if evaluated else 0,
-                "avg_challenger_loss": round(chall_sum / evaluated, 6) if evaluated else 0,
+                "mu_hat": round(float(mu_hat), 6),
+                "avg_king_loss": round(king_sum / total_done, 6),
+                "avg_challenger_loss": round(chall_sum / total_done, 6),
                 "seqs_per_sec": round(seqs_per_sec, 1),
             })
 
-        if n > 0:
-            if s >= K:
-                log.info("EARLY STOP: challenger wins s=%d >= K=%d", s, K)
-                break
-            remaining = actual_N - (n + n_ties)
-            if s + remaining < K:
-                log.info("EARLY STOP: king holds s=%d remaining=%d", s, remaining)
-                break
-
     elapsed = time.time() - t0
-    total = n + n_ties
-    accepted = s >= K
+    d = np.array(all_diffs)
+    mu_hat = float(d.mean())
+
+    boot_rng = np.random.Generator(np.random.PCG64(seed ^ 0xB007))
+    boot_means = np.empty(n_bootstrap)
+    for b in range(n_bootstrap):
+        idx = boot_rng.integers(0, len(d), size=len(d))
+        boot_means[b] = d[idx].mean()
+    lcb = float(np.quantile(boot_means, alpha))
+
+    accepted = lcb > delta
+    log.info("bootstrap result: mu_hat=%.6f lcb=%.6f delta=%.6f accepted=%s",
+             mu_hat, lcb, delta, accepted)
 
     verdict = {
         "accepted": accepted,
         "verdict": "challenger" if accepted else "king",
-        "S_N": s,
-        "K": K,
-        "N": actual_N,
-        "n_evaluated": n,
-        "n_ties": n_ties,
-        "win_rate": round(s / n, 6) if n else 0,
+        "mu_hat": round(mu_hat, 6),
+        "lcb": round(lcb, 6),
+        "delta": delta,
         "alpha": alpha,
-        "early_stopped": total < actual_N,
-        "avg_king_loss": round(king_sum / total, 6) if total else 0,
-        "avg_challenger_loss": round(chall_sum / total, 6) if total else 0,
+        "n_bootstrap": n_bootstrap,
+        "N": actual_N,
+        "avg_king_loss": round(king_sum / total_done, 6) if total_done else 0,
+        "avg_challenger_loss": round(chall_sum / total_done, 6) if total_done else 0,
         "wall_time_s": round(elapsed, 1),
-        "seqs_per_sec": round(total / elapsed, 1) if elapsed > 0 else 0,
+        "seqs_per_sec": round(total_done / elapsed, 1) if elapsed > 0 else 0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     return verdict
@@ -417,7 +507,9 @@ def main():
     parser.add_argument("--king", required=True, help="HF repo for king model")
     parser.add_argument("--challenger", required=True, help="HF repo for challenger model")
     parser.add_argument("--n", type=int, default=100, help="Number of sequences to evaluate")
-    parser.add_argument("--alpha", type=float, default=0.001, help="Sign test significance level")
+    parser.add_argument("--alpha", type=float, default=0.001, help="Bootstrap confidence level (one-sided)")
+    parser.add_argument("--delta", type=float, default=0.01, help="Minimum effect threshold in nats/token")
+    parser.add_argument("--n-bootstrap", type=int, default=10000, help="Number of bootstrap replicates")
     parser.add_argument("--batch-size", type=int, default=64, help="Sequences per batch (split across GPUs)")
     parser.add_argument("--seq-len", type=int, default=2048, help="Tokens per sequence")
     parser.add_argument("--gpus", default="auto", help="Comma-separated GPU IDs or 'auto' (default: auto)")
@@ -470,14 +562,17 @@ def main():
     log.info("  king:       %s", args.king)
     log.info("  challenger: %s", args.challenger)
     log.info("  GPUs:       %s (%s)", gpu_ids, "shared" if same_model else "split")
-    log.info("  N=%d  alpha=%s  batch=%d  seq_len=%d", args.n, args.alpha, args.batch_size, args.seq_len)
+    log.info("  N=%d  alpha=%s  delta=%.6f  bootstrap=%d  batch=%d  seq_len=%d",
+             args.n, args.alpha, args.delta, args.n_bootstrap, args.batch_size, args.seq_len)
     log.info("  shard: %s", shard_key)
     log.info("  seed:  %s", args.seed)
     log.info("=" * 60)
 
-    verdict = run_sign_test(
+    verdict = run_bootstrap_test(
         king_eval, challenger_eval,
-        r2, shard_key, args.n, args.alpha, args.seq_len, args.batch_size, args.seed,
+        r2, shard_key, args.n, args.alpha, args.delta,
+        args.seq_len, args.batch_size, args.seed,
+        n_bootstrap=args.n_bootstrap,
     )
 
     king_eval.shutdown()
