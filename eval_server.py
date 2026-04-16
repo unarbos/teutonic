@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from eval_torch import (
     R2, MultiGPUEvaluator, run_bootstrap_test, parse_gpu_ids,
     check_weight_norms,
+    compute_king_baseline, eval_challenger_against_baseline,
 )
 
 log = logging.getLogger("eval_server")
@@ -45,6 +46,8 @@ _king_hash: str | None = None
 _king_revision: str | None = None
 _eval_lock = threading.Lock()
 _evals: dict[str, dict] = {}
+_king_baseline: dict | None = None
+_king_baseline_key: str | None = None
 
 DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "256"))
 DEFAULT_EVAL_N = int(os.environ.get("EVAL_N", "10000"))
@@ -102,6 +105,26 @@ class EvalRequest(BaseModel):
     n_bootstrap: int = DEFAULT_BOOTSTRAP_B
 
 
+class KingBaselineRequest(BaseModel):
+    king_repo: str
+    shard_key: str
+    seed_str: str
+    king_hash: str = ""
+    king_revision: str = ""
+    eval_n: int = DEFAULT_EVAL_N
+    seq_len: int = DEFAULT_SEQ_LEN
+    batch_size: int = DEFAULT_BATCH_SIZE
+
+
+class ChallengerEvalRequest(BaseModel):
+    challenger_repo: str
+    challenger_revision: str = ""
+    alpha: float = DEFAULT_ALPHA
+    delta: float = DEFAULT_DELTA
+    batch_size: int = DEFAULT_BATCH_SIZE
+    n_bootstrap: int = DEFAULT_BOOTSTRAP_B
+
+
 # ---------------------------------------------------------------------------
 # Model management
 # ---------------------------------------------------------------------------
@@ -109,12 +132,17 @@ class EvalRequest(BaseModel):
 def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
     """Load or reuse king evaluator. Reloads if repo, revision, or king_hash changed."""
     global _king_evaluator, _king_repo, _king_hash, _king_revision
+    global _king_baseline, _king_baseline_key
     if (_king_evaluator and _king_repo == repo
             and (not revision or _king_revision == revision)
             and (not king_hash or _king_hash == king_hash)):
         log.info("reusing cached king evaluator for %s (rev=%s)",
                  repo, (_king_revision or "?")[:12])
         return _king_evaluator
+
+    # King changed — invalidate cached baseline
+    _king_baseline = None
+    _king_baseline_key = None
 
     needs_reload = _king_evaluator is not None
     if needs_reload:
@@ -330,6 +358,97 @@ def _run_eval(eval_id: str, req: EvalRequest):
 
 
 # ---------------------------------------------------------------------------
+# Batch mode runners
+# ---------------------------------------------------------------------------
+
+def _run_king_baseline(eval_id: str, req: KingBaselineRequest):
+    global _king_baseline, _king_baseline_key
+    record = _evals[eval_id]
+    record["state"] = "running"
+    event_q: Queue = record["events"]
+
+    try:
+        king_eval = _ensure_king(req.king_repo, req.king_hash, req.king_revision)
+
+        baseline_key = f"{req.shard_key}:{req.seed_str}"
+        if _king_baseline and _king_baseline_key == baseline_key:
+            log.info("reusing cached king baseline for %s", baseline_key[:40])
+            baseline = _king_baseline
+        else:
+            def _on_progress(info):
+                record["progress"] = info
+                event_q.put({"type": "progress", "data": info})
+
+            baseline = compute_king_baseline(
+                king_eval, _r2, req.shard_key, req.eval_n,
+                req.seq_len, req.batch_size, req.seed_str,
+                on_progress=_on_progress,
+            )
+            _king_baseline = baseline
+            _king_baseline_key = baseline_key
+
+        result = {
+            "actual_N": baseline["actual_N"],
+            "avg_king_loss": baseline["avg_king_loss"],
+            "wall_time_s": baseline["wall_time_s"],
+        }
+        record["state"] = "completed"
+        record["verdict"] = result
+        event_q.put({"type": "verdict", "data": result})
+
+    except Exception as e:
+        log.exception("king baseline %s failed", eval_id)
+        record["state"] = "failed"
+        record["error"] = str(e)
+        event_q.put({"type": "error", "data": {"error": str(e)}})
+
+    finally:
+        _prune_evals()
+        _eval_lock.release()
+
+
+def _run_challenger_eval(eval_id: str, req: ChallengerEvalRequest):
+    record = _evals[eval_id]
+    record["state"] = "running"
+    event_q: Queue = record["events"]
+
+    try:
+        challenger_eval = _load_challenger(req.challenger_repo, req.challenger_revision)
+
+        def _on_progress(info):
+            record["progress"] = info
+            event_q.put({"type": "progress", "data": info})
+
+        verdict = eval_challenger_against_baseline(
+            challenger_eval, _king_baseline,
+            req.alpha, req.delta,
+            req.batch_size,
+            n_bootstrap=req.n_bootstrap,
+            on_progress=_on_progress,
+        )
+
+        challenger_eval.shutdown()
+        del challenger_eval
+        torch.cuda.empty_cache()
+
+        record["state"] = "completed"
+        record["verdict"] = verdict
+        event_q.put({"type": "verdict", "data": verdict})
+
+        _cleanup_hf_cache()
+
+    except Exception as e:
+        log.exception("challenger eval %s failed", eval_id)
+        record["state"] = "failed"
+        record["error"] = str(e)
+        event_q.put({"type": "error", "data": {"error": str(e)}})
+
+    finally:
+        _prune_evals()
+        _eval_lock.release()
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -365,6 +484,54 @@ async def start_eval(req: EvalRequest):
     thread = threading.Thread(target=_run_eval, args=(eval_id, req), daemon=True)
     thread.start()
 
+    return {"eval_id": eval_id}
+
+
+@app.post("/eval/king-baseline")
+async def start_king_baseline(req: KingBaselineRequest):
+    acquired = _eval_lock.acquire(blocking=False)
+    if not acquired:
+        raise HTTPException(status_code=409, detail="an eval is already running")
+
+    eval_id = uuid.uuid4().hex[:8]
+    _evals[eval_id] = {
+        "state": "pending",
+        "progress": {},
+        "verdict": None,
+        "error": None,
+        "request": req.model_dump(),
+        "events": Queue(),
+        "created_at": time.time(),
+    }
+
+    thread = threading.Thread(target=_run_king_baseline, args=(eval_id, req), daemon=True)
+    thread.start()
+    return {"eval_id": eval_id}
+
+
+@app.post("/eval/challenger")
+async def start_challenger_eval(req: ChallengerEvalRequest):
+    if not _king_baseline:
+        raise HTTPException(status_code=400,
+                            detail="no king baseline computed; call /eval/king-baseline first")
+
+    acquired = _eval_lock.acquire(blocking=False)
+    if not acquired:
+        raise HTTPException(status_code=409, detail="an eval is already running")
+
+    eval_id = uuid.uuid4().hex[:8]
+    _evals[eval_id] = {
+        "state": "pending",
+        "progress": {},
+        "verdict": None,
+        "error": None,
+        "request": req.model_dump(),
+        "events": Queue(),
+        "created_at": time.time(),
+    }
+
+    thread = threading.Thread(target=_run_challenger_eval, args=(eval_id, req), daemon=True)
+    thread.start()
     return {"eval_id": eval_id}
 
 

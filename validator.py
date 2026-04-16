@@ -59,6 +59,8 @@ TMC_API_KEY = os.environ.get("TMC_API_KEY", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
+BATCH_MAX = int(os.environ.get("TEUTONIC_BATCH_MAX", "5"))
+
 REPO_PATTERN = r"^[^/]+/Teutonic-I-.+$"
 
 TMC_BASE = "https://api.taomarketcap.com/public/v1"
@@ -805,6 +807,263 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
     state.flush()
 
 
+async def process_batch(state, r2, batch_entries, subtensor, wallet):
+    """Evaluate a batch of challengers against shared king baseline, crown the best."""
+
+    # --- Phase 0: Validate and prepare entries ---
+    valid_entries = []
+    for entry in batch_entries:
+        cid = entry["challenge_id"]
+        hotkey = entry["hotkey"]
+        hf_repo = entry["hf_repo"]
+
+        king_hotkey = state.king.get("hotkey", "")
+        if king_hotkey and hotkey == king_hotkey:
+            log.info("batch: skipping %s: hotkey is current king", cid)
+            continue
+        if hf_repo in state.failed_repos:
+            log.info("batch: skipping %s: repo %s previously failed", cid, hf_repo)
+            continue
+        if hf_repo in state.evaluated_repos:
+            log.info("batch: skipping %s: repo %s already evaluated", cid, hf_repo)
+            continue
+
+        rejection = validate_challenger_config(
+            hf_repo,
+            king_repo=state.king.get("hf_repo", ""),
+            king_revision=state.king.get("king_revision", ""),
+        )
+        if rejection:
+            log.warning("batch: rejecting %s (%s): %s", cid, hf_repo, rejection)
+            state.failed_repos.add(hf_repo)
+            state.event({"event": "config_rejected", "challenge_id": cid,
+                         "hf_repo": hf_repo, "reason": rejection})
+            continue
+
+        try:
+            info = HfApi(token=HF_TOKEN or None).model_info(hf_repo, revision="main")
+            entry["challenger_revision"] = info.sha
+            log.info("batch: %s pinned at %s", hf_repo, info.sha[:12])
+        except Exception:
+            log.warning("batch: cannot get SHA for %s, skipping", hf_repo)
+            state.failed_repos.add(hf_repo)
+            continue
+
+        valid_entries.append(entry)
+
+    if not valid_entries:
+        log.info("batch: no valid entries after validation")
+        return
+
+    log.info("batch: %d valid challengers", len(valid_entries))
+
+    # --- Phase 1: Compute batch-level shard + seed ---
+    ref_block = valid_entries[0]["block"]
+    block_hash = "default"
+    try:
+        block_hash = subtensor.get_block_hash(ref_block) or "default"
+    except Exception:
+        pass
+
+    king_hash = state.king.get("king_hash", "")
+    seed_str = f"{block_hash}:{king_hash}"
+
+    manifest = r2.get("dataset/v1/manifest.json")
+    if not manifest:
+        log.error("batch: no dataset manifest")
+        return
+    n_shards = manifest["total_shards"]
+    shard_idx = int.from_bytes(
+        hashlib.blake2b(seed_str.encode(), digest_size=8).digest(), "little"
+    ) % n_shards
+    shard_key = manifest["shards"][shard_idx]["key"]
+
+    king_repo = state.king.get("hf_repo", SEED_REPO)
+    king_revision = state.king.get("king_revision", "")
+
+    # --- Phase 2: Compute king baseline ---
+    log.info("batch: computing king baseline on shard %s", shard_key)
+    state.current_eval = {
+        "challenge_id": "batch-king-baseline",
+        "challenger_repo": "(king baseline)",
+        "hotkey": "",
+        "progress": 0, "total": EVAL_N, "mu_hat": 0,
+        "avg_king_loss": 0, "avg_challenger_loss": 0,
+        "loading": True,
+        "started_at": _now(),
+        "batch_total": len(valid_entries),
+    }
+    state.flush_dashboard()
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=30.0)) as client:
+        resp = await client.post(f"{EVAL_SERVER_URL}/eval/king-baseline", json={
+            "king_repo": king_repo,
+            "shard_key": shard_key,
+            "seed_str": seed_str,
+            "king_hash": king_hash,
+            "king_revision": king_revision,
+            "eval_n": EVAL_N,
+            "seq_len": SEQ_LEN,
+        })
+        resp.raise_for_status()
+        eval_id = resp.json()["eval_id"]
+        log.info("batch: king baseline dispatched as %s", eval_id)
+
+        async with client.stream("GET", f"{EVAL_SERVER_URL}/eval/{eval_id}/stream",
+                                  timeout=httpx.Timeout(1800.0)) as stream:
+            async for line in stream.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                event = json.loads(line[6:])
+                if event["type"] == "progress":
+                    d = event["data"]
+                    state.current_eval.update({
+                        "progress": d.get("done", 0),
+                        "total": d.get("total", EVAL_N),
+                        "avg_king_loss": d.get("avg_king_loss", 0),
+                    })
+                    state.flush_dashboard()
+                elif event["type"] == "verdict":
+                    baseline_result = event["data"]
+                    log.info("batch: king baseline complete: avg_king_loss=%.6f (%.1fs)",
+                             baseline_result["avg_king_loss"], baseline_result["wall_time_s"])
+                    break
+                elif event["type"] == "error":
+                    raise RuntimeError(f"king baseline error: {event['data']}")
+
+    # --- Phase 3: Evaluate each challenger ---
+    verdicts = []
+
+    for i, entry in enumerate(valid_entries):
+        cid = entry["challenge_id"]
+        hotkey = entry["hotkey"]
+        hf_repo = entry["hf_repo"]
+        challenger_revision = entry["challenger_revision"]
+
+        log.info("batch: evaluating challenger %d/%d: %s (%s)",
+                 i + 1, len(valid_entries), cid, hf_repo)
+
+        r2.put(f"eval/{cid}/meta.json", {
+            "challenge_id": cid, "king_repo": king_repo,
+            "king_revision": king_revision,
+            "challenger_repo": hf_repo, "challenger_revision": challenger_revision,
+            "hotkey": hotkey, "batch_mode": True,
+            "N": EVAL_N, "alpha": EVAL_ALPHA, "delta": EVAL_DELTA, "shard": shard_key,
+        })
+
+        state.current_eval = {
+            "challenge_id": cid, "challenger_repo": hf_repo, "hotkey": hotkey,
+            "progress": 0, "total": EVAL_N, "mu_hat": 0,
+            "avg_king_loss": 0, "avg_challenger_loss": 0,
+            "started_at": _now(),
+            "batch_index": i + 1,
+            "batch_total": len(valid_entries),
+        }
+        state.flush_dashboard()
+
+        verdict = None
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=30.0)) as client:
+                resp = await client.post(f"{EVAL_SERVER_URL}/eval/challenger", json={
+                    "challenger_repo": hf_repo,
+                    "challenger_revision": challenger_revision,
+                    "alpha": EVAL_ALPHA,
+                    "delta": EVAL_DELTA,
+                })
+                resp.raise_for_status()
+                eval_id = resp.json()["eval_id"]
+
+                async with client.stream("GET", f"{EVAL_SERVER_URL}/eval/{eval_id}/stream",
+                                          timeout=httpx.Timeout(1800.0)) as stream:
+                    async for line in stream.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        event = json.loads(line[6:])
+                        if event["type"] == "progress":
+                            d = event["data"]
+                            state.current_eval.update({
+                                "progress": d.get("done", 0),
+                                "total": d.get("total", EVAL_N),
+                                "mu_hat": d.get("mu_hat", 0),
+                                "avg_king_loss": d.get("avg_king_loss", 0),
+                                "avg_challenger_loss": d.get("avg_challenger_loss", 0),
+                            })
+                            state.flush_dashboard()
+                        elif event["type"] == "verdict":
+                            verdict = event["data"]
+                            verdict["challenge_id"] = cid
+                            break
+                        elif event["type"] == "error":
+                            raise RuntimeError(f"eval server error: {event['data']}")
+
+        except Exception:
+            log.exception("batch: eval failed for %s", cid)
+            state.stats["failed"] += 1
+            state.current_eval = None
+            state.flush_dashboard()
+            continue
+
+        if not verdict:
+            log.error("batch: no verdict for %s", cid)
+            state.stats["failed"] += 1
+            continue
+
+        r2.put(f"eval/{cid}/verdict.json", verdict)
+        log.info("batch: %s verdict: %s (mu_hat=%.6f lcb=%.6f)",
+                 cid, verdict["verdict"], verdict.get("mu_hat", 0), verdict.get("lcb", 0))
+
+        state.evaluated_repos.add(hf_repo)
+        state.record_verdict(verdict, hf_repo, hotkey)
+
+        if verdict.get("accepted", False):
+            state.stats["accepted"] += 1
+            verdicts.append((entry, verdict))
+        else:
+            state.stats["rejected"] += 1
+
+        state.event({"event": "eval_completed", "challenge_id": cid,
+                     "hotkey": hotkey, "accepted": verdict.get("accepted", False),
+                     **verdict})
+
+    # --- Phase 4: Select best ---
+    state.current_eval = None
+
+    if not verdicts:
+        log.info("batch: no challengers accepted (%d evaluated)", len(valid_entries))
+        state.flush_dashboard()
+        state.flush()
+        return
+
+    best_entry, best_verdict = max(verdicts, key=lambda x: x[1].get("mu_hat", 0))
+    best_cid = best_entry["challenge_id"]
+    best_hotkey = best_entry["hotkey"]
+    best_repo = best_entry["hf_repo"]
+    best_revision = best_entry["challenger_revision"]
+
+    log.info("BATCH WINNER: %s from %s (mu_hat=%.6f, %d/%d accepted)",
+             best_cid, best_hotkey[:16], best_verdict.get("mu_hat", 0),
+             len(verdicts), len(valid_entries))
+
+    state.set_king(best_hotkey, best_repo, best_entry.get("model_hash", ""),
+                   best_entry.get("block", 0), best_cid,
+                   king_revision=best_revision)
+    state.last_winner_hotkey = best_hotkey
+    await notify_new_king(state.king, best_verdict)
+    if set_weights(subtensor, wallet, NETUID, best_hotkey):
+        state.last_weight_block = subtensor.block
+
+    state.flush()
+    state.flush_dashboard()
+    state.event({
+        "event": "batch_completed",
+        "batch_size": len(valid_entries),
+        "accepted_count": len(verdicts),
+        "winner_challenge_id": best_cid,
+        "winner_hotkey": best_hotkey,
+        "winner_mu_hat": best_verdict.get("mu_hat", 0),
+    })
+
+
 async def main():
     args = parse_args()
 
@@ -863,10 +1122,10 @@ async def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
-    log.info("validator running | king=%s@%s | eval_server=%s | poll=%ds",
+    log.info("validator running | king=%s@%s | eval_server=%s | poll=%ds | batch_max=%d",
              state.king.get("hf_repo", "?"),
              state.king.get("king_revision", "?")[:12],
-             EVAL_SERVER_URL, POLL_INTERVAL)
+             EVAL_SERVER_URL, POLL_INTERVAL, BATCH_MAX)
 
     while True:
         try:
@@ -889,39 +1148,75 @@ async def main():
                     if cid:
                         log.info("queued %s from %s (new)", cid, rev["hotkey"][:16])
 
-            while state.queue:
-                entry = state.queue.pop(0)
-                is_reeval = entry.get("reeval", False)
-                state.current_eval = {
-                    "challenge_id": entry.get("challenge_id", "?"),
-                    "challenger_repo": entry.get("hf_repo", ""),
-                    "hotkey": entry.get("hotkey", ""),
-                    "progress": 0, "total": EVAL_N, "mu_hat": 0,
-                    "avg_king_loss": 0, "avg_challenger_loss": 0,
-                    "loading": True,
-                    "started_at": _now(),
-                }
-                state.flush_dashboard()
-                state.flush()
-                try:
-                    await process_challenge(state, r2, entry, subtensor, wallet,
-                                            check_stale=not is_reeval and args.seen)
-                except Exception:
-                    log.exception("eval failed: %s", entry.get("challenge_id"))
-                    state.stats["failed"] += 1
-                    state.current_eval = None
+            if BATCH_MAX <= 1:
+                # Legacy single-eval mode (unchanged)
+                while state.queue:
+                    entry = state.queue.pop(0)
+                    is_reeval = entry.get("reeval", False)
+                    state.current_eval = {
+                        "challenge_id": entry.get("challenge_id", "?"),
+                        "challenger_repo": entry.get("hf_repo", ""),
+                        "hotkey": entry.get("hotkey", ""),
+                        "progress": 0, "total": EVAL_N, "mu_hat": 0,
+                        "avg_king_loss": 0, "avg_challenger_loss": 0,
+                        "loading": True,
+                        "started_at": _now(),
+                    }
                     state.flush_dashboard()
-
-                fresh = scan_reveals(subtensor, NETUID, state.seen)
-                if fresh:
                     state.flush()
-                    for rev in fresh:
-                        cid = state.enqueue(rev)
-                        if cid:
-                            log.info("queued %s from %s (new, mid-cycle)", cid, rev["hotkey"][:16])
+                    try:
+                        await process_challenge(state, r2, entry, subtensor, wallet,
+                                                check_stale=not is_reeval and args.seen)
+                    except Exception:
+                        log.exception("eval failed: %s", entry.get("challenge_id"))
+                        state.stats["failed"] += 1
+                        state.current_eval = None
+                        state.flush_dashboard()
+
+                    fresh = scan_reveals(subtensor, NETUID, state.seen)
+                    if fresh:
+                        state.flush()
+                        for rev in fresh:
+                            cid = state.enqueue(rev)
+                            if cid:
+                                log.info("queued %s from %s (new, mid-cycle)", cid, rev["hotkey"][:16])
+                        new_items = [e for e in state.queue if not e.get("reeval")]
+                        reeval_items = [e for e in state.queue if e.get("reeval")]
+                        state.queue = new_items + reeval_items
+            else:
+                # Batch mode: evaluate all pending, crown the best
+                while state.queue:
                     new_items = [e for e in state.queue if not e.get("reeval")]
                     reeval_items = [e for e in state.queue if e.get("reeval")]
-                    state.queue = new_items + reeval_items
+                    batch = new_items[:BATCH_MAX]
+                    remaining_slots = BATCH_MAX - len(batch)
+                    if remaining_slots > 0:
+                        batch.extend(reeval_items[:remaining_slots])
+
+                    batch_ids = {e["challenge_id"] for e in batch}
+                    state.queue = [e for e in state.queue if e["challenge_id"] not in batch_ids]
+
+                    log.info("batch: collected %d challengers (max=%d, queue_remaining=%d)",
+                             len(batch), BATCH_MAX, len(state.queue))
+
+                    try:
+                        await process_batch(state, r2, batch, subtensor, wallet)
+                    except Exception:
+                        log.exception("batch eval failed")
+                        state.stats["failed"] += len(batch)
+                        state.current_eval = None
+                        state.flush_dashboard()
+
+                    fresh = scan_reveals(subtensor, NETUID, state.seen)
+                    if fresh:
+                        state.flush()
+                        for rev in fresh:
+                            cid = state.enqueue(rev)
+                            if cid:
+                                log.info("queued %s from %s (new, mid-cycle)", cid, rev["hotkey"][:16])
+                        new_items = [e for e in state.queue if not e.get("reeval")]
+                        reeval_items = [e for e in state.queue if e.get("reeval")]
+                        state.queue = new_items + reeval_items
 
             state.current_eval = None
 

@@ -642,6 +642,155 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
 
 
 # ---------------------------------------------------------------------------
+# Batch mode — decomposed king baseline + challenger eval
+# ---------------------------------------------------------------------------
+
+def compute_king_baseline(king_eval, r2, shard_key, eval_n, seq_len, batch_size,
+                          seed_str, on_progress=None):
+    """Compute king losses on deterministic sequences. Returns reusable baseline.
+
+    The returned dict contains everything needed to evaluate multiple challengers
+    against the same data without recomputing king losses.
+    """
+    n_tokens = get_shard_info(r2, shard_key)
+    n_sequences = n_tokens // seq_len
+    actual_N = min(eval_n, n_sequences)
+    log.info("king baseline: N=%d actual_N=%d shard=%s", eval_n, actual_N, shard_key)
+
+    seed_material = seed_str.encode()
+    seed = int.from_bytes(hashlib.blake2b(seed_material, digest_size=8).digest(), "little")
+    rng = np.random.Generator(np.random.PCG64(seed))
+    eval_indices = rng.choice(n_sequences, size=actual_N, replace=False).tolist()
+
+    log.info("downloading shard %s ...", shard_key)
+    data_offset, shard_data = download_shard(r2, shard_key)
+
+    log.info("extracting %d sequences", actual_N)
+    seq_cache = extract_sequences(shard_data, data_offset, eval_indices, seq_len)
+    log.info("extracted %d sequences", len(seq_cache))
+
+    batches = [eval_indices[i:i + batch_size] for i in range(0, len(eval_indices), batch_size)]
+
+    king_losses_all = []
+    t0 = time.time()
+    total_done = 0
+
+    for bi, batch_indices in enumerate(batches):
+        token_batches = [seq_cache[idx] for idx in batch_indices]
+        king_losses = king_eval.compute_losses(token_batches)
+        king_losses_all.extend(king_losses)
+        total_done += len(batch_indices)
+
+        elapsed = time.time() - t0
+        log.info("king baseline batch %d/%d | done=%d/%d | %.1f seq/s",
+                 bi + 1, len(batches), total_done, actual_N,
+                 total_done / elapsed if elapsed > 0 else 0)
+
+        if on_progress:
+            on_progress({
+                "done": total_done, "total": actual_N,
+                "phase": "king_baseline",
+                "avg_king_loss": round(sum(king_losses_all) / total_done, 6),
+                "seqs_per_sec": round(total_done / elapsed, 1) if elapsed > 0 else 0,
+            })
+
+    elapsed = time.time() - t0
+    avg_king_loss = round(sum(king_losses_all) / len(king_losses_all), 6)
+    log.info("king baseline complete: avg_loss=%.6f N=%d %.1fs", avg_king_loss, actual_N, elapsed)
+
+    return {
+        "eval_indices": eval_indices,
+        "seq_cache": seq_cache,
+        "king_losses": king_losses_all,
+        "seed": seed,
+        "actual_N": actual_N,
+        "shard_key": shard_key,
+        "wall_time_s": round(elapsed, 1),
+        "avg_king_loss": avg_king_loss,
+    }
+
+
+def eval_challenger_against_baseline(challenger_eval, baseline, alpha, delta,
+                                     batch_size, n_bootstrap=10000,
+                                     on_progress=None):
+    """Evaluate a challenger against pre-computed king baseline.
+
+    Uses the same sequences and king losses from the baseline dict.
+    Returns a verdict dict identical in structure to run_bootstrap_test output.
+    """
+    eval_indices = baseline["eval_indices"]
+    seq_cache = baseline["seq_cache"]
+    king_losses_all = baseline["king_losses"]
+    seed = baseline["seed"]
+    actual_N = baseline["actual_N"]
+
+    batches = [eval_indices[i:i + batch_size] for i in range(0, len(eval_indices), batch_size)]
+
+    chall_losses_all = []
+    t0 = time.time()
+    total_done = 0
+
+    for bi, batch_indices in enumerate(batches):
+        token_batches = [seq_cache[idx] for idx in batch_indices]
+        chall_losses = challenger_eval.compute_losses(token_batches)
+        chall_losses_all.extend(chall_losses)
+        total_done += len(batch_indices)
+
+        elapsed = time.time() - t0
+        king_sum = sum(king_losses_all[:total_done])
+        chall_sum = sum(chall_losses_all)
+        diffs_so_far = [k - c for k, c in zip(king_losses_all[:total_done], chall_losses_all)]
+        mu_hat = float(np.mean(diffs_so_far)) if diffs_so_far else 0.0
+
+        log.info("challenger batch %d/%d | done=%d/%d | mu_hat=%.6f | %.1f seq/s",
+                 bi + 1, len(batches), total_done, actual_N, mu_hat,
+                 total_done / elapsed if elapsed > 0 else 0)
+
+        if on_progress:
+            on_progress({
+                "done": total_done, "total": actual_N,
+                "mu_hat": round(mu_hat, 6),
+                "avg_king_loss": round(king_sum / total_done, 6),
+                "avg_challenger_loss": round(chall_sum / total_done, 6),
+                "seqs_per_sec": round(total_done / elapsed, 1) if elapsed > 0 else 0,
+            })
+
+    elapsed = time.time() - t0
+    all_diffs = [k - c for k, c in zip(king_losses_all, chall_losses_all)]
+    d = np.array(all_diffs)
+    mu_hat = float(d.mean())
+
+    boot_rng = np.random.Generator(np.random.PCG64(seed ^ 0xB007))
+    boot_means = np.empty(n_bootstrap)
+    for b in range(n_bootstrap):
+        idx = boot_rng.integers(0, len(d), size=len(d))
+        boot_means[b] = d[idx].mean()
+    lcb = float(np.quantile(boot_means, alpha))
+
+    accepted = lcb > delta
+    king_sum = sum(king_losses_all)
+    chall_sum = sum(chall_losses_all)
+    log.info("challenger result: mu_hat=%.6f lcb=%.6f delta=%.6f accepted=%s",
+             mu_hat, lcb, delta, accepted)
+
+    return {
+        "accepted": accepted,
+        "verdict": "challenger" if accepted else "king",
+        "mu_hat": round(mu_hat, 6),
+        "lcb": round(lcb, 6),
+        "delta": delta,
+        "alpha": alpha,
+        "n_bootstrap": n_bootstrap,
+        "N": actual_N,
+        "avg_king_loss": round(king_sum / actual_N, 6) if actual_N else 0,
+        "avg_challenger_loss": round(chall_sum / actual_N, 6) if actual_N else 0,
+        "wall_time_s": round(elapsed, 1),
+        "seqs_per_sec": round(actual_N / elapsed, 1) if elapsed > 0 else 0,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
