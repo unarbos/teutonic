@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Stream a HuggingFace dataset, tokenize, pack into .npy shards, and upload
-to Hippius. Maintains a live manifest so validators can use shards as soon as
-they appear.
+to Hippius using parallel workers. Maintains a live manifest so validators can
+use shards as soon as they appear.
+
+Each worker independently downloads a parquet file, tokenizes it, packs tokens
+into seq_len windows, and uploads 2 GB shards directly to Hippius. A shared
+atomic counter coordinates shard numbering across workers.
 
 Supports any parquet-based HF dataset with a 'text' column. Tested with:
   - uonlp/CulturaX (6.3T tokens, 167 languages, English-first)
   - nvidia/Nemotron-CC-v2 (10.3TB, cleaned Common Crawl)
 
 Usage:
-    python scripts/ingest_hf.py --dataset uonlp/CulturaX [--langs en,de,fr] [--dry-run]
-    python scripts/ingest_hf.py --dataset nvidia/Nemotron-CC-v2 [--dry-run]
+    python scripts/ingest_hf.py --dataset uonlp/CulturaX [--langs en,de,fr] [--workers 16]
+    python scripts/ingest_hf.py --dataset nvidia/Nemotron-CC-v2 [--workers 16]
 
 Env vars:
     HF_TOKEN                    HuggingFace token (gated datasets)
@@ -24,10 +28,12 @@ import argparse
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import signal
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import boto3
@@ -55,7 +61,7 @@ _shutdown = False
 
 def _handle_signal(signum, frame):
     global _shutdown
-    log.warning("received signal %s, will stop after current shard", signum)
+    log.warning("received signal %s, will stop after current work", signum)
     _shutdown = True
 
 
@@ -120,11 +126,6 @@ def flush_shard(buf: bytearray, shard_idx: int, client, dry_run: bool) -> dict:
 
     if not dry_run:
         client.upload_file(tmp_path, DS_BUCKET, key)
-        log.info("uploaded %s (%.2f GB, %s tokens, sha256=%s...)",
-                 key, size_bytes / 1e9, f"{n_tokens:,}", sha[:16])
-    else:
-        log.info("[DRY RUN] would upload %s (%.2f GB, %s tokens)",
-                 key, size_bytes / 1e9, f"{n_tokens:,}")
 
     Path(tmp_path).unlink(missing_ok=True)
 
@@ -134,38 +135,6 @@ def flush_shard(buf: bytearray, shard_idx: int, client, dry_run: bool) -> dict:
         "size_bytes": size_bytes,
         "sha256": sha,
     }
-
-
-def update_manifest(client, shard_info: dict, manifest: dict | None,
-                    dataset_repo: str, dry_run: bool) -> dict:
-    """Append shard to manifest and upload atomically."""
-    if manifest is None:
-        manifest = {
-            "version": "v2",
-            "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "tokenizer": TOKENIZER_NAME,
-            "dtype": "uint32",
-            "source": dataset_repo,
-            "total_tokens": 0,
-            "total_shards": 0,
-            "shard_prefix": f"{DEST_PREFIX}/shards/",
-            "shards": [],
-        }
-
-    manifest["shards"].append(shard_info)
-    manifest["total_shards"] = len(manifest["shards"])
-    manifest["total_tokens"] = sum(s["n_tokens"] for s in manifest["shards"])
-    manifest["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-    if not dry_run:
-        put_manifest(client, manifest)
-        log.info("manifest updated: %d shards, %s total tokens",
-                 manifest["total_shards"], f"{manifest['total_tokens']:,}")
-    else:
-        log.info("[DRY RUN] manifest would have %d shards, %s total tokens",
-                 manifest["total_shards"], f"{manifest['total_tokens']:,}")
-
-    return manifest
 
 
 # ---------------------------------------------------------------------------
@@ -256,11 +225,118 @@ def iter_parquet_texts(parquet_path: str):
 
 
 # ---------------------------------------------------------------------------
-# Main ingestion loop
+# Shared shard counter (set via worker initializer, accessed as global)
+# ---------------------------------------------------------------------------
+
+_shard_counter: multiprocessing.Value | None = None
+
+
+def next_shard_idx() -> int:
+    """Atomically allocate the next shard index."""
+    with _shard_counter.get_lock():
+        idx = _shard_counter.value
+        _shard_counter.value += 1
+        return idx
+
+
+# ---------------------------------------------------------------------------
+# Worker function (runs in subprocess)
+# ---------------------------------------------------------------------------
+
+def worker_process_file(
+    file_path: str,
+    dataset_repo: str,
+    token: str,
+    seq_len: int,
+    shard_size_bytes: int,
+    dry_run: bool,
+) -> tuple[str, list[dict], int, int]:
+    """Download a parquet file, tokenize, pack, and upload shards directly.
+
+    Returns (file_path, shard_info_list, n_samples, n_tokens).
+    """
+    worker_log = logging.getLogger(f"worker.{os.getpid()}")
+    worker_log.info("starting %s", file_path)
+
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, token=token)
+    client = make_client()
+
+    try:
+        local_path = hf_hub_download(
+            dataset_repo, file_path, repo_type="dataset", token=token,
+        )
+    except Exception as e:
+        worker_log.error("download failed %s: %s", file_path, e)
+        raise
+
+    buf = bytearray()
+    remainder: list[int] = []
+    n_samples = 0
+    n_tokens = 0
+    shard_infos: list[dict] = []
+
+    for text in iter_parquet_texts(local_path):
+        packed, remainder = tokenize_and_pack(tokenizer, text, remainder, seq_len)
+        if not packed:
+            continue
+
+        buf.extend(packed)
+        n_samples += 1
+        n_tokens += len(packed) // BYTES_PER_TOKEN
+
+        while len(buf) >= shard_size_bytes:
+            shard_data = bytearray(buf[:shard_size_bytes])
+            buf = bytearray(buf[shard_size_bytes:])
+            idx = next_shard_idx()
+            info = flush_shard(shard_data, idx, client, dry_run)
+            shard_infos.append(info)
+            worker_log.info(
+                "uploaded shard %d from %s (%s tokens)",
+                idx, file_path.split("/")[-1], f"{info['n_tokens']:,}",
+            )
+
+    if buf:
+        idx = next_shard_idx()
+        info = flush_shard(buf, idx, client, dry_run)
+        shard_infos.append(info)
+        worker_log.info(
+            "uploaded partial shard %d from %s (%s tokens)",
+            idx, file_path.split("/")[-1], f"{info['n_tokens']:,}",
+        )
+
+    try:
+        os.unlink(local_path)
+    except OSError:
+        pass
+
+    worker_log.info(
+        "finished %s: %d samples, %s tokens, %d shards",
+        file_path, n_samples, f"{n_tokens:,}", len(shard_infos),
+    )
+    return file_path, shard_infos, n_samples, n_tokens
+
+
+def _worker_init(counter: multiprocessing.Value):
+    """Initializer for worker processes — set shared counter, configure logging,
+    and ignore signals (main process handles shutdown)."""
+    global _shard_counter
+    _shard_counter = counter
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+# ---------------------------------------------------------------------------
+# Main ingestion loop (parallel)
 # ---------------------------------------------------------------------------
 
 def ingest(dataset_repo: str, shard_size_gb: float = 2.0, seq_len: int = 2048,
-           dry_run: bool = False, langs: list[str] | None = None):
+           dry_run: bool = False, langs: list[str] | None = None,
+           workers: int = 16):
     global _shutdown
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -280,10 +356,6 @@ def ingest(dataset_repo: str, shard_size_gb: float = 2.0, seq_len: int = 2048,
 
     client = make_client()
 
-    log.info("loading tokenizer %s", TOKENIZER_NAME)
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, token=token)
-    log.info("tokenizer loaded: vocab_size=%d", tokenizer.vocab_size)
-
     manifest = get_manifest(client)
     if manifest:
         start_shard_idx = manifest["total_shards"]
@@ -293,6 +365,8 @@ def ingest(dataset_repo: str, shard_size_gb: float = 2.0, seq_len: int = 2048,
         start_shard_idx = 0
         manifest = None
         log.info("starting fresh (no existing manifest)")
+
+    shard_counter = multiprocessing.Value("i", start_shard_idx)
 
     log.info("dataset: %s", dataset_repo)
     log.info("discovering parquet files...")
@@ -308,114 +382,109 @@ def ingest(dataset_repo: str, shard_size_gb: float = 2.0, seq_len: int = 2048,
         except Exception:
             pass
 
-    shard_idx = start_shard_idx
-    buf = bytearray()
-    remainder: list[int] = []
+    pending_files = [
+        (config, fp) for config, fp in parquet_files if fp not in completed_files
+    ]
+    log.info(
+        "%d files to process (%d already done), using %d workers",
+        len(pending_files), len(completed_files), workers,
+    )
+
     total_samples = 0
     total_tokens_ingested = 0
+    total_shards_uploaded = 0
+    failed_files: list[str] = []
     t0 = time.time()
 
-    consecutive_failures = 0
-    MAX_CONSECUTIVE_FAILURES = 10
-
-    for config_name, file_path in parquet_files:
-        if _shutdown:
-            break
-
-        if file_path in completed_files:
-            consecutive_failures = 0
-            continue
-
-        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-            log.error("aborting: %d consecutive download failures (dataset access may be pending)",
-                       consecutive_failures)
-            break
-
-        log.info("downloading %s", file_path)
-        try:
-            local_path = hf_hub_download(
-                dataset_repo,
-                file_path,
-                repo_type="dataset",
-                token=token,
-            )
-            consecutive_failures = 0
-        except Exception as e:
-            log.warning("failed to download %s: %s", file_path, e)
-            consecutive_failures += 1
-            continue
-
-        log.info("processing %s", file_path)
-        file_samples = 0
-
-        for text in iter_parquet_texts(local_path):
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_worker_init,
+        initargs=(shard_counter,),
+    ) as pool:
+        futures = {}
+        for _config, file_path in pending_files:
             if _shutdown:
                 break
+            fut = pool.submit(
+                worker_process_file,
+                file_path, dataset_repo, token, seq_len,
+                shard_size_bytes, dry_run,
+            )
+            futures[fut] = file_path
 
-            packed, remainder = tokenize_and_pack(tokenizer, text, remainder, seq_len)
-            if not packed:
-                continue
+        for fut in as_completed(futures):
+            file_path = futures[fut]
+            try:
+                fp, shard_infos, n_samples, n_tokens = fut.result()
 
-            packed_tokens = len(packed) // BYTES_PER_TOKEN
-            buf.extend(packed)
-            total_samples += 1
-            file_samples += 1
-            total_tokens_ingested += packed_tokens
+                for info in shard_infos:
+                    if manifest is None:
+                        manifest = {
+                            "version": "v2",
+                            "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "tokenizer": TOKENIZER_NAME,
+                            "dtype": "uint32",
+                            "source": dataset_repo,
+                            "total_tokens": 0,
+                            "total_shards": 0,
+                            "shard_prefix": f"{DEST_PREFIX}/shards/",
+                            "shards": [],
+                        }
+                    manifest["shards"].append(info)
+                    manifest["total_shards"] = len(manifest["shards"])
+                    manifest["total_tokens"] = sum(
+                        s["n_tokens"] for s in manifest["shards"]
+                    )
+                    manifest["updated"] = time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                    )
 
-            if len(buf) >= shard_size_bytes:
-                shard_data = bytes(buf[:shard_size_bytes])
-                buf = bytearray(buf[shard_size_bytes:])
+                if shard_infos and not dry_run:
+                    put_manifest(client, manifest)
 
-                shard_info = flush_shard(
-                    bytearray(shard_data), shard_idx, client, dry_run,
-                )
-                manifest = update_manifest(
-                    client, shard_info, manifest, dataset_repo, dry_run,
-                )
-                shard_idx += 1
+                total_samples += n_samples
+                total_tokens_ingested += n_tokens
+                total_shards_uploaded += len(shard_infos)
+
+                completed_files.add(fp)
+                state_path.write_text(json.dumps({
+                    "completed_files": sorted(completed_files),
+                    "shard_idx": shard_counter.value,
+                    "total_samples": total_samples,
+                    "total_tokens": total_tokens_ingested,
+                }))
 
                 elapsed = time.time() - t0
                 rate = total_tokens_ingested / elapsed if elapsed > 0 else 0
                 log.info(
-                    "progress: shard=%d samples=%s tokens=%s rate=%.0f tok/s elapsed=%.0fs",
-                    shard_idx, f"{total_samples:,}", f"{total_tokens_ingested:,}",
-                    rate, elapsed,
+                    "completed %s: +%d shards +%s tokens | "
+                    "total: %d shards %s tokens %.0f tok/s %d/%d files",
+                    fp.split("/")[-1], len(shard_infos), f"{n_tokens:,}",
+                    total_shards_uploaded, f"{total_tokens_ingested:,}",
+                    rate, len(completed_files), len(parquet_files),
                 )
 
-            if total_samples % 50_000 == 0 and total_samples > 0:
-                elapsed = time.time() - t0
-                rate = total_tokens_ingested / elapsed if elapsed > 0 else 0
-                log.info(
-                    "heartbeat: samples=%s tokens=%s buf=%.1f MB rate=%.0f tok/s",
-                    f"{total_samples:,}", f"{total_tokens_ingested:,}",
-                    len(buf) / 1e6, rate,
-                )
+            except Exception as e:
+                log.error("FAILED %s: %s", file_path, e)
+                failed_files.append(file_path)
 
-        completed_files.add(file_path)
-        state_path.write_text(json.dumps({
-            "completed_files": sorted(completed_files),
-            "shard_idx": shard_idx,
-            "total_samples": total_samples,
-            "total_tokens": total_tokens_ingested,
-        }))
-
-        log.info("finished %s: %d samples from this file (total: %s)",
-                 file_path, file_samples, f"{total_samples:,}")
-
-    if buf and not _shutdown:
-        shard_info = flush_shard(buf, shard_idx, client, dry_run)
-        manifest = update_manifest(client, shard_info, manifest, dataset_repo, dry_run)
-        shard_idx += 1
+            if _shutdown:
+                log.warning("shutdown requested, cancelling remaining work")
+                for remaining_fut in futures:
+                    remaining_fut.cancel()
+                break
 
     elapsed = time.time() - t0
+    rate = total_tokens_ingested / elapsed if elapsed > 0 else 0
     log.info(
-        "ingestion %s: %d shards, %s samples, %s tokens in %.0fs",
+        "ingestion %s: %d shards, %s samples, %s tokens in %.0fs (%.0f tok/s)",
         "stopped (signal)" if _shutdown else "complete",
-        shard_idx - start_shard_idx,
-        f"{total_samples:,}",
-        f"{total_tokens_ingested:,}",
-        elapsed,
+        total_shards_uploaded, f"{total_samples:,}",
+        f"{total_tokens_ingested:,}", elapsed, rate,
     )
+    if failed_files:
+        log.warning("%d files failed (will be retried on next run): %s",
+                    len(failed_files), failed_files[:20])
 
 
 def main():
@@ -431,6 +500,8 @@ def main():
                         help="Comma-separated language codes for CulturaX (default: en first, then others)")
     parser.add_argument("--shard-size-gb", type=float, default=2.0)
     parser.add_argument("--seq-len", type=int, default=2048)
+    parser.add_argument("--workers", type=int, default=16,
+                        help="Number of parallel worker processes (default: 16)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -442,6 +513,7 @@ def main():
         seq_len=args.seq_len,
         dry_run=args.dry_run,
         langs=langs,
+        workers=args.workers,
     )
 
 

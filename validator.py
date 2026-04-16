@@ -25,7 +25,7 @@ from huggingface_hub import HfApi
 # Config
 # ---------------------------------------------------------------------------
 
-EVAL_N = 10_000
+EVAL_N = 20_000
 EVAL_ALPHA = 0.001
 EVAL_DELTA = float(os.environ.get("TEUTONIC_EVAL_DELTA", "0.01"))
 SEQ_LEN = 2048
@@ -325,9 +325,14 @@ def get_king_config(king_repo: str, king_revision: str = ""):
     return _king_config
 
 
-def validate_challenger_config(hf_repo: str, king_repo: str = "",
+def validate_challenger_config(hf_repo: str, challenger_revision: str,
+                                king_repo: str = "",
                                 king_revision: str = "") -> str | None:
     """Check challenger config.json matches king architecture before deploying.
+
+    All HF API calls use the pinned challenger_revision to prevent TOCTOU
+    attacks where a miner swaps safetensors for a malicious pickle between
+    validation and evaluation.
 
     Returns None if OK, or a human-readable rejection reason.
     """
@@ -337,7 +342,9 @@ def validate_challenger_config(hf_repo: str, king_repo: str = "",
 
     try:
         api = HfApi(token=HF_TOKEN or None)
-        cfg_path = api.hf_hub_download(hf_repo, "config.json", token=HF_TOKEN or None)
+        cfg_path = api.hf_hub_download(hf_repo, "config.json",
+                                        token=HF_TOKEN or None,
+                                        revision=challenger_revision)
         with open(cfg_path) as f:
             challenger_cfg = json.load(f)
     except Exception as e:
@@ -356,7 +363,8 @@ def validate_challenger_config(hf_repo: str, king_repo: str = "",
         if king_val is not None and chall_val is not None and king_val != chall_val:
             return f"{key} mismatch: king={king_val} challenger={chall_val}"
 
-    st_files = [s for s in api.list_repo_files(hf_repo, token=HF_TOKEN or None)
+    st_files = [s for s in api.list_repo_files(hf_repo, token=HF_TOKEN or None,
+                                                revision=challenger_revision)
                 if s.endswith(".safetensors")]
     if not st_files:
         return "no .safetensors files in repo"
@@ -559,6 +567,27 @@ class State:
         })
         self.r2.put("state/dashboard_history.json", {"history": self.history})
 
+    def record_failure(self, entry, error_code, error_detail=""):
+        self.history.insert(0, {
+            "challenge_id": entry.get("challenge_id", "?"),
+            "hotkey": entry.get("hotkey", ""),
+            "uid": self.uid_map.get(entry.get("hotkey", ""), "?"),
+            "challenger_repo": entry.get("hf_repo", ""),
+            "accepted": False,
+            "verdict": "error",
+            "error_code": error_code,
+            "error_detail": str(error_detail),
+            "mu_hat": 0,
+            "lcb": 0,
+            "delta": 0,
+            "avg_king_loss": 0,
+            "avg_challenger_loss": 0,
+            "best_loss": 0,
+            "wall_time_s": 0,
+            "timestamp": _now(),
+        })
+        self.r2.put("state/dashboard_history.json", {"history": self.history})
+
     def refresh_uid_map(self, subtensor, netuid):
         try:
             meta = subtensor.metagraph(netuid)
@@ -658,18 +687,6 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         log.info("skipping %s: repo %s already evaluated this cycle", cid, hf_repo)
         return
 
-    rejection = validate_challenger_config(
-        hf_repo,
-        king_repo=state.king.get("hf_repo", ""),
-        king_revision=state.king.get("king_revision", ""),
-    )
-    if rejection:
-        log.warning("rejecting %s (%s): %s", cid, hf_repo, rejection)
-        state.failed_repos.add(hf_repo)
-        state.event({"event": "config_rejected", "challenge_id": cid,
-                     "hf_repo": hf_repo, "reason": rejection})
-        return
-
     if check_stale:
         current_hash = state.king.get("king_hash", "")
         entry_king_hash = entry.get("king_hash", "")
@@ -682,9 +699,23 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         challenger_info = HfApi(token=HF_TOKEN or None).model_info(hf_repo, revision="main")
         challenger_revision = challenger_info.sha
         log.info("challenger %s pinned at revision %s", hf_repo, challenger_revision[:12])
-    except Exception:
+    except Exception as exc:
         log.warning("cannot get commit SHA for %s, skipping", hf_repo)
         state.failed_repos.add(hf_repo)
+        state.record_failure(entry, "hf_metadata_error", str(exc))
+        return
+
+    rejection = validate_challenger_config(
+        hf_repo, challenger_revision,
+        king_repo=state.king.get("hf_repo", ""),
+        king_revision=state.king.get("king_revision", ""),
+    )
+    if rejection:
+        log.warning("rejecting %s (%s): %s", cid, hf_repo, rejection)
+        state.failed_repos.add(hf_repo)
+        state.record_failure(entry, "config_rejected", rejection)
+        state.event({"event": "config_rejected", "challenge_id": cid,
+                     "hf_repo": hf_repo, "reason": rejection})
         return
 
     block_hash = "default"
@@ -698,6 +729,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         manifest = r2.get("dataset/v1/manifest.json")
     if not manifest:
         log.error("no dataset manifest")
+        state.record_failure(entry, "no_manifest", "dataset manifest not found in v1 or v2")
         return
     n_shards = manifest["total_shards"]
     seed_mat = f"{block_hash}:{hotkey}".encode()
@@ -725,7 +757,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
 
     verdict = None
     async with httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=30.0)) as client:
-        resp = await client.post(f"{EVAL_SERVER_URL}/eval", json={
+        eval_payload = {
             "king_repo": king_repo,
             "challenger_repo": hf_repo,
             "block_hash": block_hash,
@@ -738,7 +770,25 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "alpha": EVAL_ALPHA,
             "delta": EVAL_DELTA,
             "seq_len": SEQ_LEN,
-        })
+        }
+
+        max_busy_retries = 20
+        for attempt in range(max_busy_retries):
+            resp = await client.post(f"{EVAL_SERVER_URL}/eval", json=eval_payload)
+            if resp.status_code != 409:
+                break
+            log.warning("%s: eval server busy (attempt %d/%d), waiting 30s",
+                        cid, attempt + 1, max_busy_retries)
+            await asyncio.sleep(30)
+        else:
+            log.error("%s: eval server still busy after %d attempts, re-queuing",
+                      cid, max_busy_retries)
+            state.queue.insert(0, entry)
+            state.current_eval = None
+            state.flush()
+            state.flush_dashboard()
+            return
+
         resp.raise_for_status()
         eval_id = resp.json()["eval_id"]
         log.info("eval %s dispatched to eval server as %s", cid, eval_id)
@@ -825,6 +875,10 @@ async def main():
         log.info("--seen: will re-evaluate old challengers when queue is empty")
     else:
         log.info("new-only mode: will idle when all hotkeys have been seen")
+
+    wallet = bt.wallet(name=WALLET_NAME, hotkey=WALLET_HOTKEY)
+    subtensor = bt.subtensor(network=NETWORK)
+    state.refresh_uid_map(subtensor, NETUID)
     state.flush_dashboard()
 
     html_path = os.path.join(os.path.dirname(__file__) or ".", "index.html")
@@ -833,9 +887,6 @@ async def main():
             html_bytes = f.read()
         r2.put_dashboard_raw("index.html", html_bytes, "text/html")
         log.info("uploaded dashboard to Hippius")
-
-    wallet = bt.wallet(name=WALLET_NAME, hotkey=WALLET_HOTKEY)
-    subtensor = bt.subtensor(network=NETWORK)
 
     if not state.king:
         seed_revision = ""
@@ -906,9 +957,10 @@ async def main():
                 try:
                     await process_challenge(state, r2, entry, subtensor, wallet,
                                             check_stale=not is_reeval and args.seen)
-                except Exception:
+                except Exception as exc:
                     log.exception("eval failed: %s", entry.get("challenge_id"))
                     state.stats["failed"] += 1
+                    state.record_failure(entry, "eval_error", str(exc))
                     state.current_eval = None
                     state.flush_dashboard()
 
@@ -959,10 +1011,10 @@ async def main():
 def parse_args():
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--seen", action=argparse.BooleanOptionalAction, default=False,
-                   help="When idle, replenish queue with re-eval candidates (default: off). "
-                        "Without --seen, only genuinely new hotkeys are evaluated and the "
-                        "validator idles when the queue is empty.")
+    p.add_argument("--seen", action=argparse.BooleanOptionalAction, default=True,
+                   help="When idle, replenish queue with re-eval candidates (default: on). "
+                        "Use --no-seen to only evaluate genuinely new hotkeys and idle "
+                        "when the queue is empty.")
     return p.parse_args()
 
 

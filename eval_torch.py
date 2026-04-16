@@ -365,6 +365,7 @@ def load_model(repo, device, label="model", force_download=False, revision=None)
                 token=os.environ.get("HF_TOKEN") or None,
                 force_download=force_download,
                 revision=revision or None,
+                use_safetensors=True,
             )
             log.info("using attn_implementation=%s", attn_impl)
             break

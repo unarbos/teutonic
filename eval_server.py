@@ -5,9 +5,10 @@ Runs on the GPU box. Caches the king model across evals, reloads only when
 the repo changes. Streams progress via SSE.
 
 Usage:
-    uvicorn eval_server:app --host 0.0.0.0 --port 9000
+    uvicorn eval_server:app --host 127.0.0.1 --port 9000
 
 Env vars: same as eval_torch.py (HF_TOKEN, TEUTONIC_R2_*)
+    EVAL_HOST   Bind address (default: 127.0.0.1, set to 0.0.0.0 only behind a firewall)
 """
 import asyncio
 import json
@@ -411,5 +412,6 @@ async def stream_eval(eval_id: str):
 
 if __name__ == "__main__":
     import uvicorn
+    host = os.environ.get("EVAL_HOST", "127.0.0.1")
     port = int(os.environ.get("EVAL_PORT", "9000"))
-    uvicorn.run("eval_server:app", host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run("eval_server:app", host=host, port=port, log_level="info")
