@@ -143,6 +143,7 @@ tr:hover td {
     color: var(--ink-inv);
     cursor: crosshair;
 }
+tr:hover td a { color: var(--ink-inv) !important; }
 th:last-child, td:last-child { text-align: right; }
 
 [data-theme="dark"] .logo-img { filter: invert(1); }
@@ -188,6 +189,70 @@ th:last-child, td:last-child { text-align: right; }
     border: none;
     cursor: pointer;
 }
+
+@media (max-width: 640px) {
+    .page {
+        padding: 16px 12px;
+        gap: 16px;
+    }
+
+    #top-bar {
+        flex-wrap: wrap;
+        gap: 4px 0;
+        font-size: 11px !important;
+    }
+    #top-bar > span,
+    #top-bar > button {
+        width: 50%;
+    }
+    #top-bar > span:nth-child(even),
+    #top-bar > button {
+        text-align: right;
+    }
+
+    .logo-img {
+        width: 56px !important;
+        height: 56px !important;
+    }
+    .header-title {
+        font-size: 16px !important;
+    }
+
+    .section-label {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+    .chart-controls {
+        width: 100%;
+        justify-content: flex-end;
+    }
+    #smooth-slider { width: 60px; }
+
+    .chart-wrap { aspect-ratio: 3 / 2; }
+
+    .scroll-box { overflow-x: auto; }
+    .scroll-hist table,
+    .scroll-queue table {
+        table-layout: auto;
+        min-width: 500px;
+    }
+    .scroll-hist table { min-width: 700px; }
+
+    .scroll-hist th:nth-child(6),
+    .scroll-hist td:nth-child(6),
+    .scroll-hist th:nth-child(8),
+    .scroll-hist td:nth-child(8) {
+        display: none;
+    }
+
+    .duel-info span { min-width: 80px; }
+
+    #last-winner {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2px 12px;
+    }
+}
 </style>
 </head>
 <body>
@@ -202,20 +267,19 @@ th:last-child, td:last-child { text-align: right; }
 
     <div style="text-align:center;margin-bottom:8px;">
         <img src="favicon.png" alt="Teuton" class="logo-img" style="width:80px;height:80px;margin-bottom:8px;">
-        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;">Teutonic-I</div>
-        <div style="font-size:11px;margin-top:4px;"><a href="https://github.com/unarbos/teutonic" target="_blank" style="color:var(--ink);text-decoration:none;text-transform:uppercase;border-bottom:var(--border);">GitHub</a></div>
-        <div id="king-info" style="font-size:11px;text-transform:uppercase;">
-            <span id="king-health" title="King repo status"></span>
-            <a id="king-link" href="#" target="_blank" style="color:var(--ink);"></a>
-            <span id="king-rev" style="opacity:0.6;"></span>
+        <div class="header-title" style="font-size:20px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;">Teutonic-I</div>
+        <div style="font-size:11px;margin-top:4px;display:flex;flex-direction:column;align-items:center;gap:4px;text-transform:uppercase;">
+            <span><span id="king-health" title="King repo status"></span> KING: <a id="king-link-top" href="#" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">--</a> <span id="king-rev" style="opacity:0.6;"></span></span>
+            <span>VALIDATOR: <a href="https://github.com/unarbos/teutonic" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">GitHub</a></span>
+            <span>DATASET: <a href="https://s3.hippius.com/teutonic-sn3/" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">Hippius</a></span>
+            <span id="king-reign" style="font-size:10px;opacity:0.5;"></span>
         </div>
-        <div id="king-reign" style="font-size:10px;opacity:0.5;margin-top:2px;"></div>
     </div>
 
     <div>
         <div class="section-label" style="display:flex;justify-content:space-between;align-items:center;">
             <span id="chart-label">Perplexity</span>
-            <span style="display:flex;align-items:center;gap:8px;">
+            <span class="chart-controls" style="display:flex;align-items:center;gap:8px;">
                 <label style="font-weight:normal;font-size:11px;display:flex;align-items:center;cursor:default;">SMOOTH<input type="range" id="smooth-slider" min="0" max="1" step="0.05" value="0"><span id="smooth-val" style="min-width:1.8em;text-align:right;">0</span></label>
                 <button id="chart-mode-toggle" style="background:none;border:var(--border);color:var(--ink);font:11px/1 var(--font);text-transform:uppercase;padding:3px 8px;cursor:pointer;letter-spacing:0.05em;">Loss</button>
             </span>
@@ -236,7 +300,7 @@ th:last-child, td:last-child { text-align: right; }
 
     <div>
         <div class="section-label">Last Winner</div>
-        <div id="last-winner" style="font-size:12px;line-height:1.8;min-height:48px;">--</div>
+        <div id="last-winner" style="font-size:12px;line-height:1.8;min-height:48px;display:flex;flex-wrap:wrap;gap:0 16px;">--</div>
     </div>
 
     <div>
@@ -248,6 +312,7 @@ th:last-child, td:last-child { text-align: right; }
                     <th>Repo</th>
                     <th>Hotkey</th>
                     <th>Block</th>
+                    <th>Status</th>
                 </tr></thead>
                 <tbody id="queue"></tbody>
             </table>
@@ -267,7 +332,7 @@ th:last-child, td:last-child { text-align: right; }
                     <th>LCB</th>
                     <th>King Loss</th>
                     <th>Chall Loss</th>
-                    <th>Time</th>
+                    <th>When</th>
                 </tr></thead>
                 <tbody id="hist"></tbody>
             </table>
@@ -290,6 +355,19 @@ var _chartMode = localStorage.getItem("chartMode") || "ppl";
 
 function short(s, n) { return s ? s.slice(0, n || 12) + "\u2026" : "--"; }
 
+function timeAgo(iso) {
+    if (!iso) return "--";
+    var sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (sec < 0) sec = 0;
+    if (sec < 60) return sec + "s ago";
+    var min = Math.floor(sec / 60);
+    if (min < 60) return min + "m ago";
+    var hr = Math.floor(min / 60);
+    if (hr < 24) return hr + "h ago";
+    var day = Math.floor(hr / 24);
+    return day + "d ago";
+}
+
 function ema(arr, alpha) {
     if (alpha >= 1 || arr.length === 0) return arr.slice();
     var out = [arr[0]];
@@ -298,6 +376,60 @@ function ema(arr, alpha) {
     }
     return out;
 }
+
+var ERROR_MESSAGES = {
+    hf_metadata_error: {
+        title: "Model Not Found",
+        message: function(detail) {
+            return "Could not fetch your model metadata from HuggingFace. " +
+                "Make sure your repo exists, is public, and has a valid 'main' branch.";
+        }
+    },
+    config_rejected: {
+        title: "Config Rejected",
+        message: function(detail) {
+            if (detail.indexOf("architecture mismatch") !== -1)
+                return "Your model architecture doesn't match the current king. " +
+                    "Ensure your model uses the same architecture (check 'architectures' in config.json).";
+            if (detail.indexOf("mismatch") !== -1)
+                return "Your model dimensions don't match the king. " +
+                    "Check that vocab_size, hidden_size, num_hidden_layers, " +
+                    "num_attention_heads, and other shape parameters in config.json match the king model.";
+            if (detail.indexOf("no .safetensors") !== -1)
+                return "No .safetensors weight files found in your repo. " +
+                    "Upload your model weights in safetensors format.";
+            if (detail.indexOf("cannot fetch config.json") !== -1)
+                return "Could not download config.json from your repo. " +
+                    "Make sure config.json exists at the repo root and the repo is accessible.";
+            return "Your model config was rejected: " + detail;
+        }
+    },
+    no_manifest: {
+        title: "Dataset Unavailable",
+        message: function() {
+            return "The evaluation dataset is temporarily unavailable. " +
+                "This is not a problem with your model -- it will be retried automatically.";
+        }
+    },
+    eval_error: {
+        title: "Evaluation Failed",
+        message: function(detail) {
+            if (detail.indexOf("CUDA out of memory") !== -1)
+                return "Your model ran out of GPU memory during evaluation. " +
+                    "Ensure your model fits within the validator's GPU constraints.";
+            if (detail.indexOf("weight_shape") !== -1 || detail.indexOf("size mismatch") !== -1)
+                return "Model weight shapes don't match the expected architecture. " +
+                    "Verify your safetensors match your config.json dimensions.";
+            if (detail.indexOf("eval server") !== -1)
+                return "The evaluation server encountered an internal error. " +
+                    "This is likely transient -- your model will be retried.";
+            if (detail.indexOf("stream ended without verdict") !== -1)
+                return "The evaluation was interrupted before completing. " +
+                    "This is likely transient -- your model will be retried.";
+            return "An unexpected error occurred during evaluation. Details: " + detail;
+        }
+    }
+};
 
 function render(d) {
     var mkt = d.market || {};
@@ -325,9 +457,9 @@ function render(d) {
     }
     var kingRepo = topModel ? topModel.challenger_repo : (king.hf_repo || "--");
     var kingRev = king.king_revision || "";
-    var kingLink = document.getElementById("king-link");
-    kingLink.href = "https://huggingface.co/" + kingRepo;
-    kingLink.textContent = kingRepo;
+    var kingLinkTop = document.getElementById("king-link-top");
+    kingLinkTop.href = "https://huggingface.co/" + kingRepo;
+    kingLinkTop.textContent = kingRepo;
     var kingRevEl = document.getElementById("king-rev");
     if (kingRev) {
         var commitUrl = "https://huggingface.co/" + kingRepo + "/commit/" + kingRev;
@@ -352,6 +484,7 @@ function render(d) {
 
     var kingVals = [], challVals = [];
     for (var i = 0; i < hist.length; i++) {
+        if (hist[i].verdict === "error") continue;
         var kl = hist[i].avg_king_loss || 0;
         var cl = hist[i].avg_challenger_loss || 0;
         if (kl || cl) {
@@ -384,7 +517,8 @@ function render(d) {
     var H = Math.round(rect.height * dpr);
     if (W < 100) W = 1400;
     if (H < 40) H = 560;
-    var ML = Math.round(70 * dpr), MR = Math.round(16 * dpr);
+    var mlBase = window.innerWidth <= 640 ? 50 : 70;
+    var ML = Math.round(mlBase * dpr), MR = Math.round(16 * dpr);
     var MT = Math.round(16 * dpr), MB = Math.round(36 * dpr);
     var pw = W - ML - MR, ph = H - MT - MB;
     var lw = dpr;
@@ -401,12 +535,18 @@ function render(d) {
     } else {
 
     var allVals = kingVals.concat(challVals).concat(rawKing).concat(rawChall);
-    var minL = Math.min.apply(null, allVals);
-    var maxL = Math.max.apply(null, allVals);
-    if (isPpl && maxL > 10) maxL = 10;
+    var sorted = allVals.slice().sort(function(a, b) { return a - b; });
+    var minL = sorted[0];
+    var maxL = sorted[sorted.length - 1];
+    if (sorted.length >= 4) {
+        var p95 = sorted[Math.floor(sorted.length * 0.95)];
+        var iqr = sorted[Math.floor(sorted.length * 0.75)] - sorted[Math.floor(sorted.length * 0.25)];
+        var cap = p95 + iqr * 1.5;
+        if (maxL > cap && cap > minL) maxL = cap;
+    }
+    if (isPpl && maxL > 20) maxL = 20;
     var padV = (maxL - minL) * 0.08 || 0.5;
     minL -= padV; maxL += padV;
-    if (isPpl && maxL > 10) maxL = 10;
 
     function toX(i) { return ML + (nPts > 1 ? (i / (nPts - 1)) * pw : pw / 2); }
     function toY(v) { return MT + ph - ((v - minL) / (maxL - minL)) * ph; }
@@ -554,13 +694,13 @@ function render(d) {
     if (winner) {
         var repo = winner.challenger_repo || "--";
         var link = winner.challenger_repo ? '<a href="https://huggingface.co/' + repo + '" target="_blank" style="color:var(--ink)">' + repo + '</a>' : repo;
-        lwEl.innerHTML = link + '<br>' +
-            'MU_HAT: ' + (winner.mu_hat || 0).toFixed(6) + ' &nbsp; ' +
-            'LCB: ' + (winner.lcb || 0).toFixed(6) + ' &nbsp; ' +
-            'DELTA: ' + (winner.delta || 0).toFixed(4) + ' &nbsp; ' +
-            'KING_LOSS: ' + (winner.avg_king_loss || 0).toFixed(4) + ' &nbsp; ' +
-            'CHALL_LOSS: ' + (winner.avg_challenger_loss || 0).toFixed(4) + ' &nbsp; ' +
-            (winner.wall_time_s ? winner.wall_time_s.toFixed(0) + 's' : '');
+        lwEl.innerHTML = '<span style="width:100%">' + link + '</span>' +
+            '<span>MU_HAT: ' + (winner.mu_hat || 0).toFixed(6) + '</span>' +
+            '<span>LCB: ' + (winner.lcb || 0).toFixed(6) + '</span>' +
+            '<span>DELTA: ' + (winner.delta || 0).toFixed(4) + '</span>' +
+            '<span>KING_LOSS: ' + (winner.avg_king_loss || 0).toFixed(4) + '</span>' +
+            '<span>CHALL_LOSS: ' + (winner.avg_challenger_loss || 0).toFixed(4) + '</span>' +
+            (winner.wall_time_s ? '<span>' + winner.wall_time_s.toFixed(0) + 's</span>' : '');
     } else {
         lwEl.textContent = "NO DETHRONING YET";
     }
@@ -569,7 +709,7 @@ function render(d) {
     var qEl = document.getElementById("queue");
     var q = d.queue || [];
     if (q.length === 0) {
-        qEl.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:16px">Queue empty</td></tr>';
+        qEl.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:16px">Queue empty</td></tr>';
     } else {
         qEl.innerHTML = q.map(function(e) {
             var repo = e.hf_repo || "--";
@@ -580,6 +720,7 @@ function render(d) {
                 '<td>' + repoLink + '</td>' +
                 '<td>' + (e.hotkey ? '<a href="https://taomarketcap.com/hotkey/' + e.hotkey + '/mining_hotkeys" target="_blank" style="color:var(--ink)">' + short(e.hotkey, 16) + '</a>' : '--') + '</td>' +
                 '<td>' + (e.block ? '#' + e.block : '--') + '</td>' +
+                '<td>' + (e.reeval ? 'SEEN' : 'UNSEEN') + '</td>' +
                 '</tr>';
         }).join("");
     }
@@ -591,21 +732,43 @@ function render(d) {
         hb.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:16px">No duels yet</td></tr>';
     } else {
         hb.innerHTML = history.map(function(h) {
+            var isErr = h.verdict === "error";
             var kl = h.avg_king_loss || 0;
             var cl = h.avg_challenger_loss || 0;
             var repo = h.challenger_repo || "--";
             var repoLink = h.challenger_repo ? '<a href="https://huggingface.co/' + h.challenger_repo + '" target="_blank" style="color:var(--ink)">' + repo + '</a>' : repo;
             var uid = h.uid != null ? h.uid : "--";
+
+            var verdictCell;
+            if (isErr) {
+                var errInfo = ERROR_MESSAGES[h.error_code];
+                var tip;
+                if (errInfo) {
+                    tip = errInfo.title + ": " + errInfo.message(h.error_detail || "");
+                } else {
+                    tip = (h.error_code || "error") + (h.error_detail ? ": " + h.error_detail : "");
+                }
+                tip = tip.replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+                var label = errInfo ? errInfo.title.toUpperCase() : "ERROR";
+                verdictCell = '<td title="' + tip + '" style="color:#c22;cursor:help">' + label + '</td>';
+            } else {
+                verdictCell = '<td>' + (h.accepted ? "CHALLENGER" : "KING") + '</td>';
+            }
+
+            var ago = timeAgo(h.timestamp);
+            var fullTs = h.timestamp ? new Date(h.timestamp).toUTCString() : "";
+            if (!isErr && h.wall_time_s) ago += " (" + h.wall_time_s.toFixed(0) + "s)";
+
             return '<tr>' +
                 '<td>' + uid + '</td>' +
                 '<td>' + repoLink + '</td>' +
                 '<td>' + (h.hotkey ? '<a href="https://taomarketcap.com/hotkey/' + h.hotkey + '/mining_hotkeys" target="_blank" style="color:var(--ink)">' + short(h.hotkey, 16) + '</a>' : '--') + '</td>' +
-                '<td>' + (h.accepted ? "CHALLENGER" : "KING") + '</td>' +
-                '<td>' + (h.mu_hat || 0).toFixed(6) + '</td>' +
-                '<td>' + (h.lcb || 0).toFixed(6) + '</td>' +
-                '<td>' + kl.toFixed(4) + '</td>' +
-                '<td>' + cl.toFixed(4) + '</td>' +
-                '<td>' + (h.wall_time_s || 0).toFixed(0) + 's</td>' +
+                verdictCell +
+                '<td>' + (isErr ? "--" : (h.mu_hat || 0).toFixed(6)) + '</td>' +
+                '<td>' + (isErr ? "--" : (h.lcb || 0).toFixed(6)) + '</td>' +
+                '<td>' + (isErr ? "--" : kl.toFixed(4)) + '</td>' +
+                '<td>' + (isErr ? "--" : cl.toFixed(4)) + '</td>' +
+                '<td title="' + fullTs + '">' + ago + '</td>' +
                 '</tr>';
         }).join("");
     }
