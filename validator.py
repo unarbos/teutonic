@@ -426,6 +426,39 @@ def set_weights(subtensor, wallet, netuid, king_hotkey) -> bool:
         return False
 
 
+def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
+                      reason: str = "") -> bool:
+    """Set weights to the current king if forced or WEIGHT_INTERVAL has elapsed.
+
+    Always uses ``state.king["hotkey"]`` as the source of truth so the chain
+    keeps tracking the current top miner even when no new dethrone fires.
+    """
+    king_hotkey = state.king.get("hotkey") if state.king else None
+    if not king_hotkey:
+        if force:
+            log.info("skipping weight set (%s): no king yet", reason or "forced")
+        return False
+    try:
+        current_block = subtensor.block
+    except Exception:
+        log.exception("failed to read current block for weight-set")
+        return False
+    if not force and current_block - state.last_weight_block < WEIGHT_INTERVAL:
+        return False
+    log.info("setting weights at block %d (last=%d, %s) to king %s",
+             current_block, state.last_weight_block,
+             reason or ("forced" if force else "interval"), king_hotkey[:16])
+    if set_weights(subtensor, wallet, NETUID, king_hotkey):
+        state.last_weight_block = current_block
+        state.last_winner_hotkey = king_hotkey
+        try:
+            state.flush()
+        except Exception:
+            log.exception("failed to flush state after weight set")
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -851,8 +884,8 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
                        king_revision=challenger_revision)
         state.last_winner_hotkey = hotkey
         await notify_new_king(state.king, verdict)
-        if set_weights(subtensor, wallet, NETUID, hotkey):
-            state.last_weight_block = subtensor.block
+        maybe_set_weights(subtensor, wallet, state, force=True,
+                          reason=f"new king via {cid}")
 
     state.flush()
 
@@ -900,6 +933,8 @@ async def main():
             log.warning("could not get seed king revision from %s", SEED_REPO)
         state.set_king(wallet.hotkey.ss58_address, SEED_REPO, "seed",
                        subtensor.block, king_revision=seed_revision)
+
+    maybe_set_weights(subtensor, wallet, state, force=True, reason="startup")
 
     # Verify eval server is reachable
     try:
@@ -977,6 +1012,12 @@ async def main():
                     reeval_items = [e for e in state.queue if e.get("reeval")]
                     state.queue = new_items + reeval_items
 
+                try:
+                    maybe_set_weights(subtensor, wallet, state,
+                                      reason="in-queue interval")
+                except Exception:
+                    log.exception("in-queue weight-set failed")
+
             state.current_eval = None
 
             if args.seen and not state.queue:
@@ -988,17 +1029,8 @@ async def main():
             state.flush_dashboard()
 
             try:
-                current_block = subtensor.block
-                if current_block - state.last_weight_block >= WEIGHT_INTERVAL:
-                    winner = state.last_winner_hotkey
-                    if winner:
-                        log.info("periodic weight set at block %d (last=%d) to winner %s",
-                                 current_block, state.last_weight_block, winner[:16])
-                        if set_weights(subtensor, wallet, NETUID, winner):
-                            state.last_weight_block = current_block
-                            state.flush()
-                    else:
-                        log.info("skipping periodic weight set: no duel winner yet")
+                maybe_set_weights(subtensor, wallet, state,
+                                  reason="periodic interval")
             except Exception:
                 log.exception("periodic weight-set failed")
 
