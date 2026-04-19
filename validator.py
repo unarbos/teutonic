@@ -9,17 +9,21 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import signal
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
 import bittensor as bt
 import boto3
 import httpx
+import numpy as np
 from botocore.config import Config as BotoConfig
 from huggingface_hub import HfApi
+from safetensors import safe_open
 
 # ---------------------------------------------------------------------------
 # Config
@@ -60,6 +64,12 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
 REPO_PATTERN = r"^[^/]+/Teutonic-I-.+$"
+
+NORM_SANITY_MAX_ABS = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_ABS", "1000"))
+NORM_SANITY_MAX_MEAN_ABS = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_MEAN_ABS", "100"))
+NORM_SANITY_MAX_STD = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_STD", "100"))
+NORM_SANITY_MAX_RATIO = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_RATIO", "50"))
+NORM_SANITY_SAMPLE_LIMIT = int(os.environ.get("TEUTONIC_NORM_SANITY_SAMPLE_LIMIT", "256"))
 
 TMC_BASE = "https://api.taomarketcap.com/public/v1"
 
@@ -302,6 +312,113 @@ class R2:
 
 _king_config: dict | None = None
 _king_config_key: str | None = None
+_norm_stats_cache: dict[str, dict] = {}
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    denom = max(abs(denominator), 1e-12)
+    return abs(numerator) / denom
+
+
+def _is_norm_tensor(name: str) -> bool:
+    lname = name.lower()
+    return lname.endswith("norm.weight") or ".norm.weight" in lname or "layernorm.weight" in lname or "rmsnorm.weight" in lname
+
+
+def _tensor_stats(arr: np.ndarray) -> dict[str, float]:
+    arr = arr.astype(np.float64, copy=False).reshape(-1)
+    finite = np.isfinite(arr)
+    if not finite.all():
+        bad = int(arr.size - finite.sum())
+        return {"has_non_finite": True, "non_finite_count": bad}
+    abs_arr = np.abs(arr)
+    return {
+        "has_non_finite": False,
+        "size": int(arr.size),
+        "max_abs": float(abs_arr.max(initial=0.0)),
+        "mean_abs": float(abs_arr.mean()) if arr.size else 0.0,
+        "std": float(arr.std()) if arr.size else 0.0,
+    }
+
+
+def _collect_norm_stats(hf_repo: str, revision: str) -> dict[str, dict]:
+    cache_key = f"{hf_repo}@{revision or 'HEAD'}"
+    cached = _norm_stats_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    api = HfApi(token=HF_TOKEN or None)
+    repo_files = api.list_repo_files(hf_repo, token=HF_TOKEN or None, revision=revision or None)
+    st_files = sorted([s for s in repo_files if s.endswith(".safetensors")])
+    stats: dict[str, dict] = {}
+
+    with tempfile.TemporaryDirectory(prefix="teutonic-sanity-") as tmpdir:
+        for relpath in st_files:
+            local_path = api.hf_hub_download(
+                hf_repo,
+                relpath,
+                token=HF_TOKEN or None,
+                revision=revision or None,
+                local_dir=tmpdir,
+            )
+            with safe_open(local_path, framework="np") as f:
+                for key in f.keys():
+                    if not _is_norm_tensor(key):
+                        continue
+                    stats[key] = _tensor_stats(f.get_tensor(key))
+                    if len(stats) >= NORM_SANITY_SAMPLE_LIMIT:
+                        _norm_stats_cache[cache_key] = stats
+                        return stats
+
+    _norm_stats_cache[cache_key] = stats
+    return stats
+
+
+def validate_challenger_sanity(hf_repo: str, challenger_revision: str,
+                               king_repo: str = "",
+                               king_revision: str = "") -> str | None:
+    """Reject challengers with obviously pathological norm weights."""
+    try:
+        challenger_stats = _collect_norm_stats(hf_repo, challenger_revision)
+    except Exception as e:
+        return f"cannot inspect safetensors: {e}"
+
+    if not challenger_stats:
+        return "no norm.weight tensors found in safetensors"
+
+    for name, stats in challenger_stats.items():
+        if stats.get("has_non_finite"):
+            return f"non-finite values in {name} ({stats.get('non_finite_count', '?')} entries)"
+        if stats["max_abs"] > NORM_SANITY_MAX_ABS:
+            return f"norm_weight_scaled:{name}={stats['max_abs']:.1f} exceeds {NORM_SANITY_MAX_ABS:.1f}"
+        if stats["mean_abs"] > NORM_SANITY_MAX_MEAN_ABS:
+            return f"norm_weight_mean_abs:{name}={stats['mean_abs']:.3f} exceeds {NORM_SANITY_MAX_MEAN_ABS:.3f}"
+        if stats["std"] > NORM_SANITY_MAX_STD:
+            return f"norm_weight_std:{name}={stats['std']:.3f} exceeds {NORM_SANITY_MAX_STD:.3f}"
+
+    ref_repo = king_repo or SEED_REPO
+    try:
+        king_stats = _collect_norm_stats(ref_repo, king_revision)
+    except Exception:
+        king_stats = {}
+
+    for name, stats in challenger_stats.items():
+        king = king_stats.get(name)
+        if not king or king.get("has_non_finite"):
+            continue
+        if _safe_ratio(stats["max_abs"], king.get("max_abs", 0.0)) > NORM_SANITY_MAX_RATIO:
+            return (
+                f"norm_weight_ratio:{name} max_abs_ratio="
+                f"{_safe_ratio(stats['max_abs'], king.get('max_abs', 0.0)):.2f} exceeds {NORM_SANITY_MAX_RATIO:.2f}"
+            )
+        if _safe_ratio(stats["mean_abs"], king.get("mean_abs", 0.0)) > NORM_SANITY_MAX_RATIO:
+            return (
+                f"norm_weight_ratio:{name} mean_abs_ratio="
+                f"{_safe_ratio(stats['mean_abs'], king.get('mean_abs', 0.0)):.2f} exceeds {NORM_SANITY_MAX_RATIO:.2f}"
+            )
+
+    return None
+
 
 def get_king_config(king_repo: str, king_revision: str = ""):
     """Fetch and cache the king model's config.json from HuggingFace."""
@@ -369,7 +486,12 @@ def validate_challenger_config(hf_repo: str, challenger_revision: str,
     if not st_files:
         return "no .safetensors files in repo"
 
-    return None
+    return validate_challenger_sanity(
+        hf_repo,
+        challenger_revision,
+        king_repo=king_repo,
+        king_revision=king_revision,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -758,12 +880,24 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
     except Exception:
         pass
 
-    manifest = r2.ds_get("dataset/v2/manifest.json")
+    manifest = None
+    manifest_attempts = 4
+    for attempt in range(manifest_attempts):
+        manifest = r2.ds_get("dataset/v2/manifest.json")
+        if not manifest:
+            manifest = r2.get("dataset/v1/manifest.json")
+        if manifest:
+            break
+        if attempt < manifest_attempts - 1:
+            backoff = 2 ** attempt
+            log.warning("manifest fetch failed (attempt %d/%d), retrying in %ds",
+                        attempt + 1, manifest_attempts, backoff)
+            await asyncio.sleep(backoff)
     if not manifest:
-        manifest = r2.get("dataset/v1/manifest.json")
-    if not manifest:
-        log.error("no dataset manifest")
-        state.record_failure(entry, "no_manifest", "dataset manifest not found in v1 or v2")
+        log.error("no dataset manifest after %d attempts; re-queuing %s",
+                  manifest_attempts, cid)
+        state.queue.insert(0, entry)
+        state.flush()
         return
     n_shards = manifest["total_shards"]
     seed_mat = f"{block_hash}:{hotkey}".encode()

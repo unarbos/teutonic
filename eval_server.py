@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
     _gpu_ids = parse_gpu_ids(os.environ.get("EVAL_GPUS", "auto"))
     log.info("eval server starting with GPUs: %s", _gpu_ids)
     _r2 = R2()
+    _cleanup_hf_cache()
     yield
     log.info("eval server shutting down")
     if _king_evaluator:
@@ -129,7 +130,7 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
     mid = len(_gpu_ids) // 2
     king_gpus = _gpu_ids[:mid] or _gpu_ids[:1]
     _king_evaluator = MultiGPUEvaluator(repo, king_gpus, label="king",
-                                         force_download=needs_reload,
+                                         force_download=False,
                                          revision=revision or None)
     _king_repo = repo
     _king_hash = king_hash or None
@@ -290,7 +291,6 @@ def _run_eval(eval_id: str, req: EvalRequest):
                 record["state"] = "completed"
                 record["verdict"] = verdict
                 event_q.put({"type": "verdict", "data": verdict})
-                _cleanup_hf_cache()
                 return
             log.info("norm check passed for %s", req.challenger_repo)
 
@@ -317,8 +317,6 @@ def _run_eval(eval_id: str, req: EvalRequest):
         record["verdict"] = verdict
         event_q.put({"type": "verdict", "data": verdict})
 
-        _cleanup_hf_cache()
-
     except Exception as e:
         log.exception("eval %s failed", eval_id)
         record["state"] = "failed"
@@ -326,6 +324,7 @@ def _run_eval(eval_id: str, req: EvalRequest):
         event_q.put({"type": "error", "data": {"error": str(e)}})
 
     finally:
+        _cleanup_hf_cache()
         _prune_evals()
         _eval_lock.release()
 

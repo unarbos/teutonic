@@ -1,0 +1,52 @@
+base_model: unconst/Teutonic-I
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+is_pretraining: true
+sequence_len: 2048
+sample_packing: false
+pad_to_sequence_len: true
+
+load_in_8bit: false
+load_in_4bit: false
+bf16: true
+fp16: false
+
+datasets:
+  - path: ./train.jsonl
+    ds_type: json
+    type: pretrain
+    field: input_ids
+
+val_set_size: 0.0
+output_dir: ./outputs/axolotl-teutonic-lora
+
+adapter: lora
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+micro_batch_size: 2
+gradient_accumulation_steps: 8
+num_epochs: 1
+optimizer: adamw_torch
+learning_rate: 0.0002
+lr_scheduler: cosine
+warmup_ratio: 0.02
+weight_decay: 0.01
+
+gradient_checkpointing: true
+flash_attention: true
+logging_steps: 10
+save_steps: 100
+special_tokens:
+  pad_token: "<pad>"
+  bos_token: "<bos>"
+  eos_token: "<end_of_turn>"

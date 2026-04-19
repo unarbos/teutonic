@@ -32,6 +32,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -261,53 +262,54 @@ def worker_process_file(
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME, token=token)
     client = make_client()
 
+    tmp_dir = tempfile.mkdtemp(prefix="ingest_hf_")
     try:
-        local_path = hf_hub_download(
-            dataset_repo, file_path, repo_type="dataset", token=token,
-        )
-    except Exception as e:
-        worker_log.error("download failed %s: %s", file_path, e)
-        raise
+        try:
+            local_path = hf_hub_download(
+                dataset_repo, file_path, repo_type="dataset", token=token,
+                local_dir=tmp_dir,
+            )
+        except Exception as e:
+            worker_log.error("download failed %s: %s", file_path, e)
+            raise
 
-    buf = bytearray()
-    remainder: list[int] = []
-    n_samples = 0
-    n_tokens = 0
-    shard_infos: list[dict] = []
+        buf = bytearray()
+        remainder: list[int] = []
+        n_samples = 0
+        n_tokens = 0
+        shard_infos: list[dict] = []
 
-    for text in iter_parquet_texts(local_path):
-        packed, remainder = tokenize_and_pack(tokenizer, text, remainder, seq_len)
-        if not packed:
-            continue
+        for text in iter_parquet_texts(local_path):
+            packed, remainder = tokenize_and_pack(tokenizer, text, remainder, seq_len)
+            if not packed:
+                continue
 
-        buf.extend(packed)
-        n_samples += 1
-        n_tokens += len(packed) // BYTES_PER_TOKEN
+            buf.extend(packed)
+            n_samples += 1
+            n_tokens += len(packed) // BYTES_PER_TOKEN
 
-        while len(buf) >= shard_size_bytes:
-            shard_data = bytearray(buf[:shard_size_bytes])
-            buf = bytearray(buf[shard_size_bytes:])
+            while len(buf) >= shard_size_bytes:
+                shard_data = bytearray(buf[:shard_size_bytes])
+                buf = bytearray(buf[shard_size_bytes:])
+                idx = next_shard_idx()
+                info = flush_shard(shard_data, idx, client, dry_run)
+                shard_infos.append(info)
+                worker_log.info(
+                    "uploaded shard %d from %s (%s tokens)",
+                    idx, file_path.split("/")[-1], f"{info['n_tokens']:,}",
+                )
+
+        if buf:
             idx = next_shard_idx()
-            info = flush_shard(shard_data, idx, client, dry_run)
+            info = flush_shard(buf, idx, client, dry_run)
             shard_infos.append(info)
             worker_log.info(
-                "uploaded shard %d from %s (%s tokens)",
+                "uploaded partial shard %d from %s (%s tokens)",
                 idx, file_path.split("/")[-1], f"{info['n_tokens']:,}",
             )
-
-    if buf:
-        idx = next_shard_idx()
-        info = flush_shard(buf, idx, client, dry_run)
-        shard_infos.append(info)
-        worker_log.info(
-            "uploaded partial shard %d from %s (%s tokens)",
-            idx, file_path.split("/")[-1], f"{info['n_tokens']:,}",
-        )
-
-    try:
-        os.unlink(local_path)
-    except OSError:
-        pass
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     worker_log.info(
         "finished %s: %d samples, %s tokens, %d shards",

@@ -10,6 +10,7 @@ dependencies = [
     "numpy",
     "scipy",
     "huggingface-hub",
+    "safetensors",
 ]
 
 [project.scripts]
