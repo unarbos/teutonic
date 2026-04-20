@@ -42,9 +42,39 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from botocore.config import Config as BotoConfig
+from huggingface_hub import HfApi
 from transformers import AutoModelForCausalLM
 
 log = logging.getLogger("eval_torch")
+
+
+# ---------------------------------------------------------------------------
+# Commit-level verification
+# ---------------------------------------------------------------------------
+
+def verify_commit_hash(repo: str, expected_revision: str) -> str:
+    """Verify a HF repo commit SHA matches the expected revision.
+
+    Fetches the actual HEAD commit for the given revision from HuggingFace
+    and compares it against the expected value. This prevents model-swap
+    attacks where a miner pushes new weights between the validator's pin
+    and the eval server's download.
+
+    Returns the verified commit SHA on success, raises ValueError on mismatch.
+    """
+    if not expected_revision:
+        return ""
+    api = HfApi(token=os.environ.get("HF_TOKEN") or None)
+    info = api.model_info(repo, revision=expected_revision)
+    actual_sha = info.sha
+    if actual_sha != expected_revision:
+        raise ValueError(
+            f"commit hash mismatch for {repo}: "
+            f"expected {expected_revision[:12]} but got {actual_sha[:12]}. "
+            f"Possible model replacement attack."
+        )
+    log.info("commit verified: %s@%s", repo, expected_revision[:12])
+    return actual_sha
 
 
 # ---------------------------------------------------------------------------
@@ -533,10 +563,14 @@ def compute_paired_multi_gpu(king_eval, chall_eval, token_batches):
 # Bootstrap test
 # ---------------------------------------------------------------------------
 
-def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
+def run_bootstrap_test(king_eval, challenger_eval, r2, shard_keys, eval_n,
                        alpha, delta, seq_len, batch_size, seed_str,
                        n_bootstrap=10000, on_progress=None):
     """Paired bootstrap test on per-token log-loss differences.
+
+    shard_keys can be a single key (str) or a list of keys. When multiple
+    shards are provided, sequences are drawn from each shard proportionally
+    and cross-shard shuffled before batching.
 
     Scores M fixed-length blocks on both models, computes d_i = king_loss_i -
     challenger_loss_i (positive means challenger is better), then bootstraps the
@@ -545,27 +579,61 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
 
     Calls on_progress(info_dict) after each batch if provided.
     """
-    n_tokens = get_shard_info(r2, shard_key)
-    n_sequences = n_tokens // seq_len
-    actual_N = min(eval_n, n_sequences)
-    log.info("bootstrap test: N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
-             eval_n, actual_N, alpha, delta, n_bootstrap)
+    # Normalize shard_keys to a list
+    if isinstance(shard_keys, str):
+        shard_keys = [shard_keys]
 
     seed_material = seed_str.encode()
     seed = int.from_bytes(hashlib.blake2b(seed_material, digest_size=8).digest(), "little")
     rng = np.random.Generator(np.random.PCG64(seed))
-    eval_indices = rng.choice(n_sequences, size=actual_N, replace=False).tolist()
 
-    log.info("downloading shard %s ...", shard_key)
-    data_offset, shard_data = download_shard(r2, shard_key)
+    # Phase 1: probe shards and allocate sequences proportionally
+    shard_info = []
+    total_available = 0
+    for sk in shard_keys:
+        n_tokens = get_shard_info(r2, sk)
+        n_seq = n_tokens // seq_len
+        shard_info.append({"key": sk, "n_sequences": n_seq})
+        total_available += n_seq
 
-    log.info("extracting %d sequences", actual_N)
-    seq_cache = extract_sequences(shard_data, data_offset, eval_indices, seq_len)
-    log.info("extracted %d sequences", len(seq_cache))
+    actual_N = min(eval_n, total_available)
+    log.info("bootstrap test: K=%d shards, N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
+             len(shard_keys), eval_n, actual_N, alpha, delta, n_bootstrap)
+
+    # Distribute eval_n across shards proportionally
+    per_shard_n = []
+    remaining = actual_N
+    for i, si in enumerate(shard_info):
+        if i == len(shard_info) - 1:
+            n = remaining
+        else:
+            n = min(int(actual_N * si["n_sequences"] / total_available), remaining)
+        per_shard_n.append(min(n, si["n_sequences"]))
+        remaining -= per_shard_n[-1]
+
+    # Phase 2: download shards and extract sequences
+    all_sequences = []
+    for i, si in enumerate(shard_info):
+        n_draw = per_shard_n[i]
+        if n_draw <= 0:
+            continue
+        sk = si["key"]
+        indices = rng.choice(si["n_sequences"], size=n_draw, replace=False).tolist()
+        log.info("downloading shard %s (%d/%d sequences) ...", sk, n_draw, si["n_sequences"])
+        data_offset, shard_data = download_shard(r2, sk)
+        seq_cache = extract_sequences(shard_data, data_offset, indices, seq_len)
+        for idx in indices:
+            all_sequences.append(seq_cache[idx])
+        del shard_data
+
+    # Phase 3: cross-shard shuffle
+    rng.shuffle(all_sequences)
+    actual_N = len(all_sequences)
+    log.info("cross-shard shuffle complete: %d sequences from %d shard(s)", actual_N, len(shard_keys))
 
     batches = [
-        eval_indices[i : i + batch_size]
-        for i in range(0, len(eval_indices), batch_size)
+        all_sequences[i : i + batch_size]
+        for i in range(0, actual_N, batch_size)
     ]
 
     all_diffs = []
@@ -575,8 +643,8 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
 
     same_evaluator = king_eval is challenger_eval
 
-    for bi, batch_indices in enumerate(batches):
-        token_batches = [seq_cache[idx] for idx in batch_indices]
+    for bi, batch_seqs in enumerate(batches):
+        token_batches = batch_seqs
 
         if same_evaluator:
             king_losses = king_eval.compute_losses(token_batches)
@@ -723,7 +791,7 @@ def main():
 
     verdict = run_bootstrap_test(
         king_eval, challenger_eval,
-        r2, shard_key, args.n, args.alpha, args.delta,
+        r2, [shard_key], args.n, args.alpha, args.delta,
         args.seq_len, args.batch_size, args.seed,
         n_bootstrap=args.n_bootstrap,
     )

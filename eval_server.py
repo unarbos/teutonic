@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from eval_torch import (
     R2, MultiGPUEvaluator, run_bootstrap_test, parse_gpu_ids,
-    check_weight_norms,
+    check_weight_norms, verify_commit_hash,
 )
 
 log = logging.getLogger("eval_server")
@@ -92,7 +92,8 @@ class EvalRequest(BaseModel):
     challenger_repo: str
     block_hash: str
     hotkey: str
-    shard_key: str
+    shard_key: str = ""
+    shard_keys: list[str] = []
     king_hash: str = ""
     king_revision: str = ""
     challenger_revision: str = ""
@@ -118,6 +119,10 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
                  repo, (_king_revision or "?")[:12])
         return _king_evaluator
 
+    # Verify commit hash before loading
+    if revision:
+        verify_commit_hash(repo, revision)
+
     needs_reload = _king_evaluator is not None
     if needs_reload:
         log.info("king changed (%s rev=%s -> %s rev=%s), reloading",
@@ -140,6 +145,10 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
 
 def _load_challenger(repo: str, revision: str = ""):
     """Load challenger on the second half of GPUs."""
+    # Verify commit hash before loading
+    if revision:
+        verify_commit_hash(repo, revision)
+
     mid = len(_gpu_ids) // 2
     chall_gpus = _gpu_ids[mid:] or _gpu_ids[:1]
     return MultiGPUEvaluator(repo, chall_gpus, label="challenger",
@@ -296,13 +305,18 @@ def _run_eval(eval_id: str, req: EvalRequest):
 
         seed_str = f"{req.block_hash}:{req.hotkey}"
 
+        # Resolve shard keys: prefer shard_keys list, fall back to single shard_key
+        resolved_shards = req.shard_keys if req.shard_keys else ([req.shard_key] if req.shard_key else [])
+        if not resolved_shards:
+            raise ValueError("no shard keys provided (need shard_key or shard_keys)")
+
         def _on_progress(info):
             record["progress"] = info
             event_q.put({"type": "progress", "data": info})
 
         verdict = run_bootstrap_test(
             king_eval, challenger_eval,
-            _r2, req.shard_key, req.eval_n, req.alpha, req.delta,
+            _r2, resolved_shards, req.eval_n, req.alpha, req.delta,
             req.seq_len, req.batch_size, seed_str,
             n_bootstrap=req.n_bootstrap,
             on_progress=_on_progress,

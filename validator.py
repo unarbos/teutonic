@@ -71,6 +71,9 @@ NORM_SANITY_MAX_STD = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_STD", "100"
 NORM_SANITY_MAX_RATIO = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_RATIO", "50"))
 NORM_SANITY_SAMPLE_LIMIT = int(os.environ.get("TEUTONIC_NORM_SANITY_SAMPLE_LIMIT", "256"))
 
+EVAL_MAX_RETRIES = int(os.environ.get("TEUTONIC_EVAL_MAX_RETRIES", "1"))
+EVAL_SHARD_COUNT = int(os.environ.get("TEUTONIC_EVAL_SHARD_COUNT", "1"))
+
 TMC_BASE = "https://api.taomarketcap.com/public/v1"
 
 log = logging.getLogger("teutonic")
@@ -596,7 +599,7 @@ class State:
         self.queue = []
         self.seen = set()
         self.failed_repos: set[str] = set()
-        self.evaluated_repos: set[str] = set()
+        self.eval_counts: dict[tuple[str, str], int] = {}
         self.stats = {"queued": 0, "accepted": 0, "rejected": 0, "failed": 0}
         self.counter = 0
         self.current_eval = None
@@ -666,9 +669,6 @@ class State:
             if existing.get("hf_repo") == repo:
                 log.info("skipping duplicate repo: %s already queued", repo)
                 return None
-        if repo in self.evaluated_repos:
-            log.info("skipping %s: already evaluated this cycle", repo)
-            return None
         cid = self.next_id()
         entry = {"challenge_id": cid, **reveal, "queued_at": _now()}
         self.queue.append(entry)
@@ -684,7 +684,7 @@ class State:
         _king_config = None
         _king_config_key = None
         self.failed_repos.clear()
-        self.evaluated_repos.clear()
+        self.eval_counts.clear()
         reign = self.king.get("reign_number", 0) + (0 if challenge_id == "seed" else 1)
         prev = self.king.copy() if self.king else None
         if prev:
@@ -752,7 +752,7 @@ class State:
 
     def replenish_reeval(self, subtensor, netuid):
         """Fill queue with re-eval candidates so the dashboard never shows empty."""
-        self.evaluated_repos.clear()
+        self.eval_counts.clear()
         throwaway_seen = set()
         reeval_reveals = scan_reveals(subtensor, netuid, throwaway_seen)
         king_hk = self.king.get("hotkey", "")
@@ -838,10 +838,6 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         log.info("skipping %s: repo %s previously failed", cid, hf_repo)
         return
 
-    if hf_repo in state.evaluated_repos:
-        log.info("skipping %s: repo %s already evaluated this cycle", cid, hf_repo)
-        return
-
     if check_stale:
         current_hash = state.king.get("king_hash", "")
         entry_king_hash = entry.get("king_hash", "")
@@ -858,6 +854,14 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         log.warning("cannot get commit SHA for %s, skipping", hf_repo)
         state.failed_repos.add(hf_repo)
         state.record_failure(entry, "hf_metadata_error", str(exc))
+        return
+
+    # Dedup: skip if this exact (repo, commit) has already been evaluated
+    eval_key = (hf_repo, challenger_revision)
+    prev_count = state.eval_counts.get(eval_key, 0)
+    if prev_count >= EVAL_MAX_RETRIES:
+        log.info("skipping %s: (%s, %s) already evaluated %d/%d times",
+                 cid, hf_repo, challenger_revision[:12], prev_count, EVAL_MAX_RETRIES)
         return
 
     rejection = validate_challenger_config(
@@ -901,8 +905,21 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         return
     n_shards = manifest["total_shards"]
     seed_mat = f"{block_hash}:{hotkey}".encode()
-    shard_idx = int.from_bytes(hashlib.blake2b(seed_mat, digest_size=8).digest(), "little") % n_shards
-    shard_key = manifest["shards"][shard_idx]["key"]
+    k = min(EVAL_SHARD_COUNT, n_shards)
+    shard_keys = []
+    for i in range(k):
+        personalized = hashlib.blake2b(seed_mat, digest_size=8,
+                                        person=f"shard-{i}".encode()).digest()
+        idx = int.from_bytes(personalized, "little") % n_shards
+        shard_keys.append(manifest["shards"][idx]["key"])
+    # Deduplicate while preserving order
+    seen_keys = set()
+    unique_shard_keys = []
+    for sk in shard_keys:
+        if sk not in seen_keys:
+            seen_keys.add(sk)
+            unique_shard_keys.append(sk)
+    shard_keys = unique_shard_keys
 
     king_repo = state.king.get("hf_repo", SEED_REPO)
     king_revision = state.king.get("king_revision", "")
@@ -912,7 +929,8 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         "king_revision": king_revision,
         "challenger_repo": hf_repo, "challenger_revision": challenger_revision,
         "hotkey": hotkey,
-        "N": EVAL_N, "alpha": EVAL_ALPHA, "delta": EVAL_DELTA, "shard": shard_key,
+        "N": EVAL_N, "alpha": EVAL_ALPHA, "delta": EVAL_DELTA,
+        "shard_keys": shard_keys,
         "eval_block": eval_block, "block_hash": block_hash,
     })
 
@@ -931,7 +949,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "challenger_repo": hf_repo,
             "block_hash": block_hash,
             "hotkey": hotkey,
-            "shard_key": shard_key,
+            "shard_keys": shard_keys,
             "king_hash": state.king.get("king_hash", ""),
             "king_revision": king_revision,
             "challenger_revision": challenger_revision,
@@ -997,7 +1015,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
              verdict.get("delta", 0), verdict["wall_time_s"])
 
     state.current_eval = None
-    state.evaluated_repos.add(hf_repo)
+    state.eval_counts[eval_key] = prev_count + 1
     state.record_verdict(verdict, hf_repo, hotkey)
 
     accepted = verdict.get("accepted", False)
