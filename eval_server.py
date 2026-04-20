@@ -25,11 +25,11 @@ from queue import Queue, Empty
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from eval_torch import (
     R2, MultiGPUEvaluator, run_bootstrap_test, parse_gpu_ids,
-    check_weight_norms,
+    COMMIT_SHA_RE, check_weight_norms, verify_commit_hash,
 )
 
 log = logging.getLogger("eval_server")
@@ -92,7 +92,8 @@ class EvalRequest(BaseModel):
     challenger_repo: str
     block_hash: str
     hotkey: str
-    shard_key: str
+    shard_key: str = ""
+    shard_keys: list[str] = Field(default_factory=list)
     king_hash: str = ""
     king_revision: str = ""
     challenger_revision: str = ""
@@ -103,6 +104,17 @@ class EvalRequest(BaseModel):
     batch_size: int = DEFAULT_BATCH_SIZE
     n_bootstrap: int = DEFAULT_BOOTSTRAP_B
 
+    def resolved_shard_keys(self) -> list[str]:
+        raw_shard_keys = self.shard_keys if self.shard_keys else [self.shard_key]
+        resolved = []
+        seen = set()
+        for shard_key in raw_shard_keys:
+            if not shard_key or shard_key in seen:
+                continue
+            seen.add(shard_key)
+            resolved.append(shard_key)
+        return resolved
+
 
 # ---------------------------------------------------------------------------
 # Model management
@@ -111,8 +123,10 @@ class EvalRequest(BaseModel):
 def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
     """Load or reuse king evaluator. Reloads if repo, revision, or king_hash changed."""
     global _king_evaluator, _king_repo, _king_hash, _king_revision
+    verified_revision = verify_commit_hash(repo, revision)
+
     if (_king_evaluator and _king_repo == repo
-            and (not revision or _king_revision == revision)
+            and _king_revision == verified_revision
             and (not king_hash or _king_hash == king_hash)):
         log.info("reusing cached king evaluator for %s (rev=%s)",
                  repo, (_king_revision or "?")[:12])
@@ -122,7 +136,7 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
     if needs_reload:
         log.info("king changed (%s rev=%s -> %s rev=%s), reloading",
                  _king_repo, (_king_revision or "?")[:12],
-                 repo, revision[:12] if revision else "?")
+                 repo, verified_revision[:12])
         _king_evaluator.shutdown()
         _king_evaluator = None
         torch.cuda.empty_cache()
@@ -131,19 +145,21 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
     king_gpus = _gpu_ids[:mid] or _gpu_ids[:1]
     _king_evaluator = MultiGPUEvaluator(repo, king_gpus, label="king",
                                          force_download=False,
-                                         revision=revision or None)
+                                         revision=verified_revision)
     _king_repo = repo
     _king_hash = king_hash or None
-    _king_revision = revision or None
+    _king_revision = verified_revision
     return _king_evaluator
 
 
 def _load_challenger(repo: str, revision: str = ""):
     """Load challenger on the second half of GPUs."""
+    verified_revision = verify_commit_hash(repo, revision)
+
     mid = len(_gpu_ids) // 2
     chall_gpus = _gpu_ids[mid:] or _gpu_ids[:1]
     return MultiGPUEvaluator(repo, chall_gpus, label="challenger",
-                              revision=revision or None)
+                              revision=verified_revision)
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +182,12 @@ def _cleanup_hf_cache():
         for repo_info in cache_info.repos:
             repo_id = repo_info.repo_id
             if repo_id == keep_repo:
+                if not keep_rev:
+                    log.warning("hf cache cleanup: current king revision missing, preserving all cached revisions for %s",
+                                repo_id)
+                    continue
                 for rev_info in repo_info.revisions:
-                    if keep_rev and rev_info.commit_hash == keep_rev:
+                    if rev_info.commit_hash == keep_rev:
                         continue
                     hashes_to_delete.append(rev_info.commit_hash)
                     log.info("marking for deletion: %s rev %s (%.1f MB)",
@@ -296,13 +316,18 @@ def _run_eval(eval_id: str, req: EvalRequest):
 
         seed_str = f"{req.block_hash}:{req.hotkey}"
 
+        # Resolve shard keys: prefer shard_keys list, fall back to single shard_key
+        resolved_shards = req.shard_keys if req.shard_keys else ([req.shard_key] if req.shard_key else [])
+        if not resolved_shards:
+            raise ValueError("no shard keys provided (need shard_key or shard_keys)")
+
         def _on_progress(info):
             record["progress"] = info
             event_q.put({"type": "progress", "data": info})
 
         verdict = run_bootstrap_test(
             king_eval, challenger_eval,
-            _r2, req.shard_key, req.eval_n, req.alpha, req.delta,
+            _r2, resolved_shards, req.eval_n, req.alpha, req.delta,
             req.seq_len, req.batch_size, seed_str,
             n_bootstrap=req.n_bootstrap,
             on_progress=_on_progress,
@@ -347,6 +372,19 @@ async def health():
 
 @app.post("/eval")
 async def start_eval(req: EvalRequest):
+    for field_name, revision in (
+        ("king_revision", req.king_revision),
+        ("challenger_revision", req.challenger_revision),
+    ):
+        normalized = (revision or "").strip().lower()
+        if not COMMIT_SHA_RE.fullmatch(normalized):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field_name} must be a pinned 40-char commit SHA",
+            )
+    if not req.resolved_shard_keys():
+        raise HTTPException(status_code=400, detail="at least one shard key is required")
+
     acquired = _eval_lock.acquire(blocking=False)
     if not acquired:
         raise HTTPException(status_code=409, detail="an eval is already running")

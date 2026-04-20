@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -71,7 +72,11 @@ NORM_SANITY_MAX_STD = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_STD", "100"
 NORM_SANITY_MAX_RATIO = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_RATIO", "50"))
 NORM_SANITY_SAMPLE_LIMIT = int(os.environ.get("TEUTONIC_NORM_SANITY_SAMPLE_LIMIT", "256"))
 
+EVAL_MAX_RETRIES = int(os.environ.get("TEUTONIC_EVAL_MAX_RETRIES", "1"))
+EVAL_SHARD_COUNT = int(os.environ.get("TEUTONIC_EVAL_SHARD_COUNT", "1"))
+
 TMC_BASE = "https://api.taomarketcap.com/public/v1"
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 log = logging.getLogger("teutonic")
 
@@ -498,7 +503,6 @@ def validate_challenger_config(hf_repo: str, challenger_revision: str,
 # Chain
 # ---------------------------------------------------------------------------
 
-import re
 _REPO_RE = re.compile(REPO_PATTERN)
 
 def scan_reveals(subtensor, netuid, seen):
@@ -589,14 +593,46 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _resolve_head_revision(hf_repo: str, revision: str = "main") -> str:
+    info = HfApi(token=HF_TOKEN or None).model_info(hf_repo, revision=revision or None)
+    resolved = (info.sha or "").strip().lower()
+    if not _is_pinned_revision(resolved):
+        raise RuntimeError(f"HuggingFace returned an unpinned revision for {hf_repo}: {resolved!r}")
+    return resolved
+
+
+def _normalize_revision(revision: str) -> str:
+    return (revision or "").strip().lower()
+
+
+def _is_pinned_revision(revision: str) -> bool:
+    return bool(COMMIT_SHA_RE.fullmatch(_normalize_revision(revision)))
+
+
+def _make_eval_key(king_repo: str, king_revision: str,
+                   challenger_repo: str, challenger_revision: str) -> tuple[str, str, str, str]:
+    return (king_repo, king_revision, challenger_repo, challenger_revision)
+
+
+def _encode_eval_key(key: tuple[str, str, str, str]) -> str:
+    return json.dumps(key, separators=(",", ":"))
+
+
+def _decode_eval_key(raw: str) -> tuple[str, str, str, str]:
+    value = json.loads(raw)
+    if not isinstance(value, list) or len(value) != 4:
+        raise ValueError(f"invalid eval key payload: {raw!r}")
+    return tuple(str(part) for part in value)
+
+
 class State:
     def __init__(self, r2):
         self.r2 = r2
         self.king = {}
         self.queue = []
         self.seen = set()
-        self.failed_repos: set[str] = set()
-        self.evaluated_repos: set[str] = set()
+        self.failed_eval_pairs: set[tuple[str, str, str, str]] = set()
+        self.eval_counts: dict[tuple[str, str, str, str], int] = {}
         self.stats = {"queued": 0, "accepted": 0, "rejected": 0, "failed": 0}
         self.counter = 0
         self.current_eval = None
@@ -627,6 +663,20 @@ class State:
             self.counter = st.get("counter", 0)
             self.last_weight_block = st.get("last_weight_block", 0)
             self.last_winner_hotkey = st.get("last_winner_hotkey")
+            raw_eval_counts = st.get("eval_counts", {})
+            self.eval_counts = {}
+            for raw_key, count in raw_eval_counts.items():
+                try:
+                    self.eval_counts[_decode_eval_key(raw_key)] = int(count)
+                except Exception:
+                    log.warning("dropping invalid persisted eval_counts entry: %s", raw_key)
+            raw_failed_pairs = st.get("failed_eval_pairs", [])
+            self.failed_eval_pairs = set()
+            for raw_key in raw_failed_pairs:
+                try:
+                    self.failed_eval_pairs.add(_decode_eval_key(raw_key))
+                except Exception:
+                    log.warning("dropping invalid persisted failed_eval_pairs entry: %s", raw_key)
         h = self.r2.get("state/dashboard_history.json")
         if h:
             self.history = h.get("history", [])
@@ -639,6 +689,12 @@ class State:
             "stats": self.stats, "counter": self.counter,
             "last_weight_block": self.last_weight_block,
             "last_winner_hotkey": self.last_winner_hotkey,
+            "eval_counts": {
+                _encode_eval_key(key): count for key, count in self.eval_counts.items()
+            },
+            "failed_eval_pairs": [
+                _encode_eval_key(key) for key in sorted(self.failed_eval_pairs)
+            ],
             "updated_at": _now(),
         })
         self.r2.put("state/queue.json", {"pending": self.queue, "updated_at": _now()})
@@ -666,9 +722,6 @@ class State:
             if existing.get("hf_repo") == repo:
                 log.info("skipping duplicate repo: %s already queued", repo)
                 return None
-        if repo in self.evaluated_repos:
-            log.info("skipping %s: already evaluated this cycle", repo)
-            return None
         cid = self.next_id()
         entry = {"challenge_id": cid, **reveal, "queued_at": _now()}
         self.queue.append(entry)
@@ -683,8 +736,6 @@ class State:
         global _king_config, _king_config_key
         _king_config = None
         _king_config_key = None
-        self.failed_repos.clear()
-        self.evaluated_repos.clear()
         reign = self.king.get("reign_number", 0) + (0 if challenge_id == "seed" else 1)
         prev = self.king.copy() if self.king else None
         if prev:
@@ -752,13 +803,10 @@ class State:
 
     def replenish_reeval(self, subtensor, netuid):
         """Fill queue with re-eval candidates so the dashboard never shows empty."""
-        self.evaluated_repos.clear()
         throwaway_seen = set()
         reeval_reveals = scan_reveals(subtensor, netuid, throwaway_seen)
         king_hk = self.king.get("hotkey", "")
-        reeval_reveals = [r for r in reeval_reveals
-                          if r["hotkey"] != king_hk
-                          and r["hf_repo"] not in self.failed_repos]
+        reeval_reveals = [r for r in reeval_reveals if r["hotkey"] != king_hk]
         count = 0
         for rev in reeval_reveals:
             rev["reeval"] = True
@@ -788,6 +836,56 @@ class State:
         self.r2.put_dashboard("dashboard.json", payload)
 
 
+def _backfill_legacy_king_revisions(state: State) -> int:
+    """Pin legacy king state to concrete HF revisions without forcing dethrone.
+
+    Older persisted state may have a king repo but no pinned ``king_revision``.
+    Historically that meant "follow current HEAD at eval time". We preserve
+    operational compatibility by resolving and storing the repo's current HEAD
+    once at startup/liveness time, then enforcing pinned revisions from there.
+    """
+    updates: list[tuple[str, str, int]] = []
+    node = state.king
+    depth = 0
+
+    while isinstance(node, dict) and node:
+        repo = (node.get("hf_repo", "") or "").strip()
+        revision = _normalize_revision(node.get("king_revision", ""))
+        if revision:
+            node["king_revision"] = revision
+
+        if repo and not _is_pinned_revision(revision):
+            try:
+                resolved = _resolve_head_revision(repo)
+            except Exception:
+                if depth == 0:
+                    raise
+                log.warning("could not backfill legacy previous king revision for %s", repo,
+                            exc_info=True)
+            else:
+                node["king_revision"] = resolved
+                updates.append((repo, resolved, depth))
+
+        node = node.get("previous_king") if isinstance(node, dict) else None
+        depth += 1
+
+    if not updates:
+        return 0
+
+    state.flush()
+    state.flush_dashboard()
+    for repo, resolved, depth in updates:
+        state.event({
+            "event": "legacy_king_revision_backfilled",
+            "hf_repo": repo,
+            "king_revision": resolved,
+            "depth": depth,
+        })
+    log.warning("backfilled pinned revisions for %d legacy king state entr%s",
+                len(updates), "y" if len(updates) == 1 else "ies")
+    return len(updates)
+
+
 
 # ---------------------------------------------------------------------------
 # King liveness
@@ -796,9 +894,25 @@ class State:
 def check_king_alive(state):
     """Verify king repo is still accessible at pinned revision. Auto-dethrone if not."""
     repo = state.king.get("hf_repo", "")
-    rev = state.king.get("king_revision", "")
-    if not repo or not rev:
-        return True
+    rev = _normalize_revision(state.king.get("king_revision", ""))
+    if not repo:
+        log.error("current king is missing repo metadata; skipping this tick")
+        return False
+
+    if not _is_pinned_revision(rev):
+        try:
+            migrated = _backfill_legacy_king_revisions(state)
+        except Exception:
+            log.warning("current king %s has no pinned revision and backfill failed; skipping this tick",
+                        repo, exc_info=True)
+            return False
+        rev = _normalize_revision(state.king.get("king_revision", ""))
+        if migrated:
+            log.info("legacy current king pinned at %s@%s", repo, rev[:12])
+        if not _is_pinned_revision(rev):
+            log.warning("current king %s still lacks a pinned revision after backfill; skipping this tick",
+                        repo)
+            return False
     try:
         HfApi(token=HF_TOKEN or None).model_info(repo, revision=rev)
         return True
@@ -834,14 +948,6 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         log.info("skipping %s: challenger hotkey %s is the current king", cid, hotkey[:16])
         return
 
-    if hf_repo in state.failed_repos:
-        log.info("skipping %s: repo %s previously failed", cid, hf_repo)
-        return
-
-    if hf_repo in state.evaluated_repos:
-        log.info("skipping %s: repo %s already evaluated this cycle", cid, hf_repo)
-        return
-
     if check_stale:
         current_hash = state.king.get("king_hash", "")
         entry_king_hash = entry.get("king_hash", "")
@@ -850,29 +956,50 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             state.event({"event": "stale", "challenge_id": cid, "hotkey": hotkey})
             return
 
+    king_repo = state.king.get("hf_repo", SEED_REPO)
+    king_revision = _normalize_revision(state.king.get("king_revision", ""))
+    if not _is_pinned_revision(king_revision):
+        raise RuntimeError(
+            f"current king {king_repo} has no pinned commit revision; refusing insecure eval"
+        )
+
     try:
-        challenger_info = HfApi(token=HF_TOKEN or None).model_info(hf_repo, revision="main")
-        challenger_revision = challenger_info.sha
+        challenger_revision = _resolve_head_revision(hf_repo, revision="main")
         log.info("challenger %s pinned at revision %s", hf_repo, challenger_revision[:12])
     except Exception as exc:
         log.warning("cannot get commit SHA for %s, skipping", hf_repo)
-        state.failed_repos.add(hf_repo)
         state.record_failure(entry, "hf_metadata_error", str(exc))
+        return
+
+    eval_key = _make_eval_key(king_repo, king_revision, hf_repo, challenger_revision)
+    if eval_key in state.failed_eval_pairs:
+        log.info("skipping %s: pair already failed validation %s@%s vs %s@%s",
+                 cid, king_repo, king_revision[:12], hf_repo, challenger_revision[:12])
+        return
+
+    # Dedup: skip if this exact king/challenger commit pair has already been evaluated.
+    prev_count = state.eval_counts.get(eval_key, 0)
+    if prev_count >= EVAL_MAX_RETRIES:
+        log.info("skipping %s: pair %s@%s vs %s@%s already evaluated %d/%d times",
+                 cid, king_repo, king_revision[:12], hf_repo, challenger_revision[:12],
+                 prev_count, EVAL_MAX_RETRIES)
         return
 
     rejection = validate_challenger_config(
         hf_repo, challenger_revision,
-        king_repo=state.king.get("hf_repo", ""),
-        king_revision=state.king.get("king_revision", ""),
+        king_repo=king_repo,
+        king_revision=king_revision,
     )
     if rejection:
         log.warning("rejecting %s (%s): %s", cid, hf_repo, rejection)
-        state.failed_repos.add(hf_repo)
+        state.failed_eval_pairs.add(eval_key)
         state.record_failure(entry, "config_rejected", rejection)
         state.event({"event": "config_rejected", "challenge_id": cid,
                      "hf_repo": hf_repo, "reason": rejection})
+        state.flush()
         return
 
+    eval_block = 0
     block_hash = "default"
     try:
         eval_block = subtensor.block
@@ -900,19 +1027,27 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         state.flush()
         return
     n_shards = manifest["total_shards"]
+    if n_shards <= 0:
+        raise RuntimeError("dataset manifest contains zero shards")
     seed_mat = f"{block_hash}:{hotkey}".encode()
-    shard_idx = int.from_bytes(hashlib.blake2b(seed_mat, digest_size=8).digest(), "little") % n_shards
-    shard_key = manifest["shards"][shard_idx]["key"]
-
-    king_repo = state.king.get("hf_repo", SEED_REPO)
-    king_revision = state.king.get("king_revision", "")
+    k = min(EVAL_SHARD_COUNT, n_shards)
+    shard_seed = int.from_bytes(
+        hashlib.blake2b(seed_mat, digest_size=8, person=b"shardpick").digest(),
+        "little",
+    )
+    shard_rng = np.random.Generator(np.random.PCG64(shard_seed))
+    shard_indices = shard_rng.choice(n_shards, size=k, replace=False).tolist()
+    shard_keys = [manifest["shards"][idx]["key"] for idx in shard_indices]
+    if not shard_keys:
+        raise RuntimeError("failed to select shard keys for eval")
 
     r2.put(f"eval/{cid}/meta.json", {
         "challenge_id": cid, "king_repo": king_repo,
         "king_revision": king_revision,
         "challenger_repo": hf_repo, "challenger_revision": challenger_revision,
         "hotkey": hotkey,
-        "N": EVAL_N, "alpha": EVAL_ALPHA, "delta": EVAL_DELTA, "shard": shard_key,
+        "N": EVAL_N, "alpha": EVAL_ALPHA, "delta": EVAL_DELTA,
+        "shard_keys": shard_keys,
         "eval_block": eval_block, "block_hash": block_hash,
     })
 
@@ -931,7 +1066,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "challenger_repo": hf_repo,
             "block_hash": block_hash,
             "hotkey": hotkey,
-            "shard_key": shard_key,
+            "shard_keys": shard_keys,
             "king_hash": state.king.get("king_hash", ""),
             "king_revision": king_revision,
             "challenger_revision": challenger_revision,
@@ -997,7 +1132,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
              verdict.get("delta", 0), verdict["wall_time_s"])
 
     state.current_eval = None
-    state.evaluated_repos.add(hf_repo)
+    state.eval_counts[eval_key] = prev_count + 1
     state.record_verdict(verdict, hf_repo, hotkey)
 
     accepted = verdict.get("accepted", False)
@@ -1060,13 +1195,27 @@ async def main():
     if not state.king:
         seed_revision = ""
         try:
-            seed_info = HfApi(token=HF_TOKEN or None).model_info(SEED_REPO)
-            seed_revision = seed_info.sha
+            seed_revision = _resolve_head_revision(SEED_REPO)
             log.info("seed king %s at revision %s", SEED_REPO, seed_revision[:12])
         except Exception:
-            log.warning("could not get seed king revision from %s", SEED_REPO)
+            log.exception("could not pin seed king revision from %s", SEED_REPO)
+            sys.exit(1)
         state.set_king(wallet.hotkey.ss58_address, SEED_REPO, "seed",
                        subtensor.block, king_revision=seed_revision)
+    else:
+        try:
+            migrated = _backfill_legacy_king_revisions(state)
+        except Exception:
+            log.warning("could not backfill legacy king revision at startup; validator will retry during liveness checks",
+                        exc_info=True)
+            migrated = 0
+        current_revision = _normalize_revision(state.king.get("king_revision", ""))
+        if migrated:
+            log.info("legacy king state migrated to pinned revision %s@%s",
+                     state.king.get("hf_repo", "?"), current_revision[:12])
+        elif not _is_pinned_revision(current_revision):
+            log.warning("current king %s has no pinned revision in state; allowing startup for legacy migration only",
+                        state.king.get("hf_repo", "?"))
 
     maybe_set_weights(subtensor, wallet, state, force=True, reason="startup")
 
