@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import struct
 import sys
 import time
@@ -46,6 +47,7 @@ from huggingface_hub import HfApi
 from transformers import AutoModelForCausalLM
 
 log = logging.getLogger("eval_torch")
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 # ---------------------------------------------------------------------------
@@ -62,18 +64,24 @@ def verify_commit_hash(repo: str, expected_revision: str) -> str:
 
     Returns the verified commit SHA on success, raises ValueError on mismatch.
     """
-    if not expected_revision:
-        return ""
+    expected_sha = (expected_revision or "").strip().lower()
+    if not expected_sha:
+        raise ValueError(f"pinned commit revision required for {repo}")
+    if not COMMIT_SHA_RE.fullmatch(expected_sha):
+        raise ValueError(
+            f"unpinned revision for {repo}: expected a 40-char commit SHA, got {expected_revision!r}"
+        )
+
     api = HfApi(token=os.environ.get("HF_TOKEN") or None)
-    info = api.model_info(repo, revision=expected_revision)
-    actual_sha = info.sha
-    if actual_sha != expected_revision:
+    info = api.model_info(repo, revision=expected_sha)
+    actual_sha = (info.sha or "").strip().lower()
+    if actual_sha != expected_sha:
         raise ValueError(
             f"commit hash mismatch for {repo}: "
-            f"expected {expected_revision[:12]} but got {actual_sha[:12]}. "
+            f"expected {expected_sha[:12]} but got {actual_sha[:12]}. "
             f"Possible model replacement attack."
         )
-    log.info("commit verified: %s@%s", repo, expected_revision[:12])
+    log.info("commit verified: %s@%s", repo, expected_sha[:12])
     return actual_sha
 
 
@@ -582,6 +590,9 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_keys, eval_n,
     # Normalize shard_keys to a list
     if isinstance(shard_keys, str):
         shard_keys = [shard_keys]
+    shard_keys = [shard_key for shard_key in shard_keys if shard_key]
+    if not shard_keys:
+        raise ValueError("no shard keys provided for bootstrap eval")
 
     seed_material = seed_str.encode()
     seed = int.from_bytes(hashlib.blake2b(seed_material, digest_size=8).digest(), "little")
@@ -596,20 +607,34 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_keys, eval_n,
         shard_info.append({"key": sk, "n_sequences": n_seq})
         total_available += n_seq
 
+    if total_available <= 0:
+        raise ValueError("selected shard set does not contain any full sequences")
+
     actual_N = min(eval_n, total_available)
     log.info("bootstrap test: K=%d shards, N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
              len(shard_keys), eval_n, actual_N, alpha, delta, n_bootstrap)
 
-    # Distribute eval_n across shards proportionally
+    # Distribute eval_n across shards proportionally, then fill leftovers without exceeding capacity.
     per_shard_n = []
-    remaining = actual_N
-    for i, si in enumerate(shard_info):
-        if i == len(shard_info) - 1:
-            n = remaining
-        else:
-            n = min(int(actual_N * si["n_sequences"] / total_available), remaining)
-        per_shard_n.append(min(n, si["n_sequences"]))
-        remaining -= per_shard_n[-1]
+    for si in shard_info:
+        ideal = actual_N * si["n_sequences"] / total_available
+        per_shard_n.append(min(int(ideal), si["n_sequences"]))
+
+    remaining = actual_N - sum(per_shard_n)
+    while remaining > 0:
+        candidates = [
+            index for index, si in enumerate(shard_info)
+            if per_shard_n[index] < si["n_sequences"]
+        ]
+        if not candidates:
+            break
+        weights = np.array(
+            [shard_info[index]["n_sequences"] - per_shard_n[index] for index in candidates],
+            dtype=np.float64,
+        )
+        pick = candidates[int(rng.choice(len(candidates), p=weights / weights.sum()))]
+        per_shard_n[pick] += 1
+        remaining -= 1
 
     # Phase 2: download shards and extract sequences
     all_sequences = []
@@ -629,6 +654,8 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_keys, eval_n,
     # Phase 3: cross-shard shuffle
     rng.shuffle(all_sequences)
     actual_N = len(all_sequences)
+    if actual_N == 0:
+        raise ValueError("bootstrap eval selected zero sequences after shard sampling")
     log.info("cross-shard shuffle complete: %d sequences from %d shard(s)", actual_N, len(shard_keys))
 
     batches = [
