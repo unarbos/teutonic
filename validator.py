@@ -596,9 +596,17 @@ def _now():
 def _resolve_head_revision(hf_repo: str, revision: str = "main") -> str:
     info = HfApi(token=HF_TOKEN or None).model_info(hf_repo, revision=revision or None)
     resolved = (info.sha or "").strip().lower()
-    if not COMMIT_SHA_RE.fullmatch(resolved):
+    if not _is_pinned_revision(resolved):
         raise RuntimeError(f"HuggingFace returned an unpinned revision for {hf_repo}: {resolved!r}")
     return resolved
+
+
+def _normalize_revision(revision: str) -> str:
+    return (revision or "").strip().lower()
+
+
+def _is_pinned_revision(revision: str) -> bool:
+    return bool(COMMIT_SHA_RE.fullmatch(_normalize_revision(revision)))
 
 
 def _make_eval_key(king_repo: str, king_revision: str,
@@ -828,6 +836,56 @@ class State:
         self.r2.put_dashboard("dashboard.json", payload)
 
 
+def _backfill_legacy_king_revisions(state: State) -> int:
+    """Pin legacy king state to concrete HF revisions without forcing dethrone.
+
+    Older persisted state may have a king repo but no pinned ``king_revision``.
+    Historically that meant "follow current HEAD at eval time". We preserve
+    operational compatibility by resolving and storing the repo's current HEAD
+    once at startup/liveness time, then enforcing pinned revisions from there.
+    """
+    updates: list[tuple[str, str, int]] = []
+    node = state.king
+    depth = 0
+
+    while isinstance(node, dict) and node:
+        repo = (node.get("hf_repo", "") or "").strip()
+        revision = _normalize_revision(node.get("king_revision", ""))
+        if revision:
+            node["king_revision"] = revision
+
+        if repo and not _is_pinned_revision(revision):
+            try:
+                resolved = _resolve_head_revision(repo)
+            except Exception:
+                if depth == 0:
+                    raise
+                log.warning("could not backfill legacy previous king revision for %s", repo,
+                            exc_info=True)
+            else:
+                node["king_revision"] = resolved
+                updates.append((repo, resolved, depth))
+
+        node = node.get("previous_king") if isinstance(node, dict) else None
+        depth += 1
+
+    if not updates:
+        return 0
+
+    state.flush()
+    state.flush_dashboard()
+    for repo, resolved, depth in updates:
+        state.event({
+            "event": "legacy_king_revision_backfilled",
+            "hf_repo": repo,
+            "king_revision": resolved,
+            "depth": depth,
+        })
+    log.warning("backfilled pinned revisions for %d legacy king state entr%s",
+                len(updates), "y" if len(updates) == 1 else "ies")
+    return len(updates)
+
+
 
 # ---------------------------------------------------------------------------
 # King liveness
@@ -836,10 +894,25 @@ class State:
 def check_king_alive(state):
     """Verify king repo is still accessible at pinned revision. Auto-dethrone if not."""
     repo = state.king.get("hf_repo", "")
-    rev = state.king.get("king_revision", "")
-    if not repo or not rev:
-        log.error("current king is missing a pinned revision; refusing insecure eval")
+    rev = _normalize_revision(state.king.get("king_revision", ""))
+    if not repo:
+        log.error("current king is missing repo metadata; skipping this tick")
         return False
+
+    if not _is_pinned_revision(rev):
+        try:
+            migrated = _backfill_legacy_king_revisions(state)
+        except Exception:
+            log.warning("current king %s has no pinned revision and backfill failed; skipping this tick",
+                        repo, exc_info=True)
+            return False
+        rev = _normalize_revision(state.king.get("king_revision", ""))
+        if migrated:
+            log.info("legacy current king pinned at %s@%s", repo, rev[:12])
+        if not _is_pinned_revision(rev):
+            log.warning("current king %s still lacks a pinned revision after backfill; skipping this tick",
+                        repo)
+            return False
     try:
         HfApi(token=HF_TOKEN or None).model_info(repo, revision=rev)
         return True
@@ -884,8 +957,8 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             return
 
     king_repo = state.king.get("hf_repo", SEED_REPO)
-    king_revision = (state.king.get("king_revision", "") or "").strip().lower()
-    if not king_revision or not COMMIT_SHA_RE.fullmatch(king_revision):
+    king_revision = _normalize_revision(state.king.get("king_revision", ""))
+    if not _is_pinned_revision(king_revision):
         raise RuntimeError(
             f"current king {king_repo} has no pinned commit revision; refusing insecure eval"
         )
@@ -1129,10 +1202,20 @@ async def main():
             sys.exit(1)
         state.set_king(wallet.hotkey.ss58_address, SEED_REPO, "seed",
                        subtensor.block, king_revision=seed_revision)
-    elif not COMMIT_SHA_RE.fullmatch((state.king.get("king_revision", "") or "").strip().lower()):
-        log.error("current king %s has no pinned revision in state; refusing to start insecurely",
-                  state.king.get("hf_repo", "?"))
-        sys.exit(1)
+    else:
+        try:
+            migrated = _backfill_legacy_king_revisions(state)
+        except Exception:
+            log.warning("could not backfill legacy king revision at startup; validator will retry during liveness checks",
+                        exc_info=True)
+            migrated = 0
+        current_revision = _normalize_revision(state.king.get("king_revision", ""))
+        if migrated:
+            log.info("legacy king state migrated to pinned revision %s@%s",
+                     state.king.get("hf_repo", "?"), current_revision[:12])
+        elif not _is_pinned_revision(current_revision):
+            log.warning("current king %s has no pinned revision in state; allowing startup for legacy migration only",
+                        state.king.get("hf_repo", "?"))
 
     maybe_set_weights(subtensor, wallet, state, force=True, reason="startup")
 
