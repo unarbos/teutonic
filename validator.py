@@ -12,9 +12,7 @@ import logging
 import math
 import os
 import signal
-import struct
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -37,7 +35,7 @@ POLL_INTERVAL = 30
 WEIGHT_INTERVAL = 300
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
 NETWORK = os.environ.get("TEUTONIC_NETWORK", "finney")
-SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-I")
+SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-III")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 EVAL_SERVER_URL = os.environ.get("TEUTONIC_EVAL_SERVER", "http://localhost:9000")
 WALLET_NAME = os.environ.get("BT_WALLET_NAME", "teutonic")
@@ -63,26 +61,13 @@ TMC_API_KEY = os.environ.get("TMC_API_KEY", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
-REPO_PATTERN = r"^[^/]+/Teutonic-I-.+$"
+REPO_PATTERN = r"^[^/]+/Teutonic-III-.+$"
 
-# Honest Gemma3-270M post_feedforward_layernorm gains can reach ~140 max_abs /
-# ~100 mean_abs after training. Defaults sit ~10x above that envelope, while
-# still catching trick checkpoints whose RMSNorm gains explode to 10^4-10^5.
-NORM_SANITY_MAX_ABS = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_ABS", "5000"))
-NORM_SANITY_MAX_MEAN_ABS = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_MEAN_ABS", "1000"))
-NORM_SANITY_MAX_STD = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_STD", "1000"))
-NORM_SANITY_MAX_RATIO = float(os.environ.get("TEUTONIC_NORM_SANITY_MAX_RATIO", "50"))
-NORM_SANITY_SAMPLE_LIMIT = int(os.environ.get("TEUTONIC_NORM_SANITY_SAMPLE_LIMIT", "256"))
-
-# Reparameterization-trick guard. RMSNorm + Linear (and SwiGLU's silu(g)*u) are
-# scale-symmetric: you can multiply an RMSNorm gain by alpha and divide the
-# following projection by alpha and produce identical logits. Attackers exploit
-# this by inflating layernorm gains to ~10^4-10^5 and shrinking q_proj /
-# k_proj / o_proj / gate_proj / down_proj to ~10^-6, which makes the king
-# functionally identical but brittle to any perturbation or fine-tune step.
-PROJ_MIN_MEAN_ABS = float(os.environ.get("TEUTONIC_PROJ_MIN_MEAN_ABS", "1e-4"))
-LAYER_SCALE_RATIO_MAX = float(os.environ.get("TEUTONIC_LAYER_SCALE_RATIO_MAX", "1e5"))
-REPARAM_SAMPLE_LIMIT = int(os.environ.get("TEUTONIC_REPARAM_SAMPLE_LIMIT", "1024"))
+# Magnitude/ratio sanity checks have been removed in favor of a single
+# first-principles trainability probe that runs on the eval server (see
+# eval_torch.trainability_probe). The probe takes one SGD step on the
+# candidate and rejects models whose loss explodes — the actual property
+# we care about. See DESIGN.md / commit history for the analysis.
 
 TMC_BASE = "https://api.taomarketcap.com/public/v1"
 
@@ -325,330 +310,6 @@ class R2:
 
 _king_config: dict | None = None
 _king_config_key: str | None = None
-_norm_stats_cache: dict[str, dict] = {}
-_reparam_stats_cache: dict[str, dict] = {}
-
-PROJ_TENSOR_SUFFIXES = (
-    "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
-    "gate_proj.weight", "up_proj.weight", "down_proj.weight",
-)
-
-
-def _safe_ratio(numerator: float, denominator: float) -> float:
-    denom = max(abs(denominator), 1e-12)
-    return abs(numerator) / denom
-
-
-def _is_norm_tensor(name: str) -> bool:
-    lname = name.lower()
-    return lname.endswith("norm.weight") or ".norm.weight" in lname or "layernorm.weight" in lname or "rmsnorm.weight" in lname
-
-
-def _is_proj_tensor(name: str) -> bool:
-    return any(name.endswith(suf) for suf in PROJ_TENSOR_SUFFIXES)
-
-
-def _layer_key(name: str) -> str | None:
-    """Extract a layer-block identifier (e.g. 'model.layers.10') from a tensor
-    name so reparam checks can group same-block norms and projections together.
-    Returns None for tensors that don't live in a layer (embeddings, final
-    norm, lm_head)."""
-    parts = name.split(".")
-    for i, p in enumerate(parts):
-        if p == "layers" and i + 1 < len(parts):
-            return ".".join(parts[: i + 2])
-    return None
-
-
-def _tensor_stats(tensor) -> dict[str, float]:
-    """Compute summary stats from a torch tensor or numpy array. Reads via
-    torch so that bf16 (which numpy can't represent natively) is supported."""
-    import torch as _torch
-
-    if isinstance(tensor, _torch.Tensor):
-        t = tensor.detach().to(_torch.float32).reshape(-1)
-        finite = _torch.isfinite(t)
-        if not bool(finite.all().item()):
-            bad = int(t.numel() - int(finite.sum().item()))
-            return {"has_non_finite": True, "non_finite_count": bad}
-        abs_t = t.abs()
-        size = int(t.numel())
-        return {
-            "has_non_finite": False,
-            "size": size,
-            "max_abs": float(abs_t.max().item()) if size else 0.0,
-            "mean_abs": float(abs_t.mean().item()) if size else 0.0,
-            "std": float(t.std(unbiased=False).item()) if size else 0.0,
-        }
-
-    arr = np.asarray(tensor).astype(np.float64, copy=False).reshape(-1)
-    finite = np.isfinite(arr)
-    if not finite.all():
-        bad = int(arr.size - finite.sum())
-        return {"has_non_finite": True, "non_finite_count": bad}
-    abs_arr = np.abs(arr)
-    return {
-        "has_non_finite": False,
-        "size": int(arr.size),
-        "max_abs": float(abs_arr.max(initial=0.0)),
-        "mean_abs": float(abs_arr.mean()) if arr.size else 0.0,
-        "std": float(arr.std()) if arr.size else 0.0,
-    }
-
-
-_SAFETENSORS_DTYPES = {
-    "F64":  (np.float64, 8),
-    "F32":  (np.float32, 4),
-    "F16":  (np.float16, 2),
-    "BF16": (None,       2),
-    "I64":  (np.int64,   8),
-    "I32":  (np.int32,   4),
-    "I16":  (np.int16,   2),
-    "I8":   (np.int8,    1),
-    "U8":   (np.uint8,   1),
-    "BOOL": (np.bool_,   1),
-}
-
-
-def _read_safetensors_header(path: str):
-    """Parse the safetensors header. Returns (header_dict, data_base_offset)."""
-    with open(path, "rb") as f:
-        (n,) = struct.unpack("<Q", f.read(8))
-        if n <= 0 or n > 100 * 1024 * 1024:
-            raise ValueError(f"safetensors header size {n} out of bounds")
-        return json.loads(f.read(n).decode("utf-8")), 8 + n
-
-
-def _read_tensor_as_float(path: str, dtype: str, shape, data_offsets,
-                          base_offset: int) -> np.ndarray:
-    """Read one tensor's bytes from a safetensors file and return a numpy array.
-    bf16 is widened to fp32 (exact, mantissa zero-padded) so numpy can handle it."""
-    start, end = int(data_offsets[0]), int(data_offsets[1])
-    nbytes = end - start
-    info = _SAFETENSORS_DTYPES.get(dtype)
-    if info is None:
-        raise ValueError(f"unsupported dtype {dtype}")
-    np_dtype, elem_size = info
-    n_elems = 1
-    for d in shape:
-        n_elems *= int(d)
-    if nbytes != n_elems * elem_size:
-        raise ValueError(
-            f"size mismatch for dtype {dtype}: {nbytes} vs {n_elems * elem_size}"
-        )
-    with open(path, "rb") as f:
-        f.seek(base_offset + start)
-        buf = f.read(nbytes)
-    if dtype == "BF16":
-        u16 = np.frombuffer(buf, dtype=np.uint16)
-        return (u16.astype(np.uint32) << 16).view(np.float32).reshape(shape)
-    return np.frombuffer(buf, dtype=np_dtype).reshape(shape)
-
-
-def _iter_safetensors(hf_repo: str, revision: str, key_filter):
-    """Stream tensors from a remote safetensors repo. Yields (key, np.ndarray)
-    pairs for keys that pass key_filter(key). Parses the safetensors header
-    directly so bf16 works without requiring torch on the validator host."""
-    api = HfApi(token=HF_TOKEN or None)
-    repo_files = api.list_repo_files(hf_repo, token=HF_TOKEN or None, revision=revision or None)
-    st_files = sorted([s for s in repo_files if s.endswith(".safetensors")])
-    with tempfile.TemporaryDirectory(prefix="teutonic-sanity-") as tmpdir:
-        for relpath in st_files:
-            local_path = api.hf_hub_download(
-                hf_repo,
-                relpath,
-                token=HF_TOKEN or None,
-                revision=revision or None,
-                local_dir=tmpdir,
-            )
-            header, base = _read_safetensors_header(local_path)
-            for key, meta in header.items():
-                if key == "__metadata__" or not isinstance(meta, dict):
-                    continue
-                if not key_filter(key):
-                    continue
-                arr = _read_tensor_as_float(
-                    local_path,
-                    meta["dtype"],
-                    meta["shape"],
-                    meta["data_offsets"],
-                    base,
-                )
-                yield key, arr
-
-
-def _collect_norm_stats(hf_repo: str, revision: str) -> dict[str, dict]:
-    cache_key = f"{hf_repo}@{revision or 'HEAD'}"
-    cached = _norm_stats_cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    stats: dict[str, dict] = {}
-    for key, tensor in _iter_safetensors(hf_repo, revision, _is_norm_tensor):
-        stats[key] = _tensor_stats(tensor)
-        if len(stats) >= NORM_SANITY_SAMPLE_LIMIT:
-            break
-
-    _norm_stats_cache[cache_key] = stats
-    return stats
-
-
-def _collect_reparam_stats(hf_repo: str, revision: str) -> dict[str, dict]:
-    """Like _collect_norm_stats but covers norm tensors AND projection tensors.
-
-    Used by the reparameterization-trick guard, which needs to compare the
-    magnitudes of layernorm gains against the magnitudes of the projection
-    weights they immediately precede.
-    """
-    cache_key = f"{hf_repo}@{revision or 'HEAD'}"
-    cached = _reparam_stats_cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    def _accept(name: str) -> bool:
-        return _is_norm_tensor(name) or _is_proj_tensor(name)
-
-    stats: dict[str, dict] = {}
-    for key, tensor in _iter_safetensors(hf_repo, revision, _accept):
-        stats[key] = _tensor_stats(tensor)
-        if len(stats) >= REPARAM_SAMPLE_LIMIT:
-            break
-
-    _reparam_stats_cache[cache_key] = stats
-    return stats
-
-
-def check_reparam_sanity(stats: dict[str, dict]) -> str | None:
-    """Detect RMSNorm + Linear / SwiGLU scale-symmetry exploitation.
-
-    The trick rescales (gamma, W) -> (alpha*gamma, W/alpha) for any RMSNorm
-    immediately followed by a linear projection. The resulting checkpoint is
-    mathematically equivalent in output but pathologically brittle: tiny
-    gradient updates or noise destroy the now-tiny projection weights.
-
-    Three checks, evaluated in order on per-tensor mean_abs / max_abs stats:
-
-      1. Hard caps on RMSNorm magnitudes (reuses the existing NORM_SANITY_*
-         envelope so the same numbers gate both challengers and king audits).
-      2. Per-projection floor: every q/k/v/o/gate/up/down projection must have
-         mean_abs >= PROJ_MIN_MEAN_ABS. Honest Gemma3 projections are
-         ~5e-3 to 6e-2; trick projections collapse to ~1e-6.
-      3. Within-layer scale ratio: max(norm.mean_abs) / min(proj.mean_abs)
-         per layer block must stay below LAYER_SCALE_RATIO_MAX. Honest
-         layers have this ratio ~10^1-10^3; trick layers reach ~10^9-10^10.
-
-    Returns a short rejection reason string, or None if the checkpoint looks
-    clean.
-    """
-    if not stats:
-        return "no inspectable tensors found"
-
-    layer_norm_max: dict[str, tuple[str, float]] = {}
-    layer_proj_min: dict[str, tuple[str, float]] = {}
-
-    for name, s in stats.items():
-        if s.get("has_non_finite"):
-            return f"non-finite values in {name} ({s.get('non_finite_count', '?')} entries)"
-
-        is_norm = _is_norm_tensor(name)
-        is_proj = _is_proj_tensor(name)
-
-        if is_norm:
-            if s["max_abs"] > NORM_SANITY_MAX_ABS:
-                return f"norm_weight_scaled:{name}={s['max_abs']:.1f} exceeds {NORM_SANITY_MAX_ABS:.1f}"
-            if s["mean_abs"] > NORM_SANITY_MAX_MEAN_ABS:
-                return f"norm_weight_mean_abs:{name}={s['mean_abs']:.3f} exceeds {NORM_SANITY_MAX_MEAN_ABS:.3f}"
-            if s["std"] > NORM_SANITY_MAX_STD:
-                return f"norm_weight_std:{name}={s['std']:.3f} exceeds {NORM_SANITY_MAX_STD:.3f}"
-
-        if is_proj:
-            if s["mean_abs"] < PROJ_MIN_MEAN_ABS:
-                return (
-                    f"proj_weight_collapsed:{name}={s['mean_abs']:.3g} below "
-                    f"{PROJ_MIN_MEAN_ABS:.3g} (RMSNorm/SwiGLU rescale trick suspected)"
-                )
-
-        layer = _layer_key(name)
-        if layer is None:
-            continue
-        if is_norm:
-            cur = layer_norm_max.get(layer)
-            if cur is None or s["mean_abs"] > cur[1]:
-                layer_norm_max[layer] = (name, s["mean_abs"])
-        if is_proj:
-            cur = layer_proj_min.get(layer)
-            if cur is None or s["mean_abs"] < cur[1]:
-                layer_proj_min[layer] = (name, s["mean_abs"])
-
-    for layer, (norm_name, norm_val) in layer_norm_max.items():
-        proj = layer_proj_min.get(layer)
-        if proj is None:
-            continue
-        proj_name, proj_val = proj
-        ratio = _safe_ratio(norm_val, proj_val)
-        if ratio > LAYER_SCALE_RATIO_MAX:
-            return (
-                f"layer_scale_ratio:{layer} max(norm)={norm_val:.3g} ({norm_name}) / "
-                f"min(proj)={proj_val:.3g} ({proj_name}) = {ratio:.3g} "
-                f"exceeds {LAYER_SCALE_RATIO_MAX:.3g}"
-            )
-
-    return None
-
-
-def validate_challenger_sanity(hf_repo: str, challenger_revision: str,
-                               king_repo: str = "",
-                               king_revision: str = "") -> str | None:
-    """Reject challengers with obviously pathological norm weights or with
-    weights showing the RMSNorm/SwiGLU scale-symmetry exploit fingerprint."""
-    try:
-        challenger_stats = _collect_reparam_stats(hf_repo, challenger_revision)
-    except Exception as e:
-        return f"cannot inspect safetensors: {e}"
-
-    challenger_norm_stats = {n: s for n, s in challenger_stats.items() if _is_norm_tensor(n)}
-    if not challenger_norm_stats:
-        return "no norm.weight tensors found in safetensors"
-
-    reparam_reason = check_reparam_sanity(challenger_stats)
-    if reparam_reason:
-        return f"reparam:{reparam_reason}"
-
-    ref_repo = king_repo or SEED_REPO
-    try:
-        king_stats = _collect_norm_stats(ref_repo, king_revision)
-    except Exception:
-        king_stats = {}
-
-    # Skip the king-ratio cross-check when the king's reference value is
-    # effectively zero. Gemma3 RMSNorm uses the (1 + weight) parameterization,
-    # so input_layernorm / pre_feedforward_layernorm gains are stored as ~0
-    # and the ratio test is mathematically meaningless against that baseline
-    # (any non-zero challenger explodes to ratio ~ 1/eps). The absolute
-    # NORM_SANITY_MAX_* caps already gate genuinely pathological models.
-    KING_REF_MIN = 1e-3
-    for name, stats in challenger_norm_stats.items():
-        king = king_stats.get(name)
-        if not king or king.get("has_non_finite"):
-            continue
-        king_max = float(king.get("max_abs", 0.0))
-        king_mean = float(king.get("mean_abs", 0.0))
-        if king_max >= KING_REF_MIN:
-            ratio = _safe_ratio(stats["max_abs"], king_max)
-            if ratio > NORM_SANITY_MAX_RATIO:
-                return (
-                    f"norm_weight_ratio:{name} max_abs_ratio="
-                    f"{ratio:.2f} exceeds {NORM_SANITY_MAX_RATIO:.2f}"
-                )
-        if king_mean >= KING_REF_MIN:
-            ratio = _safe_ratio(stats["mean_abs"], king_mean)
-            if ratio > NORM_SANITY_MAX_RATIO:
-                return (
-                    f"norm_weight_ratio:{name} mean_abs_ratio="
-                    f"{ratio:.2f} exceeds {NORM_SANITY_MAX_RATIO:.2f}"
-                )
-
-    return None
 
 
 def get_king_config(king_repo: str, king_revision: str = ""):
@@ -717,12 +378,9 @@ def validate_challenger_config(hf_repo: str, challenger_revision: str,
     if not st_files:
         return "no .safetensors files in repo"
 
-    return validate_challenger_sanity(
-        hf_repo,
-        challenger_revision,
-        king_repo=king_repo,
-        king_revision=king_revision,
-    )
+    # Trainability gate runs on the eval server (eval_torch.trainability_probe),
+    # not here. The validator's job is just structural/architecture matching.
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1064,97 +722,11 @@ def check_king_alive(state):
         return False
 
 
-def _audit_candidate(repo: str, revision: str) -> str | None:
-    """Run the reparam-sanity gate against a single (repo, revision). Returns
-    None if the checkpoint passes, or a short reason string if it should be
-    rejected."""
-    if not repo:
-        return "no repo"
-    try:
-        stats = _collect_reparam_stats(repo, revision or "")
-    except Exception as e:
-        return f"audit_fetch_failed:{e}"
-    if not stats:
-        return "no inspectable tensors"
-    return check_reparam_sanity(stats)
-
-
-def audit_king_on_startup(state, wallet_hotkey: str) -> bool:
-    """Re-validate the current king under the reparam-sanity rules. If it fails,
-    walk the previous_king chain (skipping repos that also fail). If the entire
-    chain is poisoned, fall back to SEED_REPO. Returns True if the king record
-    was changed.
-
-    Called once at validator startup. Cheap — _collect_reparam_stats caches
-    per (repo, revision) so a fresh boot only pays one inspection per visited
-    checkpoint.
-    """
-    if not state.king or not state.king.get("hf_repo"):
-        return False
-
-    original_repo = state.king.get("hf_repo", "")
-    original_rev = state.king.get("king_revision", "") or ""
-
-    candidate = state.king
-    visited: set[str] = set()
-    while candidate and candidate.get("hf_repo"):
-        repo = candidate.get("hf_repo", "")
-        rev = candidate.get("king_revision", "") or ""
-        cache_id = f"{repo}@{rev or 'HEAD'}"
-        if cache_id in visited:
-            log.warning("audit: cycle in previous_king chain at %s, breaking", cache_id)
-            break
-        visited.add(cache_id)
-
-        reason = _audit_candidate(repo, rev)
-        if reason is None:
-            if candidate is state.king:
-                log.info("king audit PASSED for %s@%s", repo, (rev or "HEAD")[:12])
-                return False
-            log.warning("king audit dethroned %s@%s, reverting to %s@%s",
-                        original_repo, original_rev[:12], repo, rev[:12])
-            state.king = candidate
-            state.flush()
-            state.flush_dashboard()
-            state.event({"event": "king_dethroned_reparam",
-                         "lost_repo": original_repo,
-                         "lost_revision": original_rev[:12],
-                         "reverted_to": repo,
-                         "reverted_revision": rev[:12]})
-            return True
-
-        log.warning("king audit FAILED for %s@%s: %s — walking previous_king",
-                    repo, (rev or "HEAD")[:12], reason)
-        candidate = candidate.get("previous_king")
-
-    seed_revision = ""
-    try:
-        seed_info = HfApi(token=HF_TOKEN or None).model_info(SEED_REPO)
-        seed_revision = seed_info.sha or ""
-    except Exception:
-        log.warning("audit: could not get seed revision from %s", SEED_REPO)
-
-    log.error("king audit: previous_king chain exhausted, falling back to seed %s@%s",
-              SEED_REPO, (seed_revision or "HEAD")[:12])
-    state.king = {
-        "hotkey": wallet_hotkey,
-        "hf_repo": SEED_REPO,
-        "king_hash": "seed",
-        "king_revision": seed_revision,
-        "reign_number": 0,
-        "crowned_at": _now(),
-        "crowned_block": 0,
-        "challenge_id": "seed",
-        "previous_king": None,
-    }
-    state.flush()
-    state.flush_dashboard()
-    state.event({"event": "king_dethroned_reparam_chain_exhausted",
-                 "lost_repo": original_repo,
-                 "lost_revision": original_rev[:12],
-                 "fallback": SEED_REPO,
-                 "fallback_revision": (seed_revision or "")[:12]})
-    return True
+# NOTE: The validator-side king audit (audit_king_on_startup, _audit_candidate)
+# was removed. The eval server now probes the king on load via
+# eval_torch.trainability_probe and refuses to load an untrainable king,
+# raising a RuntimeError that surfaces to the validator. That is the single
+# source of truth for "is this king OK to keep".
 
 
 # ---------------------------------------------------------------------------
@@ -1355,11 +927,6 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
                        entry.get("block", 0), cid,
                        king_revision=challenger_revision)
         state.last_winner_hotkey = hotkey
-        if audit_king_on_startup(state, wallet.hotkey.ss58_address):
-            log.warning("post-crown audit dethroned freshly crowned king; "
-                        "active king is now %s@%s",
-                        state.king.get("hf_repo", "?"),
-                        (state.king.get("king_revision", "") or "HEAD")[:12])
         await notify_new_king(state.king, verdict)
         maybe_set_weights(subtensor, wallet, state, force=True,
                           reason=f"new king via {cid}")
@@ -1410,11 +977,6 @@ async def main():
             log.warning("could not get seed king revision from %s", SEED_REPO)
         state.set_king(wallet.hotkey.ss58_address, SEED_REPO, "seed",
                        subtensor.block, king_revision=seed_revision)
-
-    if audit_king_on_startup(state, wallet.hotkey.ss58_address):
-        log.warning("startup audit dethroned the saved king; new king is %s@%s",
-                    state.king.get("hf_repo", "?"),
-                    (state.king.get("king_revision", "") or "HEAD")[:12])
 
     maybe_set_weights(subtensor, wallet, state, force=True, reason="startup")
 

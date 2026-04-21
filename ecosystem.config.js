@@ -10,6 +10,14 @@ function dopplerPrd(key) {
 
 module.exports = {
   apps: [{
+    name: "teutonic-eval-tunnel",
+    script: "/home/const/workspace/teutonic/tunnel.sh",
+    cwd: "/home/const/workspace/teutonic",
+    autorestart: true,
+    restart_delay: 5000,
+    max_restarts: 1000,
+    log_date_format: "YYYY-MM-DD HH:mm:ss",
+  }, {
     name: "teutonic-validator",
     script: "validator.py",
     args: "",
@@ -17,7 +25,7 @@ module.exports = {
     cwd: "/home/const/workspace/teutonic",
     env: {
       TEUTONIC_EVAL_SERVER: "http://localhost:9000",
-      TEUTONIC_KING_REPO: "unconst/Teutonic-I",
+      TEUTONIC_SEED_REPO: "unconst/Teutonic-III",
       HF_TOKEN: dopplerPrd("HF_TOKEN"),
       TEUTONIC_NETUID: "3",
       TEUTONIC_NETWORK: "finney",

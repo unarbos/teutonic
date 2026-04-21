@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from eval_torch import (
     R2, MultiGPUEvaluator, run_bootstrap_test, parse_gpu_ids,
-    check_weight_norms,
+    trainability_probe,
 )
 
 log = logging.getLogger("eval_server")
@@ -54,8 +54,7 @@ DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.01"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
 
-NORM_CHECK_ENABLED = os.environ.get("TEUTONIC_NORM_CHECK", "1") == "1"
-NORM_MULTIPLIER = float(os.environ.get("TEUTONIC_NORM_MULTIPLIER", "5.0"))
+PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +108,13 @@ class EvalRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
-    """Load or reuse king evaluator. Reloads if repo, revision, or king_hash changed."""
+    """Load or reuse king evaluator. Reloads if repo, revision, or king_hash changed.
+
+    On a fresh load, runs the trainability probe on the king. A king that fails
+    the probe is a violation of an invariant (the king got there by winning an
+    eval, which already required passing the probe), so we refuse to load it
+    and raise — operator must intervene.
+    """
     global _king_evaluator, _king_repo, _king_hash, _king_revision
     if (_king_evaluator and _king_repo == repo
             and (not revision or _king_revision == revision)
@@ -129,9 +134,32 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
 
     mid = len(_gpu_ids) // 2
     king_gpus = _gpu_ids[:mid] or _gpu_ids[:1]
-    _king_evaluator = MultiGPUEvaluator(repo, king_gpus, label="king",
-                                         force_download=False,
-                                         revision=revision or None)
+    new_king = MultiGPUEvaluator(repo, king_gpus, label="king",
+                                  force_download=False,
+                                  revision=revision or None)
+
+    if PROBE_ENABLED:
+        king_model = new_king.models[new_king.gpu_ids[0]]
+        t0 = time.time()
+        probe = trainability_probe(king_model)
+        log.info("king trainability probe for %s: ok=%s before=%.4f "
+                 "after=%.4f delta=%.4f (%.1fs)",
+                 repo, probe["ok"],
+                 probe["loss_before"], probe["loss_after"], probe["delta"],
+                 time.time() - t0)
+        if not probe["ok"]:
+            log.error("KING TRAINABILITY PROBE FAILED for %s: %s. "
+                      "Refusing to load this king. Operator intervention required.",
+                      repo, probe["reason"])
+            new_king.shutdown()
+            del new_king
+            torch.cuda.empty_cache()
+            raise RuntimeError(
+                f"king {repo}@{(revision or '?')[:12]} failed trainability "
+                f"probe: {probe['reason']}"
+            )
+
+    _king_evaluator = new_king
     _king_repo = repo
     _king_hash = king_hash or None
     _king_revision = revision or None
@@ -265,16 +293,18 @@ def _run_eval(eval_id: str, req: EvalRequest):
         else:
             challenger_eval = _load_challenger(req.challenger_repo, req.challenger_revision)
 
-        if not same_model and NORM_CHECK_ENABLED:
-            king_model = king_eval.models[king_eval.gpu_ids[0]]
+        if not same_model and PROBE_ENABLED:
             chall_model = challenger_eval.models[challenger_eval.gpu_ids[0]]
-            ok, violations = check_weight_norms(king_model, chall_model,
-                                                max_ratio=NORM_MULTIPLIER)
-            if not ok:
-                log.warning("norm check FAILED for %s: %d violations",
-                            req.challenger_repo, len(violations))
-                for v in violations[:10]:
-                    log.warning("  %s", v)
+            t0 = time.time()
+            probe = trainability_probe(chall_model)
+            log.info("trainability probe for %s: ok=%s before=%.4f after=%.4f "
+                     "delta=%.4f (%.1fs)",
+                     req.challenger_repo, probe["ok"],
+                     probe["loss_before"], probe["loss_after"], probe["delta"],
+                     time.time() - t0)
+            if not probe["ok"]:
+                log.warning("trainability probe REJECTED %s: %s",
+                            req.challenger_repo, probe["reason"])
 
                 challenger_eval.shutdown()
                 del challenger_eval
@@ -283,16 +313,18 @@ def _run_eval(eval_id: str, req: EvalRequest):
                 verdict = {
                     "accepted": False,
                     "verdict": "king",
-                    "rejection_reason": "weight_norm_violation",
-                    "norm_violations": violations[:20],
-                    "norm_multiplier": NORM_MULTIPLIER,
+                    "rejection_reason": f"untrainable:{probe['reason']}",
+                    "probe": {
+                        "loss_before": probe["loss_before"],
+                        "loss_after": probe["loss_after"],
+                        "delta": probe["delta"],
+                    },
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
                 record["state"] = "completed"
                 record["verdict"] = verdict
                 event_q.put({"type": "verdict", "data": verdict})
                 return
-            log.info("norm check passed for %s", req.challenger_repo)
 
         seed_str = f"{req.block_hash}:{req.hotkey}"
 

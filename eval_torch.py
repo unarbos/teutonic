@@ -381,76 +381,145 @@ def load_model(repo, device, label="model", force_download=False, revision=None)
 
 
 # ---------------------------------------------------------------------------
-# Weight norm guard — reject models with inflated L2 norms
+# Trainability probe — first-principles replacement for magnitude heuristics
 # ---------------------------------------------------------------------------
+#
+# The reparameterization trick exploits that f(x; gamma, W) is invariant under
+# (gamma, W) -> (alpha*gamma, W/alpha) for any RMSNorm followed by a Linear.
+# This is a 1D symmetry of the FORWARD pass, but NOT of training dynamics:
+# gradients scale as dL/dgamma ~ |W| (shrinks by alpha) and dL/dW ~ |gamma|
+# (grows by alpha). One SGD step at any normal LR moves W by lr*alpha, which
+# blows up the model. Honest models barely move under the same step.
+#
+# This directly tests the property we actually care about: can a miner
+# fine-tune from this checkpoint? Trick models say no; honest models say yes.
+# Random-token batches are sufficient because brittleness is in parameter-
+# space geometry, not input distribution.
 
-NORM_EPSILON = 1e-8
-
-PROJ_TENSOR_SUFFIXES = (
-    "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
-    "gate_proj.weight", "up_proj.weight", "down_proj.weight",
-)
-
-# Defense-in-depth floor for projection tensors. Mirrors validator.py's
-# TEUTONIC_PROJ_MIN_MEAN_ABS / 5 — anything below this is the RMSNorm/SwiGLU
-# rescale trick, even if the offline gate somehow missed it.
-PROJ_MEAN_ABS_FLOOR = float(os.environ.get(
-    "TEUTONIC_EVAL_PROJ_MEAN_ABS_FLOOR", "2e-5"))
+PROBE_LR = float(os.environ.get("TEUTONIC_PROBE_LR", "1e-5"))
+PROBE_BATCH = int(os.environ.get("TEUTONIC_PROBE_BATCH", "4"))
+PROBE_SEQ_LEN = int(os.environ.get("TEUTONIC_PROBE_SEQ_LEN", "256"))
+PROBE_LOSS_DELTA_ABS = float(os.environ.get("TEUTONIC_PROBE_LOSS_DELTA_ABS", "5.0"))
+PROBE_LOSS_DELTA_REL = float(os.environ.get("TEUTONIC_PROBE_LOSS_DELTA_REL", "2.0"))
+PROBE_SEED = int(os.environ.get("TEUTONIC_PROBE_SEED", str(0xC0FFEE)))
 
 
-def _is_proj_param(name: str) -> bool:
-    return any(name.endswith(suf) for suf in PROJ_TENSOR_SUFFIXES)
+def trainability_probe(model) -> dict:
+    """Take one SGD step on a random-token batch; return a verdict dict.
 
+    Result keys:
+      ok: bool — True if model survived the step (loss didn't explode).
+      reason: str | None — short rejection reason if not ok.
+      loss_before: float
+      loss_after: float
+      delta: float (loss_after - loss_before)
 
-@torch.no_grad()
-def check_weight_norms(king_model, challenger_model, max_ratio=5.0):
-    """Compare per-parameter L2 norms between king and challenger, and reject
-    challengers whose projection tensors are pathologically tiny (RMSNorm /
-    SwiGLU scale-symmetry exploit).
-
-    Returns (ok, violations) where violations is a list of dicts describing
-    each parameter that failed.
+    Restores all parameters to their pre-probe values via a per-param data
+    snapshot (.clone() on each .data buffer) regardless of success or failure.
     """
-    king_params = dict(king_model.named_parameters())
-    violations = []
+    device = next(model.parameters()).device
+    vocab_size = int(getattr(model.config, "vocab_size", 0)) or 32000
 
-    for c_name, c_param in challenger_model.named_parameters():
-        if not torch.isfinite(c_param.data).all():
-            violations.append({"param": c_name, "reason": "non-finite values"})
-            continue
+    g = torch.Generator(device=device).manual_seed(PROBE_SEED)
+    tokens = torch.randint(0, vocab_size, (PROBE_BATCH, PROBE_SEQ_LEN + 1),
+                           device=device, generator=g)
+    inputs = tokens[:, :-1].contiguous()
+    targets = tokens[:, 1:].contiguous()
 
-        if _is_proj_param(c_name):
-            mean_abs = c_param.data.float().abs().mean().item()
-            if mean_abs < PROJ_MEAN_ABS_FLOOR:
-                violations.append({
-                    "param": c_name,
-                    "reason": "proj_mean_abs_collapsed",
-                    "mean_abs": round(mean_abs, 9),
-                    "floor": PROJ_MEAN_ABS_FLOOR,
-                })
-                continue
+    snapshot = {n: p.data.clone() for n, p in model.named_parameters()}
+    was_training = model.training
+    saved_requires_grad = {n: p.requires_grad for n, p in model.named_parameters()}
 
-        k_param = king_params.get(c_name)
-        if k_param is None:
-            continue
+    def _forward_loss():
+        out = model(inputs)
+        logits = out.logits if hasattr(out, "logits") else out
+        return F.cross_entropy(
+            logits.float().reshape(-1, logits.size(-1)),
+            targets.reshape(-1),
+        )
 
-        k_norm = torch.linalg.vector_norm(k_param.data.float()).item()
-        c_norm = torch.linalg.vector_norm(c_param.data.float()).item()
+    try:
+        model.train()
+        for p in model.parameters():
+            p.requires_grad_(True)
+            if p.grad is not None:
+                p.grad = None
 
-        if k_norm < NORM_EPSILON:
-            continue
+        loss_before_t = _forward_loss()
+        loss_before = float(loss_before_t.detach())
+        if not math_isfinite(loss_before):
+            return {
+                "ok": False,
+                "reason": f"loss_before_non_finite:{loss_before}",
+                "loss_before": loss_before,
+                "loss_after": float("nan"),
+                "delta": float("nan"),
+            }
 
-        ratio = c_norm / k_norm
-        if ratio > max_ratio:
-            violations.append({
-                "param": c_name,
-                "reason": "norm_ratio",
-                "king_norm": round(k_norm, 6),
-                "challenger_norm": round(c_norm, 6),
-                "ratio": round(ratio, 4),
-            })
+        loss_before_t.backward()
 
-    return len(violations) == 0, violations
+        with torch.no_grad():
+            for p in model.parameters():
+                if p.grad is not None:
+                    p.data.add_(p.grad, alpha=-PROBE_LR)
+
+        with torch.no_grad():
+            loss_after_t = _forward_loss()
+        loss_after = float(loss_after_t.detach())
+        delta = loss_after - loss_before
+
+        if not math_isfinite(loss_after):
+            return {
+                "ok": False,
+                "reason": f"loss_after_non_finite:{loss_after}",
+                "loss_before": loss_before,
+                "loss_after": loss_after,
+                "delta": delta,
+            }
+
+        # Reject only if BOTH absolute and relative thresholds exceeded —
+        # avoids penalizing models with a small honest loss baseline (where
+        # 2x of 0.05 would otherwise be a meaningless 0.1).
+        explosive = (
+            delta > PROBE_LOSS_DELTA_ABS
+            and loss_after > PROBE_LOSS_DELTA_REL * max(loss_before, 1e-3)
+        )
+        if explosive:
+            return {
+                "ok": False,
+                "reason": (f"loss_explosion:before={loss_before:.4f} "
+                           f"after={loss_after:.4f} delta={delta:.4f} "
+                           f"(thresh abs>{PROBE_LOSS_DELTA_ABS} "
+                           f"and after>{PROBE_LOSS_DELTA_REL}x before)"),
+                "loss_before": loss_before,
+                "loss_after": loss_after,
+                "delta": delta,
+            }
+
+        return {
+            "ok": True,
+            "reason": None,
+            "loss_before": loss_before,
+            "loss_after": loss_after,
+            "delta": delta,
+        }
+    finally:
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                p.data.copy_(snapshot[n])
+                if p.grad is not None:
+                    p.grad = None
+                p.requires_grad_(saved_requires_grad.get(n, False))
+        if not was_training:
+            model.eval()
+        # Drop snapshot refs to free GPU memory promptly.
+        snapshot.clear()
+        torch.cuda.empty_cache()
+
+
+def math_isfinite(x: float) -> bool:
+    """Module-local isfinite that handles bf16 .float() outputs."""
+    return x == x and x not in (float("inf"), float("-inf"))
 
 
 # ---------------------------------------------------------------------------
