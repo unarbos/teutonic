@@ -1128,32 +1128,57 @@ async def _stream_events_with_idle_watchdog(stream, state, cid):
     # IMPORTANT: bind the iterator ONCE outside the loop. httpx's aiter_lines()
     # returns iterators that share the underlying stream — calling it more than
     # once on the same response raises StreamConsumed on subsequent iterators.
-    # Re-creating it per loop iteration was the cause of the validator losing
-    # every eval after the first HEALTHCHECK_INTERVAL tick.
+    #
+    # We also must NOT cancel the in-flight __anext__() on a healthcheck
+    # timeout: cancelling httpx's read mid-flight closes the underlying
+    # iterator, so the *next* __anext__() returns StopAsyncIteration and the
+    # validator misreports "eval stream ended without verdict".
+    #
+    # Instead, we keep a single long-lived task per __anext__() call and only
+    # spawn a new one once the previous resolved. asyncio.wait() with a
+    # timeout does NOT cancel pending tasks (unlike wait_for), so the read
+    # task survives across multiple healthcheck windows.
     line_iter = stream.aiter_lines()
     last_event_monotonic = _monotonic_now()
     warned = False
-    while True:
-        try:
-            line = await asyncio.wait_for(line_iter.__anext__(), timeout=HEALTHCHECK_INTERVAL)
-        except StopAsyncIteration:
-            return
-        except asyncio.TimeoutError:
-            idle = _monotonic_now() - last_event_monotonic
-            if idle >= STREAM_IDLE_TIMEOUT:
-                raise TimeoutError(f"{cid}: eval stream idle for {idle:.0f}s")
-            if idle >= STREAM_IDLE_WARN_AFTER and not warned:
-                warned = True
-                log.warning("%s: eval stream idle for %.0fs", cid, idle)
-                state.event({"event": "eval_stream_idle_warning", "challenge_id": cid,
-                             "idle_s": round(idle, 1)})
-                state.set_phase("eval_stream_idle", challenge_id=cid,
-                                notes=f"idle {idle:.0f}s waiting for eval stream")
-                state.flush_dashboard()
-            continue
-        last_event_monotonic = _monotonic_now()
-        warned = False
-        yield line
+    pending_task: asyncio.Task | None = None
+    try:
+        while True:
+            if pending_task is None:
+                pending_task = asyncio.ensure_future(line_iter.__anext__())
+            done, _pending = await asyncio.wait(
+                {pending_task}, timeout=HEALTHCHECK_INTERVAL,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                idle = _monotonic_now() - last_event_monotonic
+                if idle >= STREAM_IDLE_TIMEOUT:
+                    raise TimeoutError(f"{cid}: eval stream idle for {idle:.0f}s")
+                if idle >= STREAM_IDLE_WARN_AFTER and not warned:
+                    warned = True
+                    log.warning("%s: eval stream idle for %.0fs", cid, idle)
+                    state.event({"event": "eval_stream_idle_warning", "challenge_id": cid,
+                                 "idle_s": round(idle, 1)})
+                    state.set_phase("eval_stream_idle", challenge_id=cid,
+                                    notes=f"idle {idle:.0f}s waiting for eval stream")
+                    state.flush_dashboard()
+                continue
+            try:
+                line = pending_task.result()
+            except StopAsyncIteration:
+                return
+            finally:
+                pending_task = None
+            last_event_monotonic = _monotonic_now()
+            warned = False
+            yield line
+    finally:
+        if pending_task is not None and not pending_task.done():
+            pending_task.cancel()
+            try:
+                await pending_task
+            except (asyncio.CancelledError, StopAsyncIteration, Exception):
+                pass
 
 
 def _is_transient_eval_error(exc: Exception | str) -> tuple[bool, str]:

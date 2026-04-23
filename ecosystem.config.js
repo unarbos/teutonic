@@ -44,6 +44,12 @@ module.exports = {
       TMC_API_KEY: doppler("TMC_API_KEY"),
       DISCORD_BOT_TOKEN: doppler("DISCORD_BOT_TOKEN"),
       DISCORD_CHANNEL_ID: doppler("DISCORD_CHANNEL_ID"),
+      // Each Teutonic-III eval takes ~250s of bootstrap + setup + busy-wait
+      // for the eval-server lock. A single tick can legitimately take
+      // 7-15 minutes when the server is saturated; default 600s was tripping
+      // the watchdog on every successful eval.
+      TEUTONIC_TICK_RESTART_AFTER: "1800",
+      TEUTONIC_MAX_CONSECUTIVE_TICK_ERRORS: "20",
     },
     max_restarts: 10,
     restart_delay: 5000,
