@@ -83,6 +83,22 @@ TMC_BASE = "https://api.taomarketcap.com/public/v1"
 
 log = logging.getLogger("teutonic")
 
+
+class _EvalInnerError(Exception):
+    """Wraps any exception raised inside process_challenge so we can tell it
+    apart from asyncio.wait_for's own asyncio.TimeoutError sentinel.
+
+    Without this, a TimeoutError raised by the stream-idle watchdog inside
+    process_challenge would be caught by `except asyncio.TimeoutError` (since
+    Python 3.11 unified them) and mis-classified as a 1800s wall-clock kill
+    instead of the transient infra-side hiccup it actually is.
+    """
+
+    def __init__(self, original: BaseException):
+        super().__init__(repr(original))
+        self.original = original
+
+
 TOPK_WEIGHTS = [0.75, 0.19, 0.06]
 
 # Dashboard/Hippius writes are non-critical presentation updates. Keep them
@@ -1601,25 +1617,42 @@ async def main():
                 state.flush_dashboard()
                 state.flush()
                 state.note_progress(notes=f"starting queue item {entry.get('challenge_id', '?')}")
+                # Distinguish "hard wall-clock kill" (asyncio.wait_for) from any
+                # TimeoutError raised inside process_challenge (e.g. the stream-idle
+                # watchdog), since TimeoutError == asyncio.TimeoutError in py3.11+
+                # and we don't want to confuse a 423s stream-idle event with a
+                # 1800s hard kill.
+                async def _bounded_eval():
+                    try:
+                        await process_challenge(state, r2, entry, subtensor, wallet,
+                                                check_stale=not is_reeval and args.seen)
+                    except BaseException as inner:
+                        # Re-raise inner exceptions wrapped so they don't collide
+                        # with asyncio.wait_for's own TimeoutError sentinel.
+                        raise _EvalInnerError(inner) from inner
                 try:
-                    await asyncio.wait_for(
-                        process_challenge(state, r2, entry, subtensor, wallet,
-                                          check_stale=not is_reeval and args.seen),
-                        timeout=TICK_RESTART_AFTER,
-                    )
-                except asyncio.TimeoutError as exc:
+                    await asyncio.wait_for(_bounded_eval(), timeout=TICK_RESTART_AFTER)
+                except asyncio.TimeoutError:
+                    # Hard wall-clock kill from asyncio.wait_for.
                     eval_elapsed = _monotonic_now() - eval_started_monotonic
-                    reason = (f"single-eval timeout: {entry.get('challenge_id')} "
-                              f"exceeded {TICK_RESTART_AFTER}s (took {eval_elapsed:.0f}s)")
+                    reason = (f"single-eval hard timeout: {entry.get('challenge_id')} "
+                              f"exceeded {TICK_RESTART_AFTER}s wall clock "
+                              f"(elapsed {eval_elapsed:.0f}s)")
                     log.error(reason)
                     state.set_phase("eval_timeout", challenge_id=entry.get("challenge_id"),
                                     notes=reason)
+                    state.stats["failed"] += 1
+                    state.record_failure(entry, "eval_hard_timeout", reason)
+                    state.current_eval = None
                     state.flush_dashboard()
-                    state.request_restart(reason)
                     state.flush()
-                    raise RuntimeError(reason)
-                except Exception as exc:
-                    log.exception("eval failed: %s", entry.get("challenge_id"))
+                    # Don't restart -- a single bad model shouldn't kill the validator.
+                    # Continue to next queue item.
+                    continue
+                except _EvalInnerError as wrapped:
+                    exc = wrapped.original
+                    log.exception("eval failed: %s", entry.get("challenge_id"),
+                                  exc_info=exc)
                     is_transient, transient_reason = _is_transient_eval_error(exc)
                     retry_count = int(entry.get("retry_count", 0))
                     if is_transient and retry_count < MAX_TRANSIENT_EVAL_RETRIES:
