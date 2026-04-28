@@ -54,6 +54,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from botocore.config import Config as BotoConfig
+from collections import defaultdict
 from transformers import AutoModelForCausalLM
 
 log = logging.getLogger("eval_torch")
@@ -450,62 +451,368 @@ def load_model(repo, device, label="model", force_download=False, revision=None)
 
 
 # ---------------------------------------------------------------------------
-# Trainability probe — first-principles replacement for magnitude heuristics
+# Trainability probe — five-layer anti-finetune defense for pretraining
 # ---------------------------------------------------------------------------
 #
-# The reparameterization trick exploits that f(x; gamma, W) is invariant under
-# (gamma, W) -> (alpha*gamma, W/alpha) for any RMSNorm followed by a Linear.
-# This is a 1D symmetry of the FORWARD pass, but NOT of training dynamics:
-# gradients scale as dL/dgamma ~ |W| (shrinks by alpha) and dL/dW ~ |gamma|
-# (grows by alpha). One SGD step at any normal LR moves W by lr*alpha, which
-# blows up the model. Honest models barely move under the same step.
+# The attack pattern: a miner takes a good model and "locks" the weights so
+# it still wins the paired-CE eval but resists further fine-tuning. If this
+# works, their model wins emissions forever — no one can continue-pretrain
+# and improve on it. The five layers below each catch a different variant of
+# the attack. ANY one tripping ⇒ the probe returns ok=False (the eval server
+# rejects the candidate as untrainable).
 #
-# This directly tests the property we actually care about: can a miner
-# fine-tune from this checkpoint? Trick models say no; honest models say yes.
-# Random-token batches are sufficient because brittleness is in parameter-
-# space geometry, not input distribution.
+# Layer 1 — Static LayerNorm/RMSNorm weight cap.
+#     |weight|.max() across every *Norm module must be <= FINETUNE_NORM_WEIGHT_MAX.
+#     Catches the obvious "pump LN gains by 1000x to explode gradients" trick.
+#     Runs before any compute so a watermarked model burns ~0 GPU time to reject.
+#
+# Layer 2 — Live forward + backward, finiteness check.
+#     Forward must not raise. Loss must be finite. Backward must not raise.
+#     No p.grad may contain NaN/Inf. This is the property pretraining needs:
+#     if the model can't even produce one finite gradient on a real batch, no
+#     amount of LR tuning will save the next training run.
+#
+# Layer 3 — Global gradient L2 norm cap (FINETUNE_GRAD_NORM_MAX).
+#     Catches generic loss-surface-rigging. Pretraining LRs are 1e-4 to 1e-3,
+#     so a |grad| of 500 already moves weights by 0.05–0.5 per step — that
+#     destroys any model. If the candidate's grads are this big out of the
+#     box, it's brittle by construction.
+#
+# Layer 4 — Per-parameter-type gradient L2 norm cap.
+#     Same threshold but applied per category (attn / ffn / embed / lm_head /
+#     norm / bias / other). Catches surgical attacks (embedding poisoning,
+#     lm_head poisoning, single-group perturbations) that blow up one bucket
+#     while keeping the global norm under the cap.
+#
+# Layer 5 — Multi-seed rotation across random-token batches.
+#     Run PROBE_SEEDS independent random batches, each going through layers
+#     2-4. Random tokens are correct here because pretraining sees an
+#     arbitrary input distribution and brittleness lives in parameter-space
+#     geometry, not in the probe text. Multiple seeds force the candidate to
+#     be fine-tunable on more than one fixed batch — a miner that hard-codes
+#     a regularizer around one batch fails on the others.
 
-PROBE_LR = float(os.environ.get("TEUTONIC_PROBE_LR", "1e-5"))
+# Static cap — any LN/RMSNorm tensor with |weight|.max() above this is
+# rejected without running compute. Honest gemma3-style RMSNorm gains sit
+# below ~1.5; allowing 30 covers exotic-but-legit scales while sitting two
+# orders of magnitude under the 1000x watermark attack.
+FINETUNE_NORM_WEIGHT_MAX = float(os.environ.get(
+    "TEUTONIC_FINETUNE_NORM_WEIGHT_MAX", "30"
+))
+
+# Global gradient L2 norm cap. A healthy ~1B-7B model gradient on a 256-token
+# random batch is typically O(1)–O(10); 500 is comfortably above honest
+# models and well below the explosion that LN-pump attacks produce.
+FINETUNE_GRAD_NORM_MAX = float(os.environ.get(
+    "TEUTONIC_FINETUNE_GRAD_NORM_MAX", "500"
+))
+
+# Per-parameter-type cap (same numeric value as the global cap, applied
+# group-by-group). Catches targeted attacks that isolate the explosion to
+# one parameter group.
+FINETUNE_PARAM_GROUP_GRAD_MAX = float(os.environ.get(
+    "TEUTONIC_FINETUNE_PARAM_GROUP_GRAD_MAX", "500"
+))
+
+# Existing knobs kept (only batch shape + multi-seed rotation count are used;
+# PROBE_LR / PROBE_STEPS / PROBE_LOSS_RATIO from the old probe are gone).
 PROBE_BATCH = int(os.environ.get("TEUTONIC_PROBE_BATCH", "4"))
 PROBE_SEQ_LEN = int(os.environ.get("TEUTONIC_PROBE_SEQ_LEN", "256"))
-PROBE_LOSS_DELTA_ABS = float(os.environ.get("TEUTONIC_PROBE_LOSS_DELTA_ABS", "5.0"))
-PROBE_LOSS_DELTA_REL = float(os.environ.get("TEUTONIC_PROBE_LOSS_DELTA_REL", "2.0"))
+PROBE_SEEDS = int(os.environ.get("TEUTONIC_PROBE_SEEDS", "3"))
 PROBE_SEED = int(os.environ.get("TEUTONIC_PROBE_SEED", str(0xC0FFEE)))
+NORM_QUANT_WARN_SCORE = float(os.environ.get("TEUTONIC_NORM_QUANT_WARN", "0.5"))
 
 
-def trainability_probe(model) -> dict:
-    """Take one SGD step on a random-token batch; return a verdict dict.
+def math_isfinite(x: float) -> bool:
+    """Module-local isfinite that handles bf16 .float() outputs."""
+    return x == x and x not in (float("inf"), float("-inf"))
 
-    Result keys:
-      ok: bool — True if model survived the step (loss didn't explode).
-      reason: str | None — short rejection reason if not ok.
-      loss_before: float
-      loss_after: float
-      delta: float (loss_after - loss_before)
 
-    Restores all parameters to their pre-probe values via a per-param data
-    snapshot (.clone() on each .data buffer) regardless of success or failure.
+def _classify_param(name: str) -> str:
+    """Bucket a parameter into one of {attn, ffn, embed, lm_head, norm, bias, other}.
+
+    The order matters: lm_head/embed checks come first (they sometimes share
+    paths with `norm`), then norm, then attn/ffn structural buckets, then
+    bias as a fallback for unattributed `.bias` tensors. We use a coarse
+    classifier on purpose — the point is per-bucket ‖grad‖ visibility, not
+    perfect taxonomy.
     """
-    device = next(model.parameters()).device
-    vocab_size = int(getattr(model.config, "vocab_size", 0)) or 32000
+    n = name.lower()
+    if "lm_head" in n:
+        return "lm_head"
+    if "embed_tokens" in n or "wte" in n or n.endswith(".embedding.weight") or "embeddings" in n:
+        return "embed"
+    if "norm" in n or "layernorm" in n or "rmsnorm" in n:
+        return "norm"
+    if any(k in n for k in (
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "q_norm", "k_norm",
+        "wq.", "wk.", "wv.", "wo.",
+        "self_attn", "attention",
+    )):
+        return "attn"
+    if any(k in n for k in (
+        "gate_proj", "up_proj", "down_proj",
+        "mlp", "ffn", "fc1", "fc2", "feed_forward",
+        ".w1.", ".w2.", ".w3.",
+    )):
+        return "ffn"
+    if n.endswith(".bias"):
+        return "bias"
+    return "other"
 
-    g = torch.Generator(device=device).manual_seed(PROBE_SEED)
-    tokens = torch.randint(0, vocab_size, (PROBE_BATCH, PROBE_SEQ_LEN + 1),
+
+def _norm_modules(model):
+    return [(n, m) for n, m in model.named_modules() if "Norm" in type(m).__name__]
+
+
+def _check_norm_weight_cap(model) -> tuple[bool, str | None, float]:
+    """Layer 1 — static LN/RMSNorm weight cap.
+
+    Returns (ok, reason, max_norm_weight_seen). Walks every *Norm module's
+    `.weight` and rejects if any element exceeds the cap or is non-finite.
+    """
+    max_seen = 0.0
+    for mod_name, mod in _norm_modules(model):
+        for pname, p in mod.named_parameters(recurse=False):
+            if not pname.endswith("weight"):
+                continue
+            with torch.no_grad():
+                w = float(p.detach().abs().max().item())
+            if not math_isfinite(w):
+                return (False,
+                        f"norm_weight_non_finite:{mod_name}.{pname} |w|.max()={w}",
+                        max_seen)
+            if w > max_seen:
+                max_seen = w
+            if w > FINETUNE_NORM_WEIGHT_MAX:
+                return (False,
+                        (f"norm_weight_cap:{mod_name}.{pname} "
+                         f"|w|.max()={w:.3e} > {FINETUNE_NORM_WEIGHT_MAX:.1f}"),
+                        max_seen)
+    return True, None, max_seen
+
+
+def norm_quantization_score(model) -> float | None:
+    """Forensic auxiliary signal: how clustered are normalization-layer norms?
+
+    Walks every *Norm `.weight`, computes its L2 norm rounded to 4 decimals,
+    and returns the fraction sharing the most common value. 1.0 means every
+    norm tensor has the same L2 norm (highly suspicious). Returns None if
+    the model has no norm-like modules.
+
+    Surfaced as a warning, never a rejection reason on its own.
+    """
+    try:
+        from collections import Counter
+
+        rounded = []
+        for _mod_name, mod in _norm_modules(model):
+            for pname, p in mod.named_parameters(recurse=False):
+                if not pname.endswith("weight"):
+                    continue
+                with torch.no_grad():
+                    n = float(torch.linalg.vector_norm(p.float()).item())
+                rounded.append(round(n, 4))
+
+        if not rounded:
+            return None
+        _most_common, count = Counter(rounded).most_common(1)[0]
+        return count / len(rounded)
+    except Exception:
+        log.warning("norm_quantization_score failed", exc_info=True)
+        return None
+
+
+def _seed_for_iteration(i: int) -> int:
+    """Stable per-seed-index PRNG seed derived from PROBE_SEED."""
+    return (PROBE_SEED ^ (0x9E3779B1 * (i + 1))) & 0xFFFFFFFF
+
+
+def _build_probe_verdict(*, ok, reason, status,
+                         max_norm_weight, per_seed,
+                         norm_quant, warnings):
+    """Wrap probe results into the dict shape every caller expects.
+
+    Aggregates over `per_seed` (one entry per executed seed) and emits both
+    the new diagnostic fields (status, max_norm_weight, global_grad_norm,
+    param_group_grad_norms) and the legacy fields (loss_before, loss_after,
+    delta, max_ratio, max_grad_norm, min_loss_before, max_loss_after,
+    n_seeds, n_steps_per_seed) so existing eval_server consumers keep working.
+    """
+    losses = [s["loss"] for s in per_seed
+              if s.get("loss") is not None and math_isfinite(s.get("loss", float("nan")))]
+    grads = [s["global_grad_norm"] for s in per_seed
+             if s.get("global_grad_norm") is not None
+             and math_isfinite(s.get("global_grad_norm", float("nan")))]
+
+    first_loss = losses[0] if losses else float("nan")
+    min_loss = min(losses) if losses else float("nan")
+    max_loss = max(losses) if losses else float("nan")
+    max_grad = max(grads) if grads else float("nan")
+
+    # Aggregate per-group grad norms: max over seeds, per category.
+    agg_groups: dict[str, float] = defaultdict(float)
+    for s in per_seed:
+        for cat, gn in (s.get("param_group_grad_norms") or {}).items():
+            if math_isfinite(gn) and gn > agg_groups[cat]:
+                agg_groups[cat] = float(gn)
+
+    return {
+        # Primary verdict.
+        "ok": ok,
+        "status": status,
+        "reason": reason,
+        # Layer 1.
+        "max_norm_weight": max_norm_weight,
+        "norm_weight_cap": FINETUNE_NORM_WEIGHT_MAX,
+        # Layers 2-4 (aggregate).
+        "global_grad_norm": max_grad,
+        "global_grad_norm_cap": FINETUNE_GRAD_NORM_MAX,
+        "param_group_grad_norms": dict(agg_groups),
+        "param_group_grad_norm_cap": FINETUNE_PARAM_GROUP_GRAD_MAX,
+        # Forensic.
+        "norm_quantization": norm_quant,
+        "warnings": warnings or [],
+        # Per-seed traces (full record for debugging / dashboard).
+        "per_seed": per_seed,
+        # Legacy fields preserved for the existing verdict consumers.
+        "loss_before": first_loss,
+        "loss_after": first_loss,  # no SGD step is taken
+        "delta": 0.0,
+        "max_ratio": 1.0,
+        "max_grad_norm": max_grad,
+        "min_loss_before": min_loss,
+        "max_loss_after": max_loss,
+        "n_seeds": len(per_seed),
+        "n_steps_per_seed": 0,
+    }
+
+
+def _probe_one_seed(model, seed: int, device, vocab_size: int) -> dict:
+    """Run layers 2-4 on a single random-token batch.
+
+    Returns a per-seed dict: {ok, reason, loss, global_grad_norm,
+    param_group_grad_norms, seed}. Caller is responsible for clearing
+    p.grad before and after.
+    """
+    g = torch.Generator(device=device).manual_seed(seed)
+    vs = max(2, vocab_size or 32000)
+    tokens = torch.randint(0, vs, (PROBE_BATCH, PROBE_SEQ_LEN + 1),
                            device=device, generator=g)
     inputs = tokens[:, :-1].contiguous()
     targets = tokens[:, 1:].contiguous()
 
-    snapshot = {n: p.data.clone() for n, p in model.named_parameters()}
-    was_training = model.training
-    saved_requires_grad = {n: p.requires_grad for n, p in model.named_parameters()}
+    base = {
+        "seed": seed,
+        "loss": None,
+        "global_grad_norm": None,
+        "param_group_grad_norms": {},
+    }
 
-    def _forward_loss():
+    # Layer 2a — forward.
+    try:
         out = model(inputs)
         logits = out.logits if hasattr(out, "logits") else out
-        return F.cross_entropy(
+        loss_t = F.cross_entropy(
             logits.float().reshape(-1, logits.size(-1)),
             targets.reshape(-1),
         )
+    except Exception as e:
+        return {**base, "ok": False,
+                "reason": f"forward_raised:{type(e).__name__}:{e}"}
+
+    loss_val = float(loss_t.detach())
+    base["loss"] = loss_val
+    if not math_isfinite(loss_val):
+        return {**base, "ok": False, "reason": f"loss_non_finite:{loss_val}"}
+
+    # Layer 2b — backward.
+    try:
+        loss_t.backward()
+    except Exception as e:
+        return {**base, "ok": False,
+                "reason": f"backward_raised:{type(e).__name__}:{e}"}
+
+    # Per-param NaN/Inf check.
+    for n, p in model.named_parameters():
+        if p.grad is None:
+            continue
+        if not torch.isfinite(p.grad).all().item():
+            return {**base, "ok": False, "reason": f"grad_non_finite:{n}"}
+
+    # Layer 3 — global ‖grad‖₂ cap.
+    params_with_grad = [p for p in model.parameters() if p.grad is not None]
+    if params_with_grad:
+        global_gn = float(torch.nn.utils.clip_grad_norm_(
+            params_with_grad, max_norm=float("inf")
+        ))
+    else:
+        global_gn = 0.0
+    base["global_grad_norm"] = global_gn
+
+    if not math_isfinite(global_gn) or global_gn > FINETUNE_GRAD_NORM_MAX:
+        return {**base, "ok": False,
+                "reason": (f"global_grad_norm:{global_gn:.3e} > "
+                           f"{FINETUNE_GRAD_NORM_MAX:.1f}")}
+
+    # Layer 4 — per-parameter-type ‖grad‖₂ cap.
+    sq_by_group: dict[str, float] = defaultdict(float)
+    for n, p in model.named_parameters():
+        if p.grad is None:
+            continue
+        cat = _classify_param(n)
+        with torch.no_grad():
+            sq_by_group[cat] += float((p.grad.float() ** 2).sum().item())
+    group_norms: dict[str, float] = {cat: sq ** 0.5 for cat, sq in sq_by_group.items()}
+    base["param_group_grad_norms"] = group_norms
+
+    for cat, gn in group_norms.items():
+        if not math_isfinite(gn) or gn > FINETUNE_PARAM_GROUP_GRAD_MAX:
+            return {**base, "ok": False,
+                    "reason": (f"param_group_grad:{cat} |grad|={gn:.3e} > "
+                               f"{FINETUNE_PARAM_GROUP_GRAD_MAX:.1f}")}
+
+    return {**base, "ok": True, "reason": None}
+
+
+def trainability_probe(model) -> dict:
+    """Five-layer anti-finetune defense; see module docstring above for the layers.
+
+    Single-arg drop-in: same signature, same return-dict shape (legacy fields
+    kept) as the previous probe. Restores model state (training mode,
+    requires_grad, p.grad) on exit so the caller's evaluator is byte-identical
+    after this returns.
+
+    The probe is a property test of fine-tunability for pretraining: a
+    candidate that passes can take a real CE backward step on arbitrary
+    inputs without exploding, on every parameter bucket, with sane
+    gradients. Any failure ⇒ ok=False, status="anti_finetune".
+    """
+    device = next(model.parameters()).device
+    vocab_size = int(getattr(getattr(model, "config", None), "vocab_size", 0)) or 32000
+
+    norm_quant = norm_quantization_score(model)
+    warnings: list[str] = []
+    if norm_quant is not None and norm_quant >= NORM_QUANT_WARN_SCORE:
+        warnings.append(
+            f"norm_quantization={norm_quant:.3f} >= {NORM_QUANT_WARN_SCORE:.2f} "
+            f"(suspicious clustering of normalization-tensor norms)"
+        )
+
+    # Layer 1 — static norm-weight cap (no compute).
+    ok1, reason1, max_norm_w = _check_norm_weight_cap(model)
+    if not ok1:
+        return _build_probe_verdict(
+            ok=False, reason=reason1, status="anti_finetune",
+            max_norm_weight=max_norm_w, per_seed=[],
+            norm_quant=norm_quant, warnings=warnings,
+        )
+
+    # Layers 2-5: snapshot training state, run multi-seed probes, restore.
+    saved_rg = {n: p.requires_grad for n, p in model.named_parameters()}
+    was_training = model.training
+    per_seed: list[dict] = []
 
     try:
         model.train()
@@ -514,81 +821,39 @@ def trainability_probe(model) -> dict:
             if p.grad is not None:
                 p.grad = None
 
-        loss_before_t = _forward_loss()
-        loss_before = float(loss_before_t.detach())
-        if not math_isfinite(loss_before):
-            return {
-                "ok": False,
-                "reason": f"loss_before_non_finite:{loss_before}",
-                "loss_before": loss_before,
-                "loss_after": float("nan"),
-                "delta": float("nan"),
-            }
+        for i in range(max(1, PROBE_SEEDS)):
+            seed = _seed_for_iteration(i)
+            verdict = _probe_one_seed(model, seed=seed, device=device,
+                                       vocab_size=vocab_size)
+            per_seed.append(verdict)
 
-        loss_before_t.backward()
-
-        with torch.no_grad():
+            # Clear grads between seeds so the next backward starts clean.
             for p in model.parameters():
                 if p.grad is not None:
-                    p.data.add_(p.grad, alpha=-PROBE_LR)
-
-        with torch.no_grad():
-            loss_after_t = _forward_loss()
-        loss_after = float(loss_after_t.detach())
-        delta = loss_after - loss_before
-
-        if not math_isfinite(loss_after):
-            return {
-                "ok": False,
-                "reason": f"loss_after_non_finite:{loss_after}",
-                "loss_before": loss_before,
-                "loss_after": loss_after,
-                "delta": delta,
-            }
-
-        # Reject only if BOTH absolute and relative thresholds exceeded —
-        # avoids penalizing models with a small honest loss baseline (where
-        # 2x of 0.05 would otherwise be a meaningless 0.1).
-        explosive = (
-            delta > PROBE_LOSS_DELTA_ABS
-            and loss_after > PROBE_LOSS_DELTA_REL * max(loss_before, 1e-3)
-        )
-        if explosive:
-            return {
-                "ok": False,
-                "reason": (f"loss_explosion:before={loss_before:.4f} "
-                           f"after={loss_after:.4f} delta={delta:.4f} "
-                           f"(thresh abs>{PROBE_LOSS_DELTA_ABS} "
-                           f"and after>{PROBE_LOSS_DELTA_REL}x before)"),
-                "loss_before": loss_before,
-                "loss_after": loss_after,
-                "delta": delta,
-            }
-
-        return {
-            "ok": True,
-            "reason": None,
-            "loss_before": loss_before,
-            "loss_after": loss_after,
-            "delta": delta,
-        }
-    finally:
-        with torch.no_grad():
-            for n, p in model.named_parameters():
-                p.data.copy_(snapshot[n])
-                if p.grad is not None:
                     p.grad = None
-                p.requires_grad_(saved_requires_grad.get(n, False))
+
+            if not verdict["ok"]:
+                return _build_probe_verdict(
+                    ok=False,
+                    reason=f"seed{i}({seed:#010x}):{verdict['reason']}",
+                    status="anti_finetune",
+                    max_norm_weight=max_norm_w, per_seed=per_seed,
+                    norm_quant=norm_quant, warnings=warnings,
+                )
+
+        return _build_probe_verdict(
+            ok=True, reason=None, status="ok",
+            max_norm_weight=max_norm_w, per_seed=per_seed,
+            norm_quant=norm_quant, warnings=warnings,
+        )
+    finally:
+        for n, p in model.named_parameters():
+            if p.grad is not None:
+                p.grad = None
+            p.requires_grad_(saved_rg.get(n, False))
         if not was_training:
             model.eval()
-        # Drop snapshot refs to free GPU memory promptly.
-        snapshot.clear()
         torch.cuda.empty_cache()
-
-
-def math_isfinite(x: float) -> bool:
-    """Module-local isfinite that handles bf16 .float() outputs."""
-    return x == x and x not in (float("inf"), float("-inf"))
 
 
 # ---------------------------------------------------------------------------

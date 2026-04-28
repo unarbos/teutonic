@@ -20,7 +20,10 @@ module.exports = {
   }, {
     name: "teutonic-validator",
     script: "validator.py",
-    args: "",
+    // --no-seen: only evaluate genuinely new (unseen) hotkeys; idle when
+    // queue is empty rather than replenishing with re-eval candidates.
+    // Set 2026-04-26 per operator request.
+    args: "--no-seen",
     interpreter: "/home/const/workspace/.venv/bin/python",
     cwd: "/home/const/workspace/teutonic",
     env: {
@@ -42,8 +45,15 @@ module.exports = {
       TEUTONIC_DS_ACCESS_KEY: doppler("HIPPIUS_ACCESS_KEY"),
       TEUTONIC_DS_SECRET_KEY: doppler("HIPPIUS_SECRET_KEY"),
       TMC_API_KEY: doppler("TMC_API_KEY"),
-      DISCORD_BOT_TOKEN: doppler("DISCORD_BOT_TOKEN"),
-      DISCORD_CHANNEL_ID: doppler("DISCORD_CHANNEL_ID"),
+      // Discord notifications disabled per operator request. Re-enable by
+      // restoring DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID from Doppler.
+      DISCORD_BOT_TOKEN: "",
+      DISCORD_CHANNEL_ID: "",
+      // Disable hf-xet downloader (it has aborted the validator twice during
+      // dethrone-target king downloads on 2026-04-26). validator.py also sets
+      // this defensively before importing huggingface_hub, but having it in
+      // the env makes it explicit for any subprocess we spawn too.
+      HF_HUB_DISABLE_XET: "1",
       // Each Teutonic-III eval takes ~250s of bootstrap + setup + busy-wait
       // for the eval-server lock. A single tick can legitimately take
       // 7-15 minutes when the server is saturated; default 600s was tripping
@@ -51,7 +61,12 @@ module.exports = {
       TEUTONIC_TICK_RESTART_AFTER: "1800",
       TEUTONIC_MAX_CONSECUTIVE_TICK_ERRORS: "20",
     },
-    max_restarts: 10,
+    // Bumped from 10 → 1000 after 2026-04-26 incident: PM2 gave up on the
+    // validator at restart #15 and the subnet ran without a validator for
+    // ~21 minutes. This counter resets only when the process stays up for
+    // min_uptime (default 1s), which is generous; the real safety net is
+    // the rest of our error handling.
+    max_restarts: 1000,
     restart_delay: 5000,
     autorestart: true,
     log_date_format: "YYYY-MM-DD HH:mm:ss",

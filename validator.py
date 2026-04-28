@@ -17,6 +17,16 @@ import time
 from copy import deepcopy
 from datetime import datetime, timezone
 
+# Disable hf-xet BEFORE any huggingface_hub import. The xet runtime (Rust /
+# Tokio) has been observed to abort the entire Python process during snapshot
+# downloads of the dethrone-target king repo (see incidents 2026-04-26 09:52
+# and 11:04 — process printed "Cancellation requested; stopping current tasks"
+# and was then SIGKILLed by PM2 because it became unresponsive). The legacy
+# HTTP downloader is robust enough for our 15 GB safetensors files.
+# `HF_HUB_DISABLE_XET` is read at huggingface_hub import time, so it MUST be
+# set before the `from huggingface_hub import HfApi` line below.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 import bittensor as bt
 import boto3
 import httpx
@@ -79,6 +89,14 @@ REPO_PATTERN = r"^[^/]+/Teutonic-III-.+$"
 # candidate and rejects models whose loss explodes — the actual property
 # we care about. See DESIGN.md / commit history for the analysis.
 
+# Periodic incumbent-king reprobe. The same trainability probe used to gate
+# challengers is re-applied to the sitting king on a slow cadence; after
+# KING_AUDIT_FAILS_BEFORE_DETHRONE consecutive failures, the validator
+# reverts to `previous_king` and bans the dead repo.
+KING_AUDIT_INTERVAL_S = int(os.environ.get("TEUTONIC_KING_AUDIT_INTERVAL_S", "3600"))
+KING_AUDIT_FAILS_BEFORE_DETHRONE = int(os.environ.get("TEUTONIC_KING_AUDIT_FAILS", "2"))
+KING_AUDIT_TIMEOUT_S = int(os.environ.get("TEUTONIC_KING_AUDIT_TIMEOUT_S", "600"))
+
 TMC_BASE = "https://api.taomarketcap.com/public/v1"
 
 log = logging.getLogger("teutonic")
@@ -99,7 +117,19 @@ class _EvalInnerError(Exception):
         self.original = original
 
 
-TOPK_WEIGHTS = [0.75, 0.19, 0.06]
+# Rolling per-reign emission window. Each of the most recent KING_CHAIN_DEPTH
+# kingships earns one slot worth `1/KING_CHAIN_DEPTH` of total emission. The
+# newest valid (accepted-dethrone) king is pushed onto the head; the oldest is
+# evicted. Same-hotkey wins stack — a hotkey that wins N of the last
+# KING_CHAIN_DEPTH reigns receives N * (1/KING_CHAIN_DEPTH) of emissions. The
+# per-hotkey aggregation is applied at the chain RPC boundary
+# (`aggregate_chain_weights` -> `set_weights`).
+TOPK_WEIGHTS = [0.2, 0.2, 0.2, 0.2, 0.2]
+KING_CHAIN_DEPTH = len(TOPK_WEIGHTS)
+
+# Bittensor emits one block every 12 seconds. Used to convert per-block
+# emission rates from `meta.emission` into per-hour rates for the dashboard.
+BLOCKS_PER_HOUR = 300
 
 # Dashboard/Hippius writes are non-critical presentation updates. Keep them
 # off the hot path and fail open when the public endpoint is degraded.
@@ -132,15 +162,26 @@ async def fetch_tmc_data() -> dict | None:
         m = market_resp.json()
         s = subnet_resp.json()
         b = burn_resp.json()
-        asp = float(s["latest_snapshot"]["alpha_sqrt_price"])
+        snap = s["latest_snapshot"]
+        asp = float(snap["alpha_sqrt_price"])
         tao_price = m["current_price"]
         alpha_tao = asp ** 2
+        # `subnet_alpha_out_emission` is the per-block alpha emission to
+        # miners (server side) on this subnet, in nanoalpha (1e-9). This is
+        # the "going rate" that gets carved up by validator weights — much
+        # more useful than the chain's lagging post-Yuma per-uid `emission`
+        # tensor for an at-a-glance dashboard. Falls back to 0 if absent.
+        try:
+            sn3_alpha_per_block = float(snap.get("subnet_alpha_out_emission", 0)) / 1e9
+        except Exception:
+            sn3_alpha_per_block = 0.0
         return {
             "tao_price_usd": tao_price,
             "tao_change_24h": m["usd_quote"]["percent_change_24h"],
             "sn3_alpha_price_tao": alpha_tao,
             "sn3_alpha_price_usd": alpha_tao * tao_price,
             "sn3_reg_burn_tao": b[0]["burn"] / 1e9,
+            "sn3_alpha_per_block": sn3_alpha_per_block,
         }
     except Exception:
         log.warning("TMC fetch failed", exc_info=True)
@@ -508,20 +549,29 @@ def _normalize_weights(base_weights, n):
 
 
 def set_weights(subtensor, wallet, netuid, ranked_hotkeys, ranked_weights) -> bool:
-    """Set weights across one or more ranked hotkeys. Returns True on success."""
+    """Set weights across one or more ranked hotkeys. Returns True on success.
+
+    Defensively collapses repeated hotkeys before hitting the subtensor RPC
+    (subtensor.set_weights behavior on duplicate uids is undefined). Per-reign
+    stacking is intentional upstream — see `aggregate_chain_weights` — but the
+    aggregation is repeated here as belt-and-suspenders.
+    """
     try:
         meta = subtensor.metagraph(netuid)
         hotkeys = list(getattr(meta, "hotkeys", []))
-        chosen = []
-        missing = []
+        agg_uid: dict[int, tuple[float, str]] = {}
+        missing: list[str] = []
         for hotkey, weight in zip(ranked_hotkeys, ranked_weights):
-            if hotkey in hotkeys:
-                chosen.append((hotkeys.index(hotkey), float(weight), hotkey))
-            else:
+            if hotkey not in hotkeys:
                 missing.append(hotkey)
+                continue
+            uid = hotkeys.index(hotkey)
+            prev_w, _ = agg_uid.get(uid, (0.0, hotkey))
+            agg_uid[uid] = (prev_w + float(weight), hotkey)
         if missing:
             log.warning("weight-set dropping missing hotkeys: %s",
                         ", ".join(h[:16] for h in missing))
+        chosen = [(uid, w, hk) for uid, (w, hk) in agg_uid.items() if w > 0]
         if not chosen:
             log.warning("no eligible ranked hotkeys present in metagraph for weight set")
             return False
@@ -540,9 +590,41 @@ def set_weights(subtensor, wallet, netuid, ranked_hotkeys, ranked_weights) -> bo
         return False
 
 
+def aggregate_chain_weights(chain, uid_map):
+    """Per-reign aggregator for the rolling 5-king emission window.
+
+    Each entry in `chain` (newest first) earns one slot worth `1/KING_CHAIN_DEPTH`
+    of total emission. Slots whose hotkey is not currently registered in
+    `uid_map` are dropped (the missing weight is implicitly forfeit; the
+    set_weights chain RPC renormalizes what remains). Repeats stack — a hotkey
+    that wins kingship N times in the last KING_CHAIN_DEPTH reigns receives
+    N * (1/KING_CHAIN_DEPTH) of total emission.
+
+    Returns `[(hotkey, weight)]` in first-seen-newest-first order.
+    """
+    slot_weight = 1.0 / KING_CHAIN_DEPTH
+    agg: dict[str, float] = {}
+    order: list[str] = []
+    for entry in chain:
+        hk = entry.get("hotkey") if isinstance(entry, dict) else None
+        if not hk or hk not in uid_map:
+            continue
+        if hk not in agg:
+            agg[hk] = 0.0
+            order.append(hk)
+        agg[hk] += slot_weight
+    return [(hk, agg[hk]) for hk in order]
+
+
 def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
                       reason: str = "") -> bool:
-    """Set weights to the current top-3 scoreboard if forced or interval elapsed."""
+    """Push subnet weights for the rolling last-`KING_CHAIN_DEPTH` reigns.
+
+    Each of the most recent KING_CHAIN_DEPTH dethrones earns one equal slot
+    (1/KING_CHAIN_DEPTH of total emission). Same-hotkey repeats stack at the
+    per-hotkey aggregation step (see `aggregate_chain_weights`). The current
+    king always sits at slot 0.
+    """
     fallback_hotkey = state.king.get("hotkey") if state.king else None
     if not fallback_hotkey:
         if force:
@@ -556,12 +638,14 @@ def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
     if not force and current_block - state.last_weight_block < WEIGHT_INTERVAL:
         return False
 
-    ranked = state.topk_for_weight_set()
-    ranked_hotkeys = [e["hotkey"] for e in ranked]
-    ranked_weights = _normalize_weights(TOPK_WEIGHTS, len(ranked_hotkeys))
-    if not ranked_hotkeys:
+    chain = state.recent_king_chain(KING_CHAIN_DEPTH)
+    pairs = aggregate_chain_weights(chain, state.uid_map)
+    if not pairs:
         ranked_hotkeys = [fallback_hotkey]
         ranked_weights = [1.0]
+    else:
+        ranked_hotkeys = [hk for hk, _ in pairs]
+        ranked_weights = [w for _, w in pairs]
 
     log.info("setting weights at block %d (last=%d, %s) to %s",
              current_block, state.last_weight_block,
@@ -570,17 +654,8 @@ def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
     if set_weights(subtensor, wallet, NETUID, ranked_hotkeys, ranked_weights):
         state.last_weight_block = current_block
         state.last_winner_hotkey = ranked_hotkeys[0]
-        top1 = ranked[0] if ranked else None
-        if top1:
-            revision = top1.get("challenger_revision") or state.best_known_revision(top1.get("hotkey", ""), top1.get("challenger_repo", ""))
-            state.set_king(
-                top1.get("hotkey", fallback_hotkey),
-                top1.get("challenger_repo", state.king.get("hf_repo", "")),
-                state.king.get("king_hash", ""),
-                current_block,
-                top1.get("challenge_id", "weight-set"),
-                king_revision=revision or state.king.get("king_revision", ""),
-            )
+        # Kings are crowned only by accepted dethrones in process_challenge.
+        # The weight-set tick no longer touches state.king or reign_number.
         state.note_weight_set(current_block, ranked_hotkeys, ranked_weights, reason or ("forced" if force else "interval"))
         try:
             state.reset_score_window(current_block)
@@ -622,33 +697,67 @@ def _age_seconds(ts: str | None) -> float | None:
         return None
 
 
+_SEED_KING_HASH_SUBPROCESS = r"""
+# Runs in an isolated child process so any native crash (hf-xet abort, OOM,
+# segfault) only kills the child, not the parent validator. The parent reads
+# the digest from stdout. On any failure mode, parent falls back to "seed".
+import hashlib, os, sys, tempfile
+from pathlib import Path
+
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+from huggingface_hub import snapshot_download
+
+repo = sys.argv[1]
+revision = sys.argv[2] or None
+token = os.environ.get("HF_TOKEN") or None
+
+with tempfile.TemporaryDirectory(prefix="seed_king_") as tmp:
+    snapshot_download(repo, local_dir=tmp, token=token, revision=revision,
+                      allow_patterns=["*.safetensors"])
+    h = hashlib.sha256()
+    for p in sorted(Path(tmp).glob("*.safetensors")):
+        with open(p, "rb") as f:
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+    sys.stdout.write(h.hexdigest())
+"""
+
+
 def _seed_king_hash(repo: str, revision: str) -> str:
     """Compute sha256 over the king repo's safetensors so it matches the
     `king_hash` miners encode in their on-chain commits (see miner.sha256_dir).
 
-    Falls back to the literal string "seed" if the download fails — the live
-    state can be patched later with scripts/patch_seed_king_hash.py.
+    Runs the download + hash in an isolated subprocess so a native crash in
+    the huggingface downloader cannot take the whole validator with it (see
+    2026-04-26 incidents where xet aborts SIGKILLed the parent mid-dethrone).
+
+    Falls back to the literal string "seed" if the subprocess fails — the live
+    state can be patched later with scripts/patch_seed_king_hash.py, or by the
+    placeholder-recompute path in State.load().
     """
+    import subprocess
+    timeout_s = int(os.environ.get("TEUTONIC_KING_HASH_TIMEOUT_S", "1200"))
     try:
-        from huggingface_hub import snapshot_download
-        import tempfile
-        from pathlib import Path
-        with tempfile.TemporaryDirectory(prefix="seed_king_") as tmp:
-            snapshot_download(repo, local_dir=tmp,
-                              token=HF_TOKEN or None,
-                              revision=revision or None,
-                              allow_patterns=["*.safetensors"])
-            h = hashlib.sha256()
-            for p in sorted(Path(tmp).glob("*.safetensors")):
-                with open(p, "rb") as f:
-                    while chunk := f.read(1 << 20):
-                        h.update(chunk)
-            digest = h.hexdigest()
+        proc = subprocess.run(
+            [sys.executable, "-c", _SEED_KING_HASH_SUBPROCESS, repo, revision or ""],
+            capture_output=True, text=True, timeout=timeout_s,
+            env={**os.environ, "HF_HUB_DISABLE_XET": "1"},
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            digest = proc.stdout.strip()
             log.info("seed king_hash for %s@%s = %s",
                      repo, (revision or "latest")[:12], digest[:16])
             return digest
+        log.warning("seed king_hash subprocess failed for %s rc=%s "
+                    "stderr=%s — using 'seed'",
+                    repo, proc.returncode, (proc.stderr or "")[-400:])
+        return "seed"
+    except subprocess.TimeoutExpired:
+        log.warning("seed king_hash subprocess timed out (%ds) for %s — using 'seed'",
+                    timeout_s, repo)
+        return "seed"
     except Exception as exc:
-        log.warning("seed king_hash compute failed for %s: %s — using 'seed'",
+        log.warning("seed king_hash subprocess raised for %s: %s — using 'seed'",
                     repo, exc)
         return "seed"
 
@@ -669,6 +778,11 @@ class State:
         self.last_winner_hotkey: str | None = None
         self.market: dict | None = None
         self.uid_map: dict[str, int] = {}
+        # Per-hotkey alpha emission per block, captured from
+        # `subtensor.metagraph(netuid).emission` in `refresh_uid_map`. Used by
+        # `flush_dashboard` to express each king's incentive in alpha/hour and
+        # USD/hour. Empty until the first metagraph refresh succeeds.
+        self.uid_emission_per_block: dict[str, float] = {}
         self.score_window = {
             "window_id": "window-0000",
             "started_at": _now(),
@@ -694,6 +808,7 @@ class State:
             "restart_reason": "",
             "notes": "",
         }
+        self.king_audit: dict = {}
 
     def load(self):
         k = self.r2.get("king/current.json")
@@ -726,6 +841,7 @@ class State:
                 loaded_window.setdefault("last_weight_set", None)
                 self.score_window = loaded_window
             self.known_revisions = st.get("known_revisions", {})
+            self.king_audit = st.get("king_audit", {}) or {}
         h = self.r2.get("state/dashboard_history.json")
         if h:
             self.history = h.get("history", [])
@@ -750,6 +866,126 @@ class State:
                 self.flush_dashboard(force=True)
                 log.info("upgraded king_hash to %s and persisted to R2", real_hash[:16])
 
+        # Reconcile the king chain against the duel history. If a dethrone
+        # crashed between record_verdict (line ~1862) and set_king (line
+        # ~1905) — the exact failure mode that ate uid=0 and uid=56's wins
+        # on 2026-04-26 — the verdict is in history but the chain never
+        # advanced. This rebuild puts the chain back in sync.
+        self._reconcile_chain_from_history()
+
+    def _reconcile_chain_from_history(self):
+        """Rebuild the top KING_CHAIN_DEPTH slots of the king chain from
+        the most recent accepted-challenger verdicts in `self.history`.
+
+        Idempotent: when the chain already matches history, this is a
+        no-op. When history disagrees (a crashed dethrone), the chain is
+        rewritten so the rolling-5 weight-set credits the right hotkeys.
+
+        Preserves king_hash/king_revision/crowned_block for every entry
+        that already lives in the existing chain (keyed by challenge_id);
+        only synthesizes placeholder entries for the lost dethrones.
+        """
+        if not self.king or not self.history:
+            return
+
+        wins_newest_first = []
+        seen_cids = set()
+        for h in self.history:
+            if h.get("verdict") != "challenger" or not h.get("accepted", False):
+                continue
+            cid = h.get("challenge_id")
+            if cid in seen_cids:
+                continue
+            seen_cids.add(cid)
+            wins_newest_first.append(h)
+            if len(wins_newest_first) >= KING_CHAIN_DEPTH:
+                break
+
+        if not wins_newest_first:
+            return
+
+        # Sanity: top of history must match current king. If not, history
+        # is corrupt or king/state diverged some other way — bail loudly
+        # rather than rewriting state from a bad source.
+        top_hk = wins_newest_first[0].get("hotkey", "")
+        if top_hk != self.king.get("hotkey", ""):
+            log.warning("chain reconcile: history top hk=%s != king hk=%s; "
+                        "skipping reconcile",
+                        top_hk[:16], (self.king.get("hotkey") or "")[:16])
+            return
+
+        # Index existing chain by challenge_id so we preserve real
+        # king_hash + king_revision + crowned_block for entries that
+        # actually got crowned.
+        existing_by_cid = {}
+        node = self.king
+        while node:
+            cid = node.get("challenge_id")
+            if cid:
+                existing_by_cid[cid] = node
+            node = node.get("previous_king")
+
+        current_reign = int(self.king.get("reign_number") or 0)
+        rebuilt = []
+        any_new = False
+        for i, w in enumerate(wins_newest_first):
+            cid = w.get("challenge_id", "")
+            ts = w.get("timestamp", _now())
+            reign_for_this = current_reign - i
+            existing = existing_by_cid.get(cid)
+            if existing:
+                rebuilt.append({
+                    "hotkey": existing.get("hotkey") or w.get("hotkey", ""),
+                    "hf_repo": existing.get("hf_repo") or w.get("challenger_repo", ""),
+                    "king_hash": existing.get("king_hash", "dethrone"),
+                    "king_revision": existing.get("king_revision", ""),
+                    "reign_number": reign_for_this,
+                    "crowned_at": existing.get("crowned_at", ts),
+                    "crowned_block": existing.get("crowned_block", 0),
+                    "challenge_id": cid,
+                })
+            else:
+                any_new = True
+                rebuilt.append({
+                    "hotkey": w.get("hotkey", ""),
+                    "hf_repo": w.get("challenger_repo", ""),
+                    "king_hash": "dethrone",
+                    "king_revision": "",
+                    "reign_number": reign_for_this,
+                    "crowned_at": ts,
+                    "crowned_block": 0,
+                    "challenge_id": cid,
+                })
+
+        # Compare cid order to detect whether the existing chain already
+        # matches; if so we don't bother rewriting.
+        existing_cids = []
+        node = self.king
+        while node and len(existing_cids) < KING_CHAIN_DEPTH:
+            existing_cids.append(node.get("challenge_id"))
+            node = node.get("previous_king")
+        rebuilt_cids = [r.get("challenge_id") for r in rebuilt]
+        if not any_new and existing_cids[: len(rebuilt_cids)] == rebuilt_cids:
+            return  # already consistent
+
+        # Link list newest -> oldest.
+        new_king = None
+        for entry in reversed(rebuilt):
+            entry = dict(entry)
+            entry["previous_king"] = new_king
+            new_king = entry
+
+        log.warning("chain reconcile: rewriting king chain from history "
+                    "(was: %s; now: %s)",
+                    [c[:8] if c else "?" for c in existing_cids],
+                    [c[:8] if c else "?" for c in rebuilt_cids])
+        self.king = new_king
+        self.flush()
+        self.flush_dashboard(force=True)
+        self.event({"event": "chain_reconciled",
+                     "previous_cids": existing_cids,
+                     "rebuilt_cids": rebuilt_cids})
+
     def flush(self):
         now = _now()
         self.watchdog["last_state_flush_at"] = now
@@ -760,6 +996,7 @@ class State:
             "last_winner_hotkey": self.last_winner_hotkey,
             "score_window": self.score_window,
             "known_revisions": self.known_revisions,
+            "king_audit": self.king_audit,
             "updated_at": now,
         })
         self.r2.put("state/queue.json", {"pending": self.queue, "updated_at": now})
@@ -888,6 +1125,13 @@ class State:
         return self.recompute_topk()
 
     def topk_for_weight_set(self):
+        """DEPRECATED — kept only for backward-compatible R2/dashboard reads.
+
+        Real emission weights now come from `aggregate_chain_weights` over the
+        rolling per-reign king chain (see `maybe_set_weights`). This method
+        ranks the in-progress score-window's accepted verdicts and is no
+        longer used to drive `subtensor.set_weights`.
+        """
         ranked = []
         seen_hotkeys = set()
         for entry in sorted(self.score_window.get("accepted_by_hotkey", {}).values(), key=_rank_sort_key):
@@ -928,6 +1172,45 @@ class State:
         }
         self.evaluated_repos.clear()
 
+    @staticmethod
+    def _truncate_king_chain(node, max_depth):
+        """Return a deep-ish copy of `node` whose `previous_king` chain is
+        capped at `max_depth` total layers (including the node itself).
+        Avoids unbounded growth as dethrones accumulate."""
+        if not node or max_depth <= 0:
+            return None
+        head = dict(node)
+        cur = head
+        remaining = max_depth - 1
+        while remaining > 0:
+            child = cur.get("previous_king")
+            if not child:
+                cur["previous_king"] = None
+                return head
+            child_copy = dict(child)
+            cur["previous_king"] = child_copy
+            cur = child_copy
+            remaining -= 1
+        cur["previous_king"] = None
+        return head
+
+    def recent_king_chain(self, depth):
+        """Walk king + previous_king chain up to `depth` layers; return list of
+        per-reign dicts in order [current, prev, prev2, ...].
+
+        Repeats are intentional: if the same hotkey wins consecutively, each
+        win occupies its own slot. The per-hotkey aggregation lives one layer
+        up in `maybe_set_weights`, where slot weights are summed before the
+        subtensor RPC.
+        """
+        out = []
+        node = self.king
+        while node and len(out) < depth:
+            if node.get("hotkey"):
+                out.append(node)
+            node = node.get("previous_king")
+        return out
+
     def set_king(self, hotkey, hf_repo, king_hash, block, challenge_id="seed",
                   king_revision=""):
         global _king_config, _king_config_key
@@ -936,15 +1219,20 @@ class State:
         self.failed_repos.clear()
         self.evaluated_repos.clear()
         reign = self.king.get("reign_number", 0) + (0 if challenge_id == "seed" else 1)
-        prev = self.king.copy() if self.king else None
-        if prev:
-            prev.pop("previous_king", None)
+        prev_full = self.king.copy() if self.king else None
+        # Always preserve the prior reign in the chain — even if the same hotkey
+        # wins consecutively. Per-reign stacking is intentional: each successful
+        # dethrone earns a fresh slot in the rolling 5-reign emission window
+        # (see TOPK_WEIGHTS). `_truncate_king_chain` caps the recursive
+        # previous_king pointer at KING_CHAIN_DEPTH-1 so the new head + chain
+        # contains at most KING_CHAIN_DEPTH reigns.
+        chain_root = self._truncate_king_chain(prev_full, KING_CHAIN_DEPTH - 1)
         self.king = {
             "hotkey": hotkey, "hf_repo": hf_repo, "king_hash": king_hash,
             "king_revision": king_revision,
             "reign_number": reign, "crowned_at": _now(),
             "crowned_block": block, "challenge_id": challenge_id,
-            "previous_king": prev,
+            "previous_king": chain_root,
         }
         self.flush()
         self.flush_dashboard(force=True)
@@ -952,24 +1240,30 @@ class State:
                      "challenge_id": challenge_id})
 
     def record_verdict(self, verdict, challenger_repo, hotkey):
-        king_loss = verdict["avg_king_loss"]
-        chall_loss = verdict["avg_challenger_loss"]
-        self.history.insert(0, {
-            "challenge_id": verdict["challenge_id"],
+        # Probe-rejected verdicts (eval_server.py probe-fail path) lack the
+        # full bootstrap-test fields (avg_*_loss / wall_time_s / timestamp).
+        # Default everything so a partial verdict still records cleanly.
+        king_loss = verdict.get("avg_king_loss", 0)
+        chall_loss = verdict.get("avg_challenger_loss", 0)
+        entry = {
+            "challenge_id": verdict.get("challenge_id"),
             "hotkey": hotkey,
             "uid": self.uid_map.get(hotkey, "?"),
             "challenger_repo": challenger_repo,
-            "accepted": verdict["accepted"],
-            "verdict": verdict["verdict"],
+            "accepted": verdict.get("accepted", False),
+            "verdict": verdict.get("verdict", "unknown"),
             "mu_hat": verdict.get("mu_hat", 0),
             "lcb": verdict.get("lcb", 0),
             "delta": verdict.get("delta", 0),
             "avg_king_loss": king_loss,
             "avg_challenger_loss": chall_loss,
-            "best_loss": min(king_loss, chall_loss),
-            "wall_time_s": verdict["wall_time_s"],
-            "timestamp": verdict["timestamp"],
-        })
+            "best_loss": min(king_loss, chall_loss) if (king_loss or chall_loss) else 0,
+            "wall_time_s": verdict.get("wall_time_s", 0),
+            "timestamp": verdict.get("timestamp", _now()),
+        }
+        if verdict.get("rejection_reason"):
+            entry["rejection_reason"] = verdict["rejection_reason"]
+        self.history.insert(0, entry)
         self.r2.put("state/dashboard_history.json", {"history": self.history})
 
     def record_failure(self, entry, error_code, error_detail=""):
@@ -997,6 +1291,15 @@ class State:
         try:
             meta = subtensor.metagraph(netuid)
             self.uid_map = {hk: uid for uid, hk in enumerate(meta.hotkeys)}
+            em = getattr(meta, "emission", None)
+            if em is not None:
+                emissions = em.tolist() if hasattr(em, "tolist") else list(em)
+            else:
+                emissions = []
+            self.uid_emission_per_block = {
+                hk: (float(emissions[uid]) if uid < len(emissions) else 0.0)
+                for hk, uid in self.uid_map.items()
+            }
         except Exception:
             log.warning("failed to refresh uid_map", exc_info=True)
 
@@ -1040,9 +1343,73 @@ class State:
 
             self._last_dashboard_flush_monotonic = now_monotonic
             self.watchdog["last_dashboard_flush_at"] = _now()
+            chain = self.recent_king_chain(KING_CHAIN_DEPTH)
+            chain_pairs = aggregate_chain_weights(chain, self.uid_map)
+            mkt = self.market or {}
+            alpha_tao = float(mkt.get("sn3_alpha_price_tao") or 0.0)
+            alpha_usd = float(mkt.get("sn3_alpha_price_usd") or 0.0)
+            # Forward-looking subnet miner emission rate: this is what the
+            # network will pay to miners per block, divided across our
+            # validator-set weights. We renormalize the per-hotkey weights
+            # over the kings actually present in the metagraph (matches the
+            # set_weights renormalization) so the dashboard sums to 1.0.
+            sn3_alpha_per_block = float(mkt.get("sn3_alpha_per_block") or 0.0)
+            weight_total = sum(w for _, w in chain_pairs) or 1.0
+
+            # Per-hotkey aggregated incentive (used by `set_weights` and shown
+            # in the dashboard's "ROLLING REIGN WINDOW" table). emission_per_block
+            # is chain-truth from `meta.emission[uid]` and lags weight changes
+            # by one tempo; alpha_per_hour is the forward-looking projection
+            # using the subnet's current per-block miner emission rate.
+            king_chain_weights = []
+            per_hotkey_money: dict[str, dict] = {}
+            for hk, w in chain_pairs:
+                em_per_block = float(self.uid_emission_per_block.get(hk, 0.0))
+                share = (w / weight_total) if weight_total > 0 else 0.0
+                projected_alpha_per_block = sn3_alpha_per_block * share
+                alpha_per_hour = projected_alpha_per_block * BLOCKS_PER_HOUR
+                tao_per_hour = alpha_per_hour * alpha_tao
+                usd_per_hour = alpha_per_hour * alpha_usd
+                entry = {
+                    "hotkey": hk,
+                    "uid": self.uid_map.get(hk, "?"),
+                    "weight": round(w, 6),
+                    "weight_share": round(share, 6),
+                    "emission_per_block": round(em_per_block, 9),
+                    "projected_alpha_per_block": round(projected_alpha_per_block, 9),
+                    "alpha_per_hour": round(alpha_per_hour, 6),
+                    "tao_per_hour": round(tao_per_hour, 6),
+                    "usd_per_hour": round(usd_per_hour, 4),
+                }
+                king_chain_weights.append(entry)
+                per_hotkey_money[hk] = entry
+
+            king_chain = []
+            for e in chain:
+                hk = e.get("hotkey", "")
+                money = per_hotkey_money.get(hk, {})
+                king_chain.append({
+                    "hotkey": hk,
+                    "uid": self.uid_map.get(hk, "?"),
+                    "hf_repo": e.get("hf_repo"),
+                    "king_revision": e.get("king_revision"),
+                    "reign_number": e.get("reign_number"),
+                    "crowned_at": e.get("crowned_at"),
+                    "crowned_block": e.get("crowned_block"),
+                    "challenge_id": e.get("challenge_id"),
+                    # Per-reign rows carry the per-hotkey AGGREGATED incentive
+                    # so a hotkey that holds two of the last 5 slots shows the
+                    # combined dollar number on each of its rows.
+                    "weight": money.get("weight"),
+                    "alpha_per_hour": money.get("alpha_per_hour"),
+                    "tao_per_hour": money.get("tao_per_hour"),
+                    "usd_per_hour": money.get("usd_per_hour"),
+                })
             payload = {
                 "updated_at": _now(),
                 "king": self.king,
+                "king_chain": king_chain,
+                "king_chain_weights": king_chain_weights,
                 "stats": self.stats,
                 "current_eval": self.current_eval,
                 "watchdog": self.watchdog,
@@ -1138,11 +1505,198 @@ def check_king_alive(state):
         return False
 
 
-# NOTE: The validator-side king audit (audit_king_on_startup, _audit_candidate)
-# was removed. The eval server now probes the king on load via
-# eval_torch.trainability_probe and refuses to load an untrainable king,
-# raising a RuntimeError that surfaces to the validator. That is the single
-# source of truth for "is this king OK to keep".
+async def audit_incumbent_king(state, subtensor):
+    """Reprobe the sitting king out-of-band via eval_server's /probe endpoint.
+
+    On each call we reach the eval server, ask it to load the current king
+    repo+revision on a single GPU, run `trainability_probe`, and return the
+    verdict. Successes reset `consecutive_fails`; failures increment it.
+    Once it hits `KING_AUDIT_FAILS_BEFORE_DETHRONE` we revert to
+    `previous_king` (mirroring `check_king_alive`) and ban the dead repo
+    from being re-queued as a challenger this cycle.
+
+    State is persisted on `state.king_audit`:
+      {
+        "last_at": iso8601,
+        "last_status": "ok" | "failed" | "error" | "skipped",
+        "consecutive_fails": int,
+        "last_verdict": {...},
+        "last_reason": str,
+      }
+    """
+    repo = state.king.get("hf_repo", "")
+    rev = state.king.get("king_revision", "")
+    if not repo:
+        return
+
+    state.king_audit.setdefault("consecutive_fails", 0)
+
+    log.info("king audit: probing %s@%s", repo, (rev or "HEAD")[:12])
+    state.set_phase("king_audit", notes=f"reprobing king {repo}")
+
+    verdict: dict | None = None
+    error: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(KING_AUDIT_TIMEOUT_S)) as client:
+            resp = await client.post(
+                f"{EVAL_SERVER_URL}/probe",
+                json={"repo": repo, "revision": rev or ""},
+            )
+            if resp.status_code == 409:
+                # Eval lock held by a live eval — try again next interval.
+                log.info("king audit: eval server busy (409), will retry next interval")
+                state.king_audit["last_at"] = _now()
+                state.king_audit["last_status"] = "skipped"
+                state.king_audit["last_reason"] = "eval_server_busy"
+                state.flush()
+                return
+            resp.raise_for_status()
+            verdict = resp.json()
+    except Exception as exc:
+        error = str(exc)
+        log.warning("king audit: probe call failed: %s", error)
+
+    state.king_audit["last_at"] = _now()
+
+    if error is not None or verdict is None:
+        state.king_audit["last_status"] = "error"
+        state.king_audit["last_reason"] = error or "no verdict returned"
+        state.flush()
+        return
+
+    state.king_audit["last_verdict"] = {
+        "ok": verdict.get("ok"),
+        "reason": verdict.get("reason"),
+        "max_ratio": verdict.get("max_ratio"),
+        "max_grad_norm": verdict.get("max_grad_norm"),
+        "min_loss_before": verdict.get("min_loss_before"),
+        "max_loss_after": verdict.get("max_loss_after"),
+        "norm_quantization": verdict.get("norm_quantization"),
+        "n_seeds": verdict.get("n_seeds"),
+        "n_steps_per_seed": verdict.get("n_steps_per_seed"),
+        "warnings": verdict.get("warnings", []),
+    }
+
+    if verdict.get("ok"):
+        prev_fails = state.king_audit.get("consecutive_fails", 0)
+        state.king_audit["consecutive_fails"] = 0
+        state.king_audit["last_status"] = "ok"
+        state.king_audit["last_reason"] = None
+        log.info("king audit: %s passed (max_ratio=%.3f max_grad=%.2e norm_quant=%s)",
+                 repo,
+                 verdict.get("max_ratio", float("nan")),
+                 verdict.get("max_grad_norm", float("nan")),
+                 verdict.get("norm_quantization"))
+        if prev_fails:
+            state.event({"event": "king_audit_recovered",
+                         "hf_repo": repo, "previous_fails": prev_fails})
+        state.flush()
+        return
+
+    fails = state.king_audit.get("consecutive_fails", 0) + 1
+    state.king_audit["consecutive_fails"] = fails
+    state.king_audit["last_status"] = "failed"
+    state.king_audit["last_reason"] = verdict.get("reason", "unknown")
+    log.warning("king audit FAILED %d/%d for %s: %s",
+                fails, KING_AUDIT_FAILS_BEFORE_DETHRONE,
+                repo, verdict.get("reason"))
+    state.event({
+        "event": "king_audit_failed",
+        "hf_repo": repo,
+        "king_revision": rev,
+        "consecutive_fails": fails,
+        "threshold": KING_AUDIT_FAILS_BEFORE_DETHRONE,
+        "reason": verdict.get("reason"),
+        "max_ratio": verdict.get("max_ratio"),
+        "max_grad_norm": verdict.get("max_grad_norm"),
+        "norm_quantization": verdict.get("norm_quantization"),
+    })
+
+    if fails < KING_AUDIT_FAILS_BEFORE_DETHRONE:
+        state.flush()
+        state.flush_dashboard()
+        return
+
+    # Threshold reached — dethrone.
+    prev = state.king.get("previous_king")
+    if not (prev and prev.get("hf_repo")):
+        log.error("king audit: %s failed %d times but no previous_king to "
+                  "revert to — operator must hand-restore", repo, fails)
+        state.event({
+            "event": "king_audit_dethrone_blocked",
+            "hf_repo": repo, "reason": "no_previous_king",
+        })
+        state.flush()
+        state.flush_dashboard()
+        return
+
+    log.warning("king audit: dethroning %s after %d consecutive probe failures; "
+                "reverting to %s@%s",
+                repo, fails, prev["hf_repo"],
+                (prev.get("king_revision") or "?")[:12])
+
+    dead_repo = repo
+    dethroned_block = _safe_block(subtensor)
+    state.failed_repos.add(dead_repo)
+    state.king = prev
+    state.king_audit = {
+        "last_at": _now(),
+        "last_status": "ok",
+        "consecutive_fails": 0,
+        "last_verdict": None,
+        "last_reason": "reverted_to_previous_king",
+        "dethroned_repo": dead_repo,
+        "dethroned_at_block": dethroned_block,
+    }
+    state.flush()
+    state.flush_dashboard()
+    state.event({
+        "event": "king_dethroned_untrainable",
+        "lost_repo": dead_repo,
+        "reverted_to": prev.get("hf_repo"),
+        "reverted_to_revision": (prev.get("king_revision") or "")[:12],
+        "consecutive_fails": fails,
+        "block": dethroned_block,
+    })
+
+    try:
+        await notify_king_dethroned_untrainable(dead_repo, prev, verdict)
+    except Exception:
+        log.warning("discord notification for untrainable dethrone failed",
+                    exc_info=True)
+
+
+async def notify_king_dethroned_untrainable(dead_repo: str, reverted_to: dict,
+                                             verdict: dict):
+    """Discord notification: incumbent king demoted by trainability audit."""
+    if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
+        return
+    rv_repo = reverted_to.get("hf_repo", "?")
+    rv_rev = (reverted_to.get("king_revision") or "")[:12]
+    lines = [
+        "**King Demoted — Trainability Audit Failed**",
+        f"**Demoted:** `{dead_repo}`",
+        f"**Reason:** {verdict.get('reason', 'unknown')}",
+        f"**max_ratio:** {verdict.get('max_ratio')}  "
+        f"**max_grad_norm:** {verdict.get('max_grad_norm')}",
+        f"**norm_quantization:** {verdict.get('norm_quantization')}",
+        f"**Reverted to:** `{rv_repo}`" + (f" (`{rv_rev}`)" if rv_rev else ""),
+    ]
+    embed = {
+        "title": "⚠️ Incumbent King Dethroned",
+        "description": "\n".join(lines),
+        "color": 0xCC3333,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            await client.post(
+                f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages",
+                headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+                         "Content-Type": "application/json"},
+                json={"embeds": [embed]},
+            )
+    except Exception:
+        log.warning("discord untrainable dethrone notify failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1419,8 +1973,8 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
 
     r2.put(f"eval/{cid}/verdict.json", verdict)
     log.info("verdict: %s (mu_hat=%.6f lcb=%.6f delta=%.6f %.1fs)",
-             verdict["verdict"], verdict.get("mu_hat", 0), verdict.get("lcb", 0),
-             verdict.get("delta", 0), verdict["wall_time_s"])
+             verdict.get("verdict", "unknown"), verdict.get("mu_hat", 0), verdict.get("lcb", 0),
+             verdict.get("delta", 0), verdict.get("wall_time_s", 0))
 
     state.current_eval = None
     state.set_phase("post_eval", challenge_id=cid, notes="recording verdict")
@@ -1572,6 +2126,13 @@ async def main():
                 log.warning("king repo check failed, skipping this tick")
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
+
+            audit_age = _age_seconds(state.king_audit.get("last_at"))
+            if audit_age is None or audit_age >= KING_AUDIT_INTERVAL_S:
+                try:
+                    await audit_incumbent_king(state, subtensor)
+                except Exception:
+                    log.exception("king audit failed (non-fatal)")
 
             if _monotonic_now() - tick_started_monotonic > TICK_WARN_AFTER:
                 log.warning("tick already running for %.0fs before uid refresh",

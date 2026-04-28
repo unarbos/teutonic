@@ -3,8 +3,9 @@
 A reference document for another AI / collaborator. It explains how the Teutonic
 king-of-the-hill incentive works end-to-end so we can reason about scaling the
 economics to train larger models. The mechanism is intentionally minimal: one
-global king, one paired statistical test, winner takes 100% of subnet emissions
-until dethroned.
+global king, one paired statistical test, and a rolling 5-king payout — the
+current king and the last 4 dethroned kings each receive `1/5` of subnet
+emissions until further dethrones rotate them out.
 
 ---
 
@@ -15,15 +16,18 @@ single HuggingFace checkpoint is the **king**. Anyone can submit a **challenger*
 checkpoint via an on-chain commit-reveal. A validator runs a paired
 cross-entropy test on a public token shard; if the challenger's expected
 per-token NLL is statistically lower than the king's by at least `delta` nats,
-the validator dethrones the king and assigns 100% of subnet weight to the
-challenger's hotkey. Subnet 3 alpha emissions then flow entirely to the new
-king until someone dethrones them in turn.
+the validator dethrones the king and pushes the new king onto a rolling
+5-deep crown chain. The validator then sets weights as `1/5` to each of the
+current king and the last 4 dethroned kings (renormalized if any are
+deregistered). A miner therefore continues earning a residual emission
+stream for the next 4 dethrones after losing the throne.
 
 The economic primitives are:
 
 - **Cost to play** — Bittensor SN3 registration burn + GPU compute to train a
   real challenger + HuggingFace bandwidth/storage.
-- **Reward** — full SN3 alpha emission stream while you reign.
+- **Reward** — `1/5` of the SN3 alpha emission stream while you sit anywhere
+  in the rolling 5-king window (i.e. for your reign + the next 4 dethrones).
 - **Acceptance rule** — paired bootstrap LCB on per-token log-loss difference,
   one-sided at `alpha=0.001`, with a fixed effect floor `delta=0.01`.
 
@@ -65,22 +69,39 @@ sequenceDiagram
 **Identity = hotkey.** Mining and reward routing are tied to a Bittensor SS58
 hotkey registered on subnet 3.
 
-**Reward.** The validator concentrates all stake-weight on the current king's
-hotkey. From [validator.py:534-548](teutonic/validator.py#L534-L548):
+**Reward — rolling 5-king payout.** The validator splits stake-weight equally
+across the **last 5 distinct kings** (current king + up to 4 most recent
+ancestors walked via the `previous_king` chain). Each gets `1/5` of the SN3
+emission share routed to validator-set miner weights:
 
 ```python
-def set_weights(subtensor, wallet, netuid, king_hotkey) -> bool:
-    meta = subtensor.metagraph(netuid)
-    if king_hotkey in meta.hotkeys:
-        uid = meta.hotkeys.index(king_hotkey)
-        subtensor.set_weights(wallet=wallet, netuid=netuid,
-                              uids=[uid], weights=[1.0])
+TOPK_WEIGHTS = [0.2, 0.2, 0.2, 0.2, 0.2]
+KING_CHAIN_DEPTH = len(TOPK_WEIGHTS)
+
+# in maybe_set_weights:
+chain = state.recent_king_chain(KING_CHAIN_DEPTH)
+ranked_hotkeys = [e["hotkey"] for e in chain
+                  if e["hotkey"] in state.uid_map]
+ranked_weights = _normalize_weights(TOPK_WEIGHTS, len(ranked_hotkeys))
 ```
 
-So the entire emission share that flows to validator-set miner weights goes to
-the single reigning miner. Weights are re-asserted at least every
-`WEIGHT_INTERVAL = 300` blocks so that even without dethrones the chain keeps
-crediting the current king.
+Behavior:
+
+- Cold-start / first reign: chain has 1 hotkey → `_normalize_weights` collapses
+  to `[1.0]`, so the current king receives 100% (matches old behavior).
+- After 1, 2, 3, 4 dethrones: payout fans out as `[1.0]`, `[0.5, 0.5]`,
+  `[0.33, 0.33, 0.33]`, `[0.25, 0.25, 0.25, 0.25]`, then steady-state
+  `[0.2, 0.2, 0.2, 0.2, 0.2]`.
+- Hotkeys missing from the live metagraph (deregistered) are dropped before
+  normalization, and the remaining slots renormalize to sum to 1.
+- The chain is dedup'd by hotkey so a king who reclaims the throne doesn't
+  double-dip.
+- Re-crowning the same hotkey (e.g. the per-`WEIGHT_INTERVAL` weight refresh
+  hits `set_king` with the same king) is a no-op for the chain; only true
+  hotkey transitions push a new ancestor.
+
+Weights are re-asserted at least every `WEIGHT_INTERVAL = 300` blocks so the
+chain keeps crediting the rolling-5 set.
 
 **Cost.** A miner pays:
 
@@ -227,6 +248,14 @@ wired into `eval_server.py`'s production path.
 
 ## 7. Defenses and edge cases
 
+- **Immediate king promotion.** On every accepted verdict the validator
+  promotes the challenger to king inside `process_challenge` (compute new
+  `king_hash`, call `set_king`, reset score window, force a weight set). This
+  guarantees the next challenger in the same weight-set window faces the new
+  frontier — not the king from the start of the window. Previously the king
+  only rotated at `WEIGHT_INTERVAL` (300-block) boundaries, which let multiple
+  challengers all clear `delta` against the same starting king inside one
+  interval.
 - **Self-challenge.** If `reveal.hotkey == state.king.hotkey` the validator
   silently drops the entry in `State.enqueue` and again in
   `process_challenge`.
@@ -304,8 +333,13 @@ wired into `eval_server.py`'s production path.
 
 ## 8. Game-theoretic properties of the current design
 
-- **Winner-take-all.** All weight goes to one hotkey. There is no partial
-  credit, no second-place pool, no streak bonus.
+- **Rolling 5-king payout.** Stake-weight is split equally across the last 5
+  distinct kings (`1/5` each at steady state). Recently dethroned miners
+  retain a residual emission stream for the next 4 dethrones, smoothing the
+  step function from "100%" to "0%" the moment you lose. There is still no
+  scoreboard-based partial credit for losing challengers, no streak bonus,
+  and any king who is deregistered is dropped before normalization (the
+  remaining slots renormalize to sum to 1).
 - **Strictly-better-than-king barrier.** The `delta` floor guarantees a true
   effect, not just statistical significance, so a miner cannot grind tiny
   noise wins.

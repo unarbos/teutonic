@@ -9,8 +9,8 @@ Usage:
 
 The current king and the historical reject list (the knsimon/Teutonic-I-3xxxx
 series and the iotaminer trick variants) should produce a clear bimodal
-separation: honest models with delta < 0.5, trick models with delta > 50 or
-non-finite.
+separation: honest models pass all 5 layers, trick models trip Layer 1
+(norm cap) or Layer 3/4 (grad cap).
 """
 import argparse
 import gc
@@ -21,12 +21,33 @@ import time
 
 import torch
 
-# Ensure we can import eval_torch from teutonic/
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEUTONIC_DIR = os.path.dirname(HERE)
 sys.path.insert(0, TEUTONIC_DIR)
 
-from eval_torch import load_model, trainability_probe  # noqa: E402
+# Probe knobs are read at eval_torch import time, so any --seeds / --grad-norm-max
+# overrides must be applied to os.environ before importing trainability_probe.
+_pre = argparse.ArgumentParser(add_help=False)
+_pre.add_argument("--seeds", type=int, default=None)
+_pre.add_argument("--norm-weight-max", type=float, default=None)
+_pre.add_argument("--grad-norm-max", type=float, default=None)
+_pre.add_argument("--param-group-grad-max", type=float, default=None)
+_pre_args, _ = _pre.parse_known_args()
+if _pre_args.seeds is not None:
+    os.environ["TEUTONIC_PROBE_SEEDS"] = str(_pre_args.seeds)
+if _pre_args.norm_weight_max is not None:
+    os.environ["TEUTONIC_FINETUNE_NORM_WEIGHT_MAX"] = str(_pre_args.norm_weight_max)
+if _pre_args.grad_norm_max is not None:
+    os.environ["TEUTONIC_FINETUNE_GRAD_NORM_MAX"] = str(_pre_args.grad_norm_max)
+if _pre_args.param_group_grad_max is not None:
+    os.environ["TEUTONIC_FINETUNE_PARAM_GROUP_GRAD_MAX"] = str(_pre_args.param_group_grad_max)
+
+from eval_torch import (  # noqa: E402
+    load_model, trainability_probe,
+    FINETUNE_NORM_WEIGHT_MAX, FINETUNE_GRAD_NORM_MAX,
+    FINETUNE_PARAM_GROUP_GRAD_MAX,
+    PROBE_SEEDS, PROBE_BATCH, PROBE_SEQ_LEN,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,15 +112,26 @@ def fmt(v) -> str:
     return str(v)
 
 
+def _max_group(r: dict):
+    g = r.get("param_group_grad_norms") or {}
+    if not g:
+        return None
+    finite = [v for v in g.values() if isinstance(v, (int, float))
+              and v == v and v not in (float("inf"), float("-inf"))]
+    return max(finite) if finite else None
+
+
 def print_row(label: str, r: dict):
     if "error" in r:
         print(f"  {label:30s} {r['repo']:48s}  ERROR: {r['error']}")
         return
     print(f"  {label:30s} {r['repo']:48s} "
-          f"before={fmt(r['loss_before']):>10s} "
-          f"after={fmt(r['loss_after']):>10s} "
-          f"delta={fmt(r['delta']):>10s} "
+          f"max_norm_w={fmt(r.get('max_norm_weight')):>10s} "
+          f"global_grad={fmt(r.get('global_grad_norm')):>11s} "
+          f"max_group={fmt(_max_group(r)):>11s} "
+          f"nq={fmt(r.get('norm_quantization')):>8s} "
           f"ok={r['ok']!s:5s} "
+          f"reason={(r.get('reason') or '')[:48]:48s} "
           f"({r['elapsed_s']:.1f}s)")
 
 
@@ -108,7 +140,20 @@ def main():
     ap.add_argument("--gpu", type=int, default=0)
     ap.add_argument("--repos", nargs="*", default=None,
                     help="Override repo list. Default: built-in known-good + known-trick.")
+    ap.add_argument("--seeds", type=int, default=None,
+                    help="Independent random batches (overrides TEUTONIC_PROBE_SEEDS).")
+    ap.add_argument("--norm-weight-max", type=float, default=None,
+                    help="LN/RMSNorm |w|.max() cap (overrides TEUTONIC_FINETUNE_NORM_WEIGHT_MAX).")
+    ap.add_argument("--grad-norm-max", type=float, default=None,
+                    help="Global ||grad||_2 cap (overrides TEUTONIC_FINETUNE_GRAD_NORM_MAX).")
+    ap.add_argument("--param-group-grad-max", type=float, default=None,
+                    help="Per-group ||grad||_2 cap (overrides TEUTONIC_FINETUNE_PARAM_GROUP_GRAD_MAX).")
     args = ap.parse_args()
+    log.info("probe knobs: seeds=%d batch=%d seq_len=%d "
+             "norm_weight_max=%.2f grad_norm_max=%.1f param_group_grad_max=%.1f",
+             PROBE_SEEDS, PROBE_BATCH, PROBE_SEQ_LEN,
+             FINETUNE_NORM_WEIGHT_MAX, FINETUNE_GRAD_NORM_MAX,
+             FINETUNE_PARAM_GROUP_GRAD_MAX)
 
     device = f"cuda:{args.gpu}"
     if not torch.cuda.is_available():
@@ -121,39 +166,76 @@ def main():
 
     results = []
     print(f"\nProbing {len(repos)} repos on {device}\n")
-    print("=" * 130)
+    print("=" * 160)
     for repo, label in repos:
         r = probe_repo(repo, device)
         r["label"] = label
         results.append(r)
         print_row(label, r)
-    print("=" * 130)
+    print("=" * 160)
 
     good = [r for r in results if r.get("label") == "GOOD" and "error" not in r]
     trick = [r for r in results if r.get("label") == "TRICK" and "error" not in r]
 
-    def _stats(rs, key):
-        vals = [r[key] for r in rs if r[key] == r[key] and r[key] not in (float("inf"), float("-inf"))]
+    def _finite_vals(rs, key, derive=None):
+        vals = []
+        for r in rs:
+            v = derive(r) if derive else r.get(key)
+            if v is None:
+                continue
+            if isinstance(v, float):
+                if v != v or v in (float("inf"), float("-inf")):
+                    continue
+            vals.append(v)
+        return vals
+
+    def _stats(vals):
         if not vals:
             return "no finite values"
         return f"min={min(vals):+.4f} max={max(vals):+.4f}"
 
-    print(f"\nGOOD models  delta: {_stats(good, 'delta')}")
-    print(f"TRICK models delta: {_stats(trick, 'delta')}")
+    for key, derive in (
+        ("max_norm_weight", None),
+        ("global_grad_norm", None),
+        ("max_group_grad", _max_group),
+        ("norm_quantization", None),
+    ):
+        print(f"\nGOOD  {key:>20s}: {_stats(_finite_vals(good, key, derive))}")
+        print(f"TRICK {key:>20s}: {_stats(_finite_vals(trick, key, derive))}")
 
-    good_max = max((r["delta"] for r in good
-                    if r["delta"] == r["delta"] and r["delta"] not in (float("inf"), float("-inf"))),
-                   default=None)
-    trick_min = min((r["delta"] for r in trick
-                     if r["delta"] == r["delta"] and r["delta"] not in (float("inf"), float("-inf"))),
-                    default=None)
-    if good_max is not None and trick_min is not None and good_max < trick_min:
-        suggested = (good_max + trick_min) / 2
-        print(f"\nSuggested PROBE_LOSS_DELTA_ABS: {suggested:.2f} "
-              f"(midpoint of GOOD max {good_max:.4f} and TRICK min {trick_min:.4f})")
-    else:
-        print("\nGap is fuzzy or one cohort missing finite values. Inspect "
-              "rows above and pick a threshold by hand.")
+    print(f"\nGOOD  ok={sum(1 for r in good if r.get('ok'))}/{len(good)}  "
+          f"TRICK ok={sum(1 for r in trick if r.get('ok'))}/{len(trick)}")
+
+    def _suggest(name, env_var, good_vals, trick_vals, factor=2.0):
+        if not good_vals or not trick_vals:
+            print(f"  {name}: insufficient data for both cohorts")
+            return
+        gmax = max(good_vals)
+        tmin = min(trick_vals)
+        if gmax >= tmin:
+            print(f"  {name}: GOOD max {gmax:.4g} >= TRICK min {tmin:.4g} — "
+                  f"cohorts overlap, no clean threshold")
+            return
+        midpoint = (gmax + tmin) / 2
+        safe_floor = gmax * factor
+        suggested = max(midpoint, safe_floor)
+        print(f"  Suggested {env_var}={suggested:.4g} "
+              f"(GOOD max {gmax:.4g}, TRICK min {tmin:.4g}, "
+              f"midpoint {midpoint:.4g}, {factor}x safety {safe_floor:.4g})")
+
+    print("\n--- Suggested thresholds (calibrated against current cohorts) ---")
+    _suggest("norm weight cap", "TEUTONIC_FINETUNE_NORM_WEIGHT_MAX",
+             _finite_vals(good, "max_norm_weight"),
+             _finite_vals(trick, "max_norm_weight"),
+             factor=3.0)
+    _suggest("global grad cap", "TEUTONIC_FINETUNE_GRAD_NORM_MAX",
+             _finite_vals(good, "global_grad_norm"),
+             _finite_vals(trick, "global_grad_norm"),
+             factor=2.0)
+    _suggest("per-group grad cap", "TEUTONIC_FINETUNE_PARAM_GROUP_GRAD_MAX",
+             _finite_vals(good, "max_group_grad", _max_group),
+             _finite_vals(trick, "max_group_grad", _max_group),
+             factor=2.0)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from eval_torch import (
     R2, MultiGPUEvaluator, run_bootstrap_test, parse_gpu_ids,
-    trainability_probe,
+    trainability_probe, load_model,
 )
 
 log = logging.getLogger("eval_server")
@@ -88,6 +88,11 @@ app = FastAPI(lifespan=lifespan)
 # Models
 # ---------------------------------------------------------------------------
 
+class ProbeRequest(BaseModel):
+    repo: str
+    revision: str = ""
+
+
 class EvalRequest(BaseModel):
     king_repo: str
     challenger_repo: str
@@ -144,11 +149,20 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
         king_model = new_king.models[new_king.gpu_ids[0]]
         t0 = time.time()
         probe = trainability_probe(king_model)
-        log.info("king trainability probe for %s: ok=%s before=%.4f "
-                 "after=%.4f delta=%.4f (%.1fs)",
+        log.info("king trainability probe for %s: ok=%s "
+                 "max_ratio=%.3f max_grad=%.2e min_before=%.4f "
+                 "max_after=%.4f norm_quant=%s seeds=%d steps=%d (%.1fs)",
                  repo, probe["ok"],
-                 probe["loss_before"], probe["loss_after"], probe["delta"],
+                 probe.get("max_ratio", float("nan")),
+                 probe.get("max_grad_norm", float("nan")),
+                 probe.get("min_loss_before", float("nan")),
+                 probe.get("max_loss_after", float("nan")),
+                 probe.get("norm_quantization"),
+                 probe.get("n_seeds", 0),
+                 probe.get("n_steps_per_seed", 0),
                  time.time() - t0)
+        for w in probe.get("warnings", []) or []:
+            log.warning("king %s probe warning: %s", repo, w)
         if not probe["ok"]:
             log.error("KING TRAINABILITY PROBE FAILED for %s: %s. "
                       "Refusing to load this king. Operator intervention required.",
@@ -299,11 +313,21 @@ def _run_eval(eval_id: str, req: EvalRequest):
             chall_model = challenger_eval.models[challenger_eval.gpu_ids[0]]
             t0 = time.time()
             probe = trainability_probe(chall_model)
-            log.info("trainability probe for %s: ok=%s before=%.4f after=%.4f "
-                     "delta=%.4f (%.1fs)",
+            log.info("trainability probe for %s: ok=%s "
+                     "max_ratio=%.3f max_grad=%.2e min_before=%.4f "
+                     "max_after=%.4f norm_quant=%s seeds=%d steps=%d (%.1fs)",
                      req.challenger_repo, probe["ok"],
-                     probe["loss_before"], probe["loss_after"], probe["delta"],
+                     probe.get("max_ratio", float("nan")),
+                     probe.get("max_grad_norm", float("nan")),
+                     probe.get("min_loss_before", float("nan")),
+                     probe.get("max_loss_after", float("nan")),
+                     probe.get("norm_quantization"),
+                     probe.get("n_seeds", 0),
+                     probe.get("n_steps_per_seed", 0),
                      time.time() - t0)
+            for w in probe.get("warnings", []) or []:
+                log.warning("challenger %s probe warning: %s",
+                            req.challenger_repo, w)
             if not probe["ok"]:
                 log.warning("trainability probe REJECTED %s: %s",
                             req.challenger_repo, probe["reason"])
@@ -320,6 +344,14 @@ def _run_eval(eval_id: str, req: EvalRequest):
                         "loss_before": probe["loss_before"],
                         "loss_after": probe["loss_after"],
                         "delta": probe["delta"],
+                        "max_ratio": probe.get("max_ratio"),
+                        "max_grad_norm": probe.get("max_grad_norm"),
+                        "min_loss_before": probe.get("min_loss_before"),
+                        "max_loss_after": probe.get("max_loss_after"),
+                        "n_seeds": probe.get("n_seeds"),
+                        "n_steps_per_seed": probe.get("n_steps_per_seed"),
+                        "norm_quantization": probe.get("norm_quantization"),
+                        "warnings": probe.get("warnings", []),
                     },
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
@@ -417,6 +449,87 @@ def _watchdog(eval_id: str, deadline: float):
         _eval_lock.release()
     except RuntimeError:
         pass
+
+
+def _run_probe_blocking(repo: str, revision: str) -> dict:
+    """Load `repo`@`revision` on a single GPU, run the trainability probe,
+    free everything, return the probe verdict.
+
+    Does NOT touch the cached king evaluator. Caller must hold `_eval_lock`
+    (so this can't collide with a live eval that would compete for VRAM).
+    """
+    if not _gpu_ids:
+        raise RuntimeError("no GPUs available on eval server")
+
+    probe_gpu = _gpu_ids[-1]
+    device = f"cuda:{probe_gpu}"
+    log.info("probe: loading %s@%s on %s", repo, (revision or "HEAD")[:12], device)
+    t0 = time.time()
+    model = None
+    try:
+        model = load_model(repo, device, label=f"probe-{repo}",
+                           force_download=False,
+                           revision=revision or None)
+        load_s = time.time() - t0
+        t1 = time.time()
+        verdict = trainability_probe(model)
+        probe_s = time.time() - t1
+        log.info("probe: %s ok=%s max_ratio=%.3f max_grad=%.2e "
+                 "norm_quant=%s (load=%.1fs probe=%.1fs)",
+                 repo, verdict["ok"],
+                 verdict.get("max_ratio", float("nan")),
+                 verdict.get("max_grad_norm", float("nan")),
+                 verdict.get("norm_quantization"),
+                 load_s, probe_s)
+        for w in verdict.get("warnings", []) or []:
+            log.warning("probe %s warning: %s", repo, w)
+        verdict["timing"] = {
+            "load_s": round(load_s, 2),
+            "probe_s": round(probe_s, 2),
+            "total_s": round(time.time() - t0, 2),
+        }
+        verdict["repo"] = repo
+        verdict["revision"] = revision
+        return verdict
+    finally:
+        if model is not None:
+            del model
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+@app.post("/probe")
+async def probe_endpoint(req: ProbeRequest):
+    """Out-of-band trainability probe on an arbitrary repo+revision.
+
+    Used by the validator to periodically reprobe the incumbent king
+    (see audit_incumbent_king in validator.py) without going through a
+    full eval. Acquires `_eval_lock` so it can't race with an in-flight
+    /eval call competing for the same GPUs.
+    """
+    if not req.repo:
+        raise HTTPException(status_code=400, detail="repo is required")
+    acquired = _eval_lock.acquire(blocking=False)
+    if not acquired:
+        raise HTTPException(status_code=409, detail="an eval is already running")
+    try:
+        loop = asyncio.get_running_loop()
+        verdict = await loop.run_in_executor(
+            None, _run_probe_blocking, req.repo, req.revision,
+        )
+        return verdict
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("probe failed for %s", req.repo)
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        try:
+            _eval_lock.release()
+        except RuntimeError:
+            pass
 
 
 @app.post("/eval")
