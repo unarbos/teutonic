@@ -851,6 +851,13 @@ function render(d) {
     } else {
         hb.innerHTML = history.map(function(h) {
             var isErr = h.verdict === "error";
+            // Probe-rejected challengers never reach the bootstrap test, so
+            // mu_hat/lcb/avg_*_loss are all 0 by default. Detect this so we
+            // don't render a bogus "KING wins 0.000000" row.
+            var isProbeReject = !isErr && !h.accepted && !!h.rejection_reason;
+            // Skip rendering bootstrap stats for any verdict that didn't
+            // actually run a bootstrap test (errors + probe-fails).
+            var hasStats = !isErr && !isProbeReject;
             var kl = h.avg_king_loss || 0;
             var cl = h.avg_challenger_loss || 0;
             var repo = h.challenger_repo || "--";
@@ -869,23 +876,27 @@ function render(d) {
                 tip = tip.replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
                 var label = errInfo ? errInfo.title.toUpperCase() : "ERROR";
                 verdictCell = '<td title="' + tip + '" style="color:#c22;cursor:help">' + label + '</td>';
+            } else if (isProbeReject) {
+                var rrTip = String(h.rejection_reason || "untrainable")
+                    .replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+                verdictCell = '<td title="' + rrTip + '" style="color:#c22;cursor:help">UNTRAINABLE</td>';
             } else {
                 verdictCell = '<td>' + (h.accepted ? "CHALLENGER" : "KING") + '</td>';
             }
 
             var ago = timeAgo(h.timestamp);
             var fullTs = h.timestamp ? new Date(h.timestamp).toUTCString() : "";
-            if (!isErr && h.wall_time_s) ago += " (" + h.wall_time_s.toFixed(0) + "s)";
+            if (hasStats && h.wall_time_s) ago += " (" + h.wall_time_s.toFixed(0) + "s)";
 
             return '<tr>' +
                 '<td>' + uid + '</td>' +
                 '<td>' + repoLink + '</td>' +
                 '<td>' + (h.hotkey ? '<a href="https://taomarketcap.com/hotkey/' + h.hotkey + '/mining_hotkeys" target="_blank" style="color:var(--ink)">' + short(h.hotkey, 16) + '</a>' : '--') + '</td>' +
                 verdictCell +
-                '<td>' + (isErr ? "--" : (h.mu_hat || 0).toFixed(6)) + '</td>' +
-                '<td>' + (isErr ? "--" : (h.lcb || 0).toFixed(6)) + '</td>' +
-                '<td>' + (isErr ? "--" : kl.toFixed(4)) + '</td>' +
-                '<td>' + (isErr ? "--" : cl.toFixed(4)) + '</td>' +
+                '<td>' + (hasStats ? (h.mu_hat || 0).toFixed(6) : "--") + '</td>' +
+                '<td>' + (hasStats ? (h.lcb || 0).toFixed(6) : "--") + '</td>' +
+                '<td>' + (hasStats ? kl.toFixed(4) : "--") + '</td>' +
+                '<td>' + (hasStats ? cl.toFixed(4) : "--") + '</td>' +
                 '<td title="' + fullTs + '">' + ago + '</td>' +
                 '</tr>';
         }).join("");
