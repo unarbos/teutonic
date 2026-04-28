@@ -55,7 +55,7 @@ HEALTHCHECK_INTERVAL = int(os.environ.get("TEUTONIC_HEALTHCHECK_INTERVAL", "60")
 STATE_FLUSH_INTERVAL = int(os.environ.get("TEUTONIC_STATE_FLUSH_INTERVAL", "60"))
 MAX_CONSECUTIVE_TICK_ERRORS = int(os.environ.get("TEUTONIC_MAX_CONSECUTIVE_TICK_ERRORS", "10"))
 NETWORK = os.environ.get("TEUTONIC_NETWORK", "finney")
-SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-III")
+SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-VIII")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 EVAL_SERVER_URL = os.environ.get("TEUTONIC_EVAL_SERVER", "http://localhost:9000")
 WALLET_NAME = os.environ.get("BT_WALLET_NAME", "teutonic")
@@ -81,7 +81,7 @@ TMC_API_KEY = os.environ.get("TMC_API_KEY", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
-REPO_PATTERN = r"^[^/]+/Teutonic-III-.+$"
+REPO_PATTERN = r"^[^/]+/Teutonic-VIII-.+$"
 
 # Magnitude/ratio sanity checks have been removed in favor of a single
 # first-principles trainability probe that runs on the eval server (see

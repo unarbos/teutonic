@@ -9,7 +9,7 @@
 # 6. Write a status report to .arbos/outbox/.
 #
 # Usage:
-#   ./run_pipeline.sh start [--hotkey h0] [--upload-repo unconst/Teutonic-III-h0]
+#   ./run_pipeline.sh start [--hotkey h0] [--upload-repo unconst/Teutonic-VIII-h0]
 #   ./run_pipeline.sh tail
 #   ./run_pipeline.sh status
 #   ./run_pipeline.sh fetch        # pull verdict only
@@ -25,7 +25,7 @@ VERDICT_REMOTE="$REMOTE_DIR/work/verdict.json"
 VERDICT_LOCAL="$ROOT/reports/teutonic-mining/verdict.json"
 LOG_REMOTE="$REMOTE_DIR/work/train.log"
 HOTKEY="${HOTKEY:-h0}"
-UPLOAD_REPO="${UPLOAD_REPO:-unconst/Teutonic-III-h0}"
+UPLOAD_REPO="${UPLOAD_REPO:-unconst/Teutonic-VIII-h0}"
 
 ssh_run() { ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=no "$REMOTE_HOST" "$@"; }
 

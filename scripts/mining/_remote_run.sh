@@ -7,7 +7,7 @@ export HF_TOKEN="$(cat .hf_token)"
 exec ./venv/bin/python -u train_challenger.py \
   --work /root/teutonic-mining/work \
   --bundle /root/teutonic-mining/bundle \
-  --upload-repo "${UPLOAD_REPO:-unconst/Teutonic-III-h0}" \
+  --upload-repo "${UPLOAD_REPO:-unconst/Teutonic-VIII-h0}" \
   --report-out /root/teutonic-mining/work/verdict.json \
   --hf-token "$HF_TOKEN" \
   --n-shards 2 \

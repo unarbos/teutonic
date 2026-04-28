@@ -31,12 +31,12 @@ log = logging.getLogger("miner")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 DASHBOARD_URL = os.environ.get("TEUTONIC_DASHBOARD_URL",
     "https://s3.hippius.com/teutonic-sn3/dashboard.json")
-SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-III")
+SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-VIII")
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
 NETWORK = os.environ.get("TEUTONIC_NETWORK", "finney")
 WALLET_NAME = os.environ.get("BT_WALLET_NAME", "teutonic")
 
-REPO_PATTERN = re.compile(r"^[^/]+/Teutonic-III-.+$")
+REPO_PATTERN = re.compile(r"^[^/]+/Teutonic-VIII-.+$")
 
 CONFIG_MATCH_KEYS = (
     "vocab_size", "hidden_size", "num_hidden_layers",
@@ -101,7 +101,7 @@ def main():
     args = parser.parse_args()
 
     suffix = args.suffix or args.hotkey
-    challenger_repo = f"unconst/Teutonic-III-{suffix}"
+    challenger_repo = f"unconst/Teutonic-VIII-{suffix}"
 
     log.info("miner starting | hotkey=%s repo=%s noise=%.4f", args.hotkey, challenger_repo, args.noise)
 

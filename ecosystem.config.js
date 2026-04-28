@@ -28,7 +28,7 @@ module.exports = {
     cwd: "/home/const/workspace/teutonic",
     env: {
       TEUTONIC_EVAL_SERVER: "http://localhost:9000",
-      TEUTONIC_SEED_REPO: "unconst/Teutonic-III",
+      TEUTONIC_SEED_REPO: "unconst/Teutonic-VIII",
       HF_TOKEN: dopplerPrd("HF_TOKEN"),
       TEUTONIC_NETUID: "3",
       TEUTONIC_NETWORK: "finney",
@@ -54,11 +54,11 @@ module.exports = {
       // this defensively before importing huggingface_hub, but having it in
       // the env makes it explicit for any subprocess we spawn too.
       HF_HUB_DISABLE_XET: "1",
-      // Each Teutonic-III eval takes ~250s of bootstrap + setup + busy-wait
-      // for the eval-server lock. A single tick can legitimately take
-      // 7-15 minutes when the server is saturated; default 600s was tripping
-      // the watchdog on every successful eval.
-      TEUTONIC_TICK_RESTART_AFTER: "1800",
+      // Each Teutonic-VIII eval is ~2.4x larger than Teutonic-III's ~250s,
+      // i.e. ~600s of bootstrap + setup + busy-wait for the eval-server lock.
+      // A single tick can legitimately take 10-20 minutes when the server is
+      // saturated; bumped from 1800 -> 2700 to give 8B evals headroom.
+      TEUTONIC_TICK_RESTART_AFTER: "2700",
       TEUTONIC_MAX_CONSECUTIVE_TICK_ERRORS: "20",
     },
     // Bumped from 10 → 1000 after 2026-04-26 incident: PM2 gave up on the

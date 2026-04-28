@@ -23,7 +23,7 @@ from huggingface_hub import HfApi
 
 EVAL_SERVER = os.environ.get("TEUTONIC_EVAL_SERVER", "http://localhost:9000")
 PROBE_TIMEOUT_S = int(os.environ.get("TEUTONIC_PROBE_TIMEOUT_S", "600"))
-SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-III")
+SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-VIII")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 R2_ENDPOINT = os.environ["TEUTONIC_R2_ENDPOINT"]
