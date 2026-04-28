@@ -74,7 +74,11 @@ async def lifespan(app: FastAPI):
     _gpu_ids = parse_gpu_ids(os.environ.get("EVAL_GPUS", "auto"))
     log.info("eval server starting with GPUs: %s", _gpu_ids)
     _r2 = R2()
-    _cleanup_hf_cache()
+    # NOTE: don't cleanup on startup — the cache may hold the current king from
+    # a previous run, and re-downloading 16GB takes ~3min. After-eval cleanup
+    # (in run_eval) keeps disk usage bounded between evals.
+    if os.environ.get("EVAL_CLEANUP_ON_STARTUP", "0") == "1":
+        _cleanup_hf_cache()
     yield
     log.info("eval server shutting down")
     if _king_evaluator:
@@ -197,40 +201,67 @@ def _load_challenger(repo: str, revision: str = ""):
 MAX_EVALS_KEPT = 50
 EVAL_MAX_AGE_S = 3600
 
+CACHE_HIGH_WATERMARK_GB = float(os.environ.get("HF_CACHE_HIGH_WATERMARK_GB", "200"))
+
+
 def _cleanup_hf_cache():
-    """Delete HF cached models that aren't the current king."""
+    """Delete HF cached models, keeping the current king and recently
+    preloaded challengers. Only acts above CACHE_HIGH_WATERMARK_GB so that
+    speculative /preload downloads aren't immediately wiped between evals.
+    """
     try:
         from huggingface_hub import scan_cache_dir
         cache_info = scan_cache_dir()
 
+        cache_gb = cache_info.size_on_disk / 1e9
+        if cache_gb < CACHE_HIGH_WATERMARK_GB:
+            log.debug("hf cache cleanup skipped: %.1f GB < watermark %.1f GB",
+                      cache_gb, CACHE_HIGH_WATERMARK_GB)
+            return
+
         keep_repo = _king_repo
         keep_rev = _king_revision
+        # Anything preloaded within the last PRELOAD_KEEP_S seconds should
+        # survive cleanup, otherwise we wipe the speculative download for
+        # the next eval. Older entries fall out of the keep window so the
+        # set doesn't grow unboundedly across long-running servers.
+        now = time.time()
+        with _preload_lock:
+            preload_repos: set[str] = {
+                repo for (repo, _rev), ts in _preload_seen.items()
+                if now - ts < PRELOAD_KEEP_S
+            }
         hashes_to_delete = []
 
+        # Sort revisions by last_accessed; oldest first. We delete oldest
+        # until we're back under watermark.
+        all_revs = []
         for repo_info in cache_info.repos:
-            repo_id = repo_info.repo_id
-            if repo_id == keep_repo:
-                for rev_info in repo_info.revisions:
-                    if keep_rev and rev_info.commit_hash == keep_rev:
-                        continue
-                    hashes_to_delete.append(rev_info.commit_hash)
-                    log.info("marking for deletion: %s rev %s (%.1f MB)",
-                             repo_id, rev_info.commit_hash[:12],
-                             rev_info.size_on_disk / 1e6)
-            else:
-                for rev_info in repo_info.revisions:
-                    hashes_to_delete.append(rev_info.commit_hash)
-                    log.info("marking for deletion: %s rev %s (%.1f MB)",
-                             repo_id, rev_info.commit_hash[:12],
-                             rev_info.size_on_disk / 1e6)
+            for rev_info in repo_info.revisions:
+                all_revs.append((rev_info.last_accessed, repo_info.repo_id, rev_info))
+        all_revs.sort()
+
+        running_total = cache_info.size_on_disk
+        for _last, repo_id, rev_info in all_revs:
+            if running_total / 1e9 < CACHE_HIGH_WATERMARK_GB * 0.7:
+                break  # leave 30 percent headroom below watermark
+            if repo_id == keep_repo and (not keep_rev or rev_info.commit_hash == keep_rev):
+                continue
+            short = (rev_info.commit_hash or "")[:12]
+            if repo_id in preload_repos:
+                continue
+            hashes_to_delete.append(rev_info.commit_hash)
+            running_total -= rev_info.size_on_disk
+            log.info("marking for deletion: %s rev %s (%.1f MB)",
+                     repo_id, short, rev_info.size_on_disk / 1e6)
 
         if not hashes_to_delete:
-            log.info("hf cache cleanup: nothing to delete")
+            log.info("hf cache cleanup: above watermark but nothing eligible to delete")
             return
 
         strategy = cache_info.delete_revisions(*hashes_to_delete)
-        log.info("hf cache cleanup: deleting %d revisions, freeing %.1f MB",
-                 len(hashes_to_delete), strategy.expected_freed_size / 1e6)
+        log.info("hf cache cleanup: deleting %d revisions, freeing %.1f MB (cache was %.1f GB)",
+                 len(hashes_to_delete), strategy.expected_freed_size / 1e6, cache_gb)
         strategy.execute()
         log.info("hf cache cleanup: done")
 
@@ -498,6 +529,58 @@ def _run_probe_blocking(repo: str, revision: str) -> dict:
             torch.cuda.empty_cache()
         except Exception:
             pass
+
+
+# Track in-flight preloads so /preload is idempotent (multiple validator
+# nudges for the same repo coalesce to one background download).
+_preload_threads: dict[str, threading.Thread] = {}
+_preload_lock = threading.Lock()
+# (repo, revision) -> wall-clock timestamp the preload was issued. Used by
+# _cleanup_hf_cache to keep speculative downloads alive long enough to be
+# consumed by the next /eval call. Entries older than PRELOAD_KEEP_S are
+# eligible for cleanup (treated as stale).
+_preload_seen: dict[tuple[str, str], float] = {}
+PRELOAD_KEEP_S = float(os.environ.get("HF_PRELOAD_KEEP_S", "1800"))
+
+
+class PreloadRequest(BaseModel):
+    repo: str
+    revision: str = ""
+
+
+@app.post("/preload")
+async def preload_endpoint(req: PreloadRequest):
+    """Speculatively download a model to the HF cache, in the background.
+
+    Used by the validator to warm the next-in-queue challenger while the
+    current eval is busy on the GPUs. No GPU work, no eval lock contention —
+    just hits the network. Idempotent per (repo, revision).
+    """
+    if not req.repo:
+        raise HTTPException(status_code=400, detail="repo is required")
+    key = f"{req.repo}@{(req.revision or 'main')[:12]}"
+    with _preload_lock:
+        existing = _preload_threads.get(key)
+        if existing and existing.is_alive():
+            _preload_seen[(req.repo, req.revision or "")] = time.time()
+            return {"status": "already_running", "key": key}
+
+        from eval_torch import _prefetch_repo
+
+        def _do():
+            t0 = time.time()
+            try:
+                _prefetch_repo(req.repo, revision=req.revision or None,
+                               timeout=int(os.environ.get("HF_PREFETCH_TIMEOUT", "600")))
+                log.info("preload complete: %s (%.1fs)", key, time.time() - t0)
+            except Exception as e:
+                log.warning("preload failed for %s: %s", key, e)
+
+        t = threading.Thread(target=_do, daemon=True, name=f"preload-{req.repo[:32]}")
+        t.start()
+        _preload_threads[key] = t
+        _preload_seen[(req.repo, req.revision or "")] = time.time()
+    return {"status": "started", "key": key}
 
 
 @app.post("/probe")

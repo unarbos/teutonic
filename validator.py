@@ -38,7 +38,7 @@ from huggingface_hub import HfApi
 # Config
 # ---------------------------------------------------------------------------
 
-EVAL_N = 20_000
+EVAL_N = 10_000
 EVAL_ALPHA = 0.001
 EVAL_DELTA = float(os.environ.get("TEUTONIC_EVAL_DELTA", "0.01"))
 SEQ_LEN = 2048
@@ -1939,6 +1939,36 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         state.flush_dashboard(force=True)
         log.info("eval %s dispatched to eval server as %s", cid, eval_id)
 
+        # Fire-and-forget speculative prefetch of the NEXT-in-queue challenger
+        # once the current eval reaches bootstrap (first progress event). By
+        # then the eval server has finished downloading the current challenger,
+        # so the network is free; the next eval's HF cache will be warm by the
+        # time we dispatch it, saving ~3 min per eval on Targon.
+        preload_fired = False
+
+        async def _fire_preload():
+            if not state.queue:
+                return
+            nxt = state.queue[0]
+            nxt_repo = nxt.get("hf_repo") or ""
+            nxt_rev = nxt.get("revision") or nxt.get("challenger_revision") or ""
+            if not nxt_repo:
+                return
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as preload_client:
+                    pr = await preload_client.post(
+                        f"{EVAL_SERVER_URL}/preload",
+                        json={"repo": nxt_repo, "revision": nxt_rev},
+                    )
+                    if pr.status_code == 200:
+                        log.info("%s: requested preload of next challenger %s@%s (%s)",
+                                 cid, nxt_repo, nxt_rev[:12] if nxt_rev else "main",
+                                 pr.json().get("status", "?"))
+                    else:
+                        log.warning("%s: preload nudge returned %s", cid, pr.status_code)
+            except Exception as e:
+                log.warning("%s: preload nudge failed (non-fatal): %s", cid, e)
+
         async with client.stream("GET", f"{EVAL_SERVER_URL}/eval/{eval_id}/stream",
                                   timeout=httpx.Timeout(1800.0)) as stream:
             async for line in _stream_events_with_idle_watchdog(stream, state, cid):
@@ -1948,6 +1978,9 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
 
                 if event["type"] == "progress":
                     d = event["data"]
+                    if not preload_fired:
+                        preload_fired = True
+                        asyncio.create_task(_fire_preload())
                     state.note_progress(notes=f"eval {eval_id} progress {d.get('done', 0)}/{d.get('total', EVAL_N)}")
                     state.current_eval.update({
                         "progress": d.get("done", 0),

@@ -60,6 +60,15 @@ module.exports = {
       // saturated; bumped from 1800 -> 2700 to give 8B evals headroom.
       TEUTONIC_TICK_RESTART_AFTER: "2700",
       TEUTONIC_MAX_CONSECUTIVE_TICK_ERRORS: "20",
+      // The eval server stays silent on the SSE stream for the entire model
+      // download + load (no events emitted until bootstrap starts). For 8B
+      // models that gap is ~5-7 min wall, which trips the default 420s
+      // STREAM_IDLE_TIMEOUT and makes the validator throw away verdicts that
+      // would otherwise be valid (observed for vera6/Teutonic-VIII-v03 on
+      // 2026-04-28: server delivered mu_hat=5.28 LCB=5.27 but validator had
+      // already given up). 900s gives full margin even with cold HF caches.
+      TEUTONIC_STREAM_IDLE_TIMEOUT: "900",
+      TEUTONIC_STREAM_IDLE_WARN_AFTER: "300",
     },
     // Bumped from 10 → 1000 after 2026-04-26 incident: PM2 gave up on the
     // validator at restart #15 and the subnet ran without a validator for

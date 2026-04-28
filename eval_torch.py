@@ -292,7 +292,7 @@ def extract_sequences(shard_data, data_offset, indices, seq_len):
 # Chunked loss computation — avoids materializing full [batch, seq, vocab]
 # ---------------------------------------------------------------------------
 
-LM_HEAD_CHUNK = 256
+LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "512"))
 
 @torch.no_grad()
 def compute_batch_losses(model, token_batches, device, chunk_size=LM_HEAD_CHUNK):
