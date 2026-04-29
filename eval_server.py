@@ -233,12 +233,15 @@ def _cleanup_hf_cache():
             }
         hashes_to_delete = []
 
-        # Sort revisions by last_accessed; oldest first. We delete oldest
-        # until we're back under watermark.
+        # Sort revisions by last_modified (oldest first). We delete oldest
+        # until we're back under the watermark. Note: huggingface_hub's
+        # CachedRevisionInfo exposes `last_modified`, not `last_accessed`
+        # — using the wrong name silently broke this whole function and
+        # let the cache fill /tmp to 100% on 2026-04-29 before we noticed.
         all_revs = []
         for repo_info in cache_info.repos:
             for rev_info in repo_info.revisions:
-                all_revs.append((rev_info.last_accessed, repo_info.repo_id, rev_info))
+                all_revs.append((rev_info.last_modified, repo_info.repo_id, rev_info))
         all_revs.sort()
 
         running_total = cache_info.size_on_disk
