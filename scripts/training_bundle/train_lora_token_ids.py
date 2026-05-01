@@ -68,6 +68,8 @@ def main():
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
     ap.add_argument("--lora-dropout", type=float, default=0.05)
+    ap.add_argument("--lora-target-modules", type=str, default=None,
+                    help="comma-separated module name suffixes; defaults to a Quasar-aware set")
     args = ap.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
@@ -78,13 +80,24 @@ def main():
     )
     model.config.use_cache = False
 
+    # Quasar (Teutonic-XXIV) module names: attn uses q_proj/k_proj/v_proj/o_proj
+    # like Qwen3, but FFN paths split into the dense SwiGLU (ffn.gate / ffn.up
+    # / ffn.down) and BigMac MoE (shared_experts.{i}.{gate,up,down},
+    # w_down_proj, w_up_proj). LoRA on `experts_w12` / `experts_w3` is not
+    # supported — they are nn.Parameter blocks, not Linear layers. Override
+    # via --lora-target-modules if you want a custom set.
+    target_modules = args.lora_target_modules.split(",") if args.lora_target_modules else [
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate", "up", "down",
+        "w_down_proj", "w_up_proj",
+    ]
     lora_cfg = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=target_modules,
     )
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()

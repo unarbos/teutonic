@@ -1,0 +1,47 @@
+{
+  "benchmark": "ifeval",
+  "task_version": 4.0,
+  "harness": "lm-evaluation-harness 0.4.11",
+  "backend": "vllm 0.10.2",
+  "transformers": "4.55.4",
+  "date_utc": "2026-04-30T13:42:13Z",
+  "duration_seconds": 187,
+  "hardware": {
+    "gpu": "1xA100-SXM4-80GB",
+    "provider": "lium",
+    "pod_name": "arbos-ifeval",
+    "pod_huid": "lunar-raven-24",
+    "cost_usd_per_hour": 0.43
+  },
+  "model": {
+    "hf_repo": "iris-999/Teutonic-VIII-5GCPdbk3-v23x_r5s150_70-01",
+    "subnet_role": "current_king",
+    "reign_number": 38,
+    "hotkey_prefix": "5FP9RFSjzF2ANHNq",
+    "architecture": "Qwen3ForCausalLM",
+    "params_estimate_b": 8,
+    "weights_size_gb": 15,
+    "dtype": "bfloat16",
+    "max_model_len": 4096,
+    "gpu_memory_utilization": 0.85,
+    "chat_template": false,
+    "note": "Raw pretrained completion (no instruction tuning, no chat template available on the model)."
+  },
+  "n_samples": {"original": 541, "effective": 541},
+  "results": {
+    "prompt_level_strict_acc": 0.18114602587800369,
+    "prompt_level_strict_acc_stderr": 0.01657374894371447,
+    "prompt_level_loose_acc": 0.18853974121996303,
+    "prompt_level_loose_acc_stderr": 0.016832096060176906,
+    "inst_level_strict_acc": 0.3249400479616307,
+    "inst_level_loose_acc": 0.3333333333333333
+  },
+  "interpretation": {
+    "context": "IFEval measures verifiable instruction following (e.g. 'reply in 3 paragraphs', 'include the word X exactly twice'). Numbers below are completion-style (no chat template).",
+    "reference_points_completion_style": {
+      "Llama-3-8B-base": "~0.30 prompt_loose",
+      "Mistral-7B-base": "~0.21 prompt_loose"
+    },
+    "verdict": "King performs in the same range as a strong 7-8B base model. As expected for the Teutonic-VIII protocol (from-scratch pretraining, no instruction tune), it is not competitive with instruction-tuned chat models on IFEval (e.g. Llama-3-8B-Instruct ~0.74 prompt_loose)."
+  }
+}

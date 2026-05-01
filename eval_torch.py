@@ -5,13 +5,13 @@ Loads model replicas across all available GPUs, fetches sequences from R2
 with prefetch overlap, and computes cross-entropy loss via chunked lm_head
 forward passes to minimize VRAM. Accepts the challenger only when the
 bootstrapped lower confidence bound on the per-token log-loss advantage
-exceeds a configurable delta threshold.
+exceeds delta = 1/N (N = the actual number of evaluated sequences).
 
 Usage:
     python eval_torch.py \
         --king unconst/Teutonic-I \
         --challenger unconst/Teutonic-I \
-        --n 100 --delta 0.01 --batch-size 64 --seq-len 2048 --gpus 0,1,2,3,4,5,6,7
+        --n 100 --batch-size 64 --seq-len 2048 --gpus 0,1,2,3,4,5,6,7
 
 Env vars:
     HF_TOKEN              HuggingFace token for gated repos
@@ -57,6 +57,19 @@ import torch.nn.functional as F
 from botocore.config import Config as BotoConfig
 from collections import defaultdict
 from transformers import AutoModelForCausalLM
+
+# eval_server runs us with cwd=/home/const/workspace/teutonic, so the workspace
+# root is not on sys.path by default. Add it so `import teutonic.quasar`
+# resolves the vendored arch.
+_workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _workspace_root not in sys.path:
+    sys.path.insert(0, _workspace_root)
+
+# Register the vendored Quasar arch so AutoModelForCausalLM.from_pretrained
+# can dispatch Teutonic-XXIV checkpoints without trust_remote_code. Safe to
+# import even when the king/challenger is a different family (registration is
+# idempotent and only adds a new model_type → class mapping).
+import teutonic.quasar  # noqa: F401
 
 log = logging.getLogger("eval_torch")
 
@@ -350,6 +363,12 @@ def compute_batch_losses(model, token_batches, device, chunk_size=LM_HEAD_CHUNK)
     sequence dimension. Peak VRAM drops ~7x for vocab_size=262144.
     """
     input_ids = torch.tensor(token_batches, dtype=torch.long, device=device)
+    # Quasar (and any future stateful arch) carries a persistent latent memory
+    # state across forward calls. Resetting before every batch keeps paired-CE
+    # numbers exchangeable — required for the bootstrap LCB. Stock HF archs
+    # (Qwen3, Gemma) do not implement reset_state and pass through harmlessly.
+    if hasattr(model, "reset_state"):
+        model.reset_state()
     hidden = model.model(input_ids).last_hidden_state
     lm_head = model.lm_head
 
@@ -386,6 +405,14 @@ def compute_paired_losses(king_model, chall_model, token_batches,
     B = len(token_batches)
     input_ids_k = torch.tensor(token_batches, dtype=torch.long, device=king_device)
     input_ids_c = torch.tensor(token_batches, dtype=torch.long, device=chall_device)
+
+    # See compute_batch_losses for rationale. Both models reset before each
+    # paired batch so neither carries state from the previous call into the
+    # CE numbers the bootstrap test consumes.
+    if hasattr(king_model, "reset_state"):
+        king_model.reset_state()
+    if hasattr(chall_model, "reset_state"):
+        chall_model.reset_state()
 
     hidden_k = king_model.model(input_ids_k).last_hidden_state
     hidden_c = chall_model.model(input_ids_c).last_hidden_state
@@ -591,17 +618,49 @@ def _classify_param(name: str) -> str:
         return "embed"
     if "norm" in n or "layernorm" in n or "rmsnorm" in n:
         return "norm"
+    # Quasar's HybridBlock uses ln1 / ln1_out / ln2 / ln2_out as the sandwich
+    # RMSNorm names — those strings don't contain "norm" so the generic match
+    # above misses them; bucket them explicitly so grad-norm logs stay coherent.
+    if any(s in n for s in (
+        ".ln1.", ".ln2.", ".ln1_out.", ".ln2_out.", ".embed_norm.",
+    )):
+        return "norm"
+    # Quasar latent-memory + GLA-side projections (not learned attention).
+    if any(k in n for k in (
+        ".memory.", "summary_proj", "summary_query", "compress_z",
+        "w_qkv_mem", "eta_channels", "w_eta",
+        "c_to_hidden", "w_alpha",
+    )):
+        return "memory"
+    # Quasar BigMac MoE — routed expert weights, DCCA bottleneck, router.
+    if "router" in n or "router_weights" in n:
+        return "moe_router"
+    if "experts_w12" in n or "experts_w3" in n:
+        return "moe_routed"
+    if "shared_experts" in n:
+        return "moe_shared"
+    if "w_down_proj" in n or "w_up_proj" in n:
+        return "moe_dcca"
+    # SMEBU global stability buffers (state_dict but not parameters).
+    if "moe_bias" in n or "moe_momentum" in n or "max_vio" in n or "expert_bias" in n:
+        return "moe_smebu"
+    if "injection_gate" in n:
+        return "looped_inject"
     if any(k in n for k in (
         "q_proj", "k_proj", "v_proj", "o_proj",
         "q_norm", "k_norm",
         "wq.", "wk.", "wv.", "wo.",
         "self_attn", "attention",
+        # Quasar/GLA-style attention extras (gate / forget / decay / conv).
+        "g_proj", "f_proj", "a_proj", "b_proj", ".attn.",
     )):
         return "attn"
     if any(k in n for k in (
         "gate_proj", "up_proj", "down_proj",
         "mlp", "ffn", "fc1", "fc2", "feed_forward",
         ".w1.", ".w2.", ".w3.",
+        # Dense Quasar layer FFN tensor names (SwiGLUBlock).
+        "ffn.gate", "ffn.up", "ffn.down",
     )):
         return "ffn"
     if n.endswith(".bias"):
@@ -1012,20 +1071,23 @@ def compute_paired_multi_gpu(king_eval, chall_eval, token_batches):
 # ---------------------------------------------------------------------------
 
 def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
-                       alpha, delta, seq_len, batch_size, seed_str,
+                       alpha, seq_len, batch_size, seed_str,
                        n_bootstrap=10000, on_progress=None):
     """Paired bootstrap test on per-token log-loss differences.
 
     Scores M fixed-length blocks on both models, computes d_i = king_loss_i -
     challenger_loss_i (positive means challenger is better), then bootstraps the
     mean to get a one-sided lower confidence bound (LCB).  Accepts only if
-    LCB > delta.
+    LCB > delta, where delta = 1/N (N = actual evaluated sequences). The
+    1/N floor scales with the bootstrap's own resolution, so it just blocks
+    numerical-noise wins without imposing a fixed economic threshold.
 
     Calls on_progress(info_dict) after each batch if provided.
     """
     n_tokens = get_shard_info(r2, shard_key)
     n_sequences = n_tokens // seq_len
     actual_N = min(eval_n, n_sequences)
+    delta = 1.0 / actual_N if actual_N > 0 else 0.0
     log.info("bootstrap test: N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
              eval_n, actual_N, alpha, delta, n_bootstrap)
 
@@ -1136,7 +1198,6 @@ def main():
     parser.add_argument("--challenger", required=True, help="HF repo for challenger model")
     parser.add_argument("--n", type=int, default=100, help="Number of sequences to evaluate")
     parser.add_argument("--alpha", type=float, default=0.001, help="Bootstrap confidence level (one-sided)")
-    parser.add_argument("--delta", type=float, default=0.01, help="Minimum effect threshold in nats/token")
     parser.add_argument("--n-bootstrap", type=int, default=10000, help="Number of bootstrap replicates")
     parser.add_argument("--batch-size", type=int, default=64, help="Sequences per batch (split across GPUs)")
     parser.add_argument("--seq-len", type=int, default=2048, help="Tokens per sequence")
@@ -1193,15 +1254,15 @@ def main():
     log.info("  king:       %s", args.king)
     log.info("  challenger: %s", args.challenger)
     log.info("  GPUs:       %s (%s)", gpu_ids, "shared" if same_model else "split")
-    log.info("  N=%d  alpha=%s  delta=%.6f  bootstrap=%d  batch=%d  seq_len=%d",
-             args.n, args.alpha, args.delta, args.n_bootstrap, args.batch_size, args.seq_len)
+    log.info("  N=%d  alpha=%s  delta=1/N  bootstrap=%d  batch=%d  seq_len=%d",
+             args.n, args.alpha, args.n_bootstrap, args.batch_size, args.seq_len)
     log.info("  shard: %s", shard_key)
     log.info("  seed:  %s", args.seed)
     log.info("=" * 60)
 
     verdict = run_bootstrap_test(
         king_eval, challenger_eval,
-        r2, shard_key, args.n, args.alpha, args.delta,
+        r2, shard_key, args.n, args.alpha,
         args.seq_len, args.batch_size, args.seed,
         n_bootstrap=args.n_bootstrap,
     )

@@ -29,7 +29,9 @@ The economic primitives are:
 - **Reward** — `1/5` of the SN3 alpha emission stream while you sit anywhere
   in the rolling 5-king window (i.e. for your reign + the next 4 dethrones).
 - **Acceptance rule** — paired bootstrap LCB on per-token log-loss difference,
-  one-sided at `alpha=0.001`, with a fixed effect floor `delta=0.01`.
+  one-sided at `alpha=0.001`, with effect floor `delta = 1/N` (N = actual
+  evaluated sequences; ~1e-4 at N=10000). The floor scales with the
+  bootstrap's own resolution rather than imposing a fixed economic threshold.
 
 ---
 
@@ -216,9 +218,10 @@ The full math lives in
 4. **Bootstrap LCB.** Resample `n_bootstrap=10_000` paired indices with
    replacement, take the `alpha=0.001` quantile of the bootstrap means as the
    one-sided lower confidence bound `lcb`.
-5. **Accept rule.** `accepted = lcb > delta` where `delta = 0.01` nats/token by
-   default. Equivalently: we are 99.9% confident the true mean improvement is
-   strictly larger than the floor.
+5. **Accept rule.** `accepted = lcb > delta` where `delta = 1/N` nats/token,
+   computed inside the test from the actual evaluated sequence count
+   (~1e-4 at N=10000). Equivalently: we are 99.9% confident the true mean
+   improvement is strictly larger than the per-sample-resolution floor.
 
 ```python
 # eval_torch.py:614-625
@@ -376,10 +379,11 @@ that scale poorly:
   cross-entropy, currently `20_000 × 2048` tokens through full vocab. At 1B
   this is cheap; at 70B it is the dominant cost in the system, *paid by
   validators every time*.
-- **Diminishing-returns asymmetry against `delta`.** A flat `delta = 0.01`
-  nats/token is easy to clear in the noisy early-training regime and almost
-  impossible to clear near convergence. As the king matures, miners face an
-  ever-rising compute bill for an unchanged reward.
+- **Diminishing-returns asymmetry against the bootstrap LCB.** Even with the
+  `delta = 1/N` floor (which only blocks numerical-noise wins), the binding
+  constraint near convergence is the LCB itself: as the king matures the
+  miner's required `mu_hat` grows with the per-sequence variance, so miners
+  face an ever-rising compute bill for an unchanged reward.
 - **No partial credit, no composition.** Every submission is a full,
   independent monolithic checkpoint. There is no notion of "I trained these
   layers", "I produced this dataset", "I distilled this teacher". Large-model
@@ -406,9 +410,11 @@ redesigning for larger models. Not prescriptions — just the dials:
 - `EVAL_N` (currently 20_000 sequences). Sets test power and per-eval cost.
 - `SEQ_LEN` (currently 2048). Multiplies eval cost linearly.
 - `EVAL_ALPHA` (`0.001`). Type-I error budget.
-- `EVAL_DELTA` (`0.01` nats/token). The floor that converts statistical
-  significance into economic significance. Dynamic delta (e.g. shrinking with
-  king age, scaling with `avg_king_loss`) is an obvious lever.
+- Effect floor `delta = 1/N` (computed inside the bootstrap test from the
+  actual evaluated sequence count, no longer a configurable knob). Blocks
+  numerical-noise wins; the LCB carries the real statistical work. Adding
+  back an economic floor (king-age- or `avg_king_loss`-scaled) is the next
+  lever if a fixed economic threshold becomes desirable.
 - `EVAL_BOOTSTRAP_B` (`10_000`).
 - Switching production from bootstrap LCB to the penalized t-test
   (`beta` knob).

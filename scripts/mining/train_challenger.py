@@ -22,7 +22,7 @@ and be invoked there. It does NOT touch bittensor — that step is handled
 by submit_challenger.py on the templar host where the wallet lives.
 
 REQUIRED — coldkey prefix in --upload-repo (since 2026-04-29):
-  The Teutonic-VIII validator rejects any HF repo whose name doesn't
+  The Teutonic-XXIV validator rejects any HF repo whose name doesn't
   contain the first 8 ss58 chars of the miner's coldkey (case-insensitive
   substring, in either the HF account or the model basename). This is
   an anti-impersonation gate — only the legit coldkey owner can publish
@@ -33,7 +33,7 @@ REQUIRED — coldkey prefix in --upload-repo (since 2026-04-29):
   the orchestrator (run_pipeline.sh) and the on-chain submitter
   (submit_challenger.py) both check before they burn HF / TAO. Pass an
   --upload-repo whose full id contains your coldkey prefix, e.g.
-      myaccount/Teutonic-VIII-5DhAqMpd-v3
+      myaccount/Teutonic-XXIV-5DhAqMpd-v3
 """
 from __future__ import annotations
 
@@ -59,6 +59,13 @@ from huggingface_hub import HfApi, snapshot_download
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Mining harness lives at teutonic/scripts/mining/; bootstrap workspace root
+# onto sys.path so `import teutonic.quasar` registers the Quasar arch.
+_workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _workspace_root not in sys.path:
+    sys.path.insert(0, _workspace_root)
+import teutonic.quasar  # noqa: F401  registers Quasar with AutoModelForCausalLM
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [train_challenger] %(message)s",
@@ -70,7 +77,6 @@ log = logging.getLogger("train_challenger")
 # Defaults (mirror validator constants where applicable)
 # ---------------------------------------------------------------------------
 SEQ_LEN = 2048
-EVAL_DELTA = 0.01           # validator floor; we want mu_hat >> this offline
 EVAL_ALPHA = 0.001
 LM_HEAD_CHUNK = 256
 DASHBOARD_URL = os.environ.get(
@@ -167,6 +173,10 @@ def sha256_dir(path: Path) -> str:
 def compute_per_seq_loss(model, token_batches, device, chunk=LM_HEAD_CHUNK):
     """Average per-token cross-entropy per sequence (matches eval_torch)."""
     input_ids = torch.tensor(token_batches, dtype=torch.long, device=device)
+    # Reset stateful arch (Quasar latent memory) before each batch — see
+    # eval_torch.compute_paired_losses for rationale. No-op for stock HF archs.
+    if hasattr(model, "reset_state"):
+        model.reset_state()
     out = model.model(input_ids)
     hidden = out.last_hidden_state
     lm_head = model.lm_head
@@ -188,9 +198,13 @@ def compute_per_seq_loss(model, token_batches, device, chunk=LM_HEAD_CHUNK):
 
 def paired_eval(king_dir: str, chall_dir: str, shard: np.ndarray,
                 indices: list[int], device: str, batch_size: int = 8,
-                n_bootstrap: int = 10000, alpha: float = EVAL_ALPHA,
-                delta: float = EVAL_DELTA) -> dict:
-    """Mirrors validator's paired bootstrap test on a single GPU."""
+                n_bootstrap: int = 10000, alpha: float = EVAL_ALPHA) -> dict:
+    """Mirrors validator's paired bootstrap test on a single GPU.
+
+    Acceptance floor delta = 1/N (N = len(indices)) matches the validator,
+    where the floor scales with the bootstrap's own resolution.
+    """
+    delta = 1.0 / len(indices) if indices else 0.0
     log.info("paired_eval: loading king %s on %s", king_dir, device)
     king = AutoModelForCausalLM.from_pretrained(
         king_dir, torch_dtype=torch.bfloat16, device_map={"": device},

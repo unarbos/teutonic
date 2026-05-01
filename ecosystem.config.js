@@ -28,7 +28,7 @@ module.exports = {
     cwd: "/home/const/workspace/teutonic",
     env: {
       TEUTONIC_EVAL_SERVER: "http://localhost:9000",
-      TEUTONIC_SEED_REPO: "unconst/Teutonic-VIII",
+      TEUTONIC_SEED_REPO: "unconst/Teutonic-XXIV",
       HF_TOKEN: dopplerPrd("HF_TOKEN"),
       TEUTONIC_NETUID: "3",
       TEUTONIC_NETWORK: "finney",

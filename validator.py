@@ -34,13 +34,26 @@ import numpy as np
 from botocore.config import Config as BotoConfig
 from huggingface_hub import HfApi
 
+# pm2 starts validator.py with cwd=/home/const/workspace/teutonic so the
+# default sys.path[0] is the teutonic dir, not the workspace root. Add the
+# workspace root explicitly so `import teutonic.quasar` resolves.
+_workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _workspace_root not in sys.path:
+    sys.path.insert(0, _workspace_root)
+
+# Register the vendored Quasar arch with AutoConfig / AutoModelForCausalLM so
+# any downstream HF dispatch (config inspection, model loading) resolves
+# Teutonic-XXIV checkpoints without trust_remote_code. The seed checkpoint
+# strips auto_map and we deny *.py uploads in validate_challenger_config; this
+# import is what makes that policy actually loadable.
+import teutonic.quasar  # noqa: F401
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 EVAL_N = 10_000
 EVAL_ALPHA = 0.001
-EVAL_DELTA = float(os.environ.get("TEUTONIC_EVAL_DELTA", "0.01"))
 SEQ_LEN = 2048
 POLL_INTERVAL = 30
 WEIGHT_INTERVAL = 300
@@ -55,7 +68,7 @@ HEALTHCHECK_INTERVAL = int(os.environ.get("TEUTONIC_HEALTHCHECK_INTERVAL", "60")
 STATE_FLUSH_INTERVAL = int(os.environ.get("TEUTONIC_STATE_FLUSH_INTERVAL", "60"))
 MAX_CONSECUTIVE_TICK_ERRORS = int(os.environ.get("TEUTONIC_MAX_CONSECUTIVE_TICK_ERRORS", "10"))
 NETWORK = os.environ.get("TEUTONIC_NETWORK", "finney")
-SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-VIII")
+SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-XXIV")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 EVAL_SERVER_URL = os.environ.get("TEUTONIC_EVAL_SERVER", "http://localhost:9000")
 WALLET_NAME = os.environ.get("BT_WALLET_NAME", "teutonic")
@@ -81,7 +94,7 @@ TMC_API_KEY = os.environ.get("TMC_API_KEY", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
-REPO_PATTERN = r"^[^/]+/Teutonic-VIII-.+$"
+REPO_PATTERN = r"^[^/]+/Teutonic-XXIV-.+$"
 
 # Anti-impersonation: miners must include the first N ss58 chars of their
 # coldkey somewhere in their HF repo name. Two miners trying to claim the
@@ -482,17 +495,43 @@ def validate_challenger_config(hf_repo: str, challenger_revision: str,
     if king_arch and chall_arch and king_arch != chall_arch:
         return f"architecture mismatch: king={king_arch} challenger={chall_arch}"
 
+    # Structural lock. Includes Quasar-specific dials so a challenger cannot
+    # silently change the looped/MoE/memory shape and slip past dim matching.
+    # The Quasar-style aliases (d_model, n_layers, n_heads, d_ff) are kept
+    # alongside the HF-canonical names because QuasarConfig maintains both.
     for key in ("vocab_size", "hidden_size", "num_hidden_layers",
                 "num_attention_heads", "num_key_value_heads", "head_dim",
-                "intermediate_size", "model_type"):
+                "intermediate_size", "model_type",
+                # Quasar-only structural fields (see teutonic/quasar/configuration_quasar.py).
+                "d_model", "n_layers", "n_heads", "d_ff",
+                "quasar_layers", "gated_layers", "use_gla_first",
+                "dense_input_layers", "moe_type",
+                "num_routed_experts", "num_shared_experts", "top_k",
+                "routed_expert_size", "shared_expert_size", "bigmac_r",
+                "memory_slots", "memory_dim",
+                "num_loops", "use_looped_injection",
+                "tie_word_embeddings", "rope_theta", "max_position_embeddings",
+                "max_seq_len"):
         king_val = king_cfg.get(key)
         chall_val = challenger_cfg.get(key)
         if king_val is not None and chall_val is not None and king_val != chall_val:
             return f"{key} mismatch: king={king_val} challenger={chall_val}"
 
-    st_files = [s for s in api.list_repo_files(hf_repo, token=HF_TOKEN or None,
-                                                revision=challenger_revision)
-                if s.endswith(".safetensors")]
+    # Policy lock: keep trust_remote_code permanently off. A challenger that
+    # ships its own *.py or sets auto_map could ship arbitrary code that the
+    # eval server would execute on load. We refuse both even though we never
+    # pass trust_remote_code=True downstream — defense in depth against future
+    # accidents and against future transformers versions that change defaults.
+    if "auto_map" in challenger_cfg:
+        return "auto_map present in config.json (custom modeling code is not allowed)"
+
+    repo_files = api.list_repo_files(hf_repo, token=HF_TOKEN or None,
+                                      revision=challenger_revision)
+    py_files = [f for f in repo_files if f.endswith(".py")]
+    if py_files:
+        return f"repo ships *.py files (not allowed): {py_files[:3]}"
+
+    st_files = [s for s in repo_files if s.endswith(".safetensors")]
     if not st_files:
         return "no .safetensors files in repo"
 
@@ -1967,7 +2006,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         "king_revision": king_revision,
         "challenger_repo": hf_repo, "challenger_revision": challenger_revision,
         "hotkey": hotkey,
-        "N": EVAL_N, "alpha": EVAL_ALPHA, "delta": EVAL_DELTA, "shard": shard_key,
+        "N": EVAL_N, "alpha": EVAL_ALPHA, "shard": shard_key,
         "eval_block": eval_block, "block_hash": block_hash,
     })
 
@@ -1992,7 +2031,6 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "challenger_revision": challenger_revision,
             "eval_n": EVAL_N,
             "alpha": EVAL_ALPHA,
-            "delta": EVAL_DELTA,
             "seq_len": SEQ_LEN,
         }
 

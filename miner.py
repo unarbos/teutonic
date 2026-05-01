@@ -31,17 +31,38 @@ log = logging.getLogger("miner")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 DASHBOARD_URL = os.environ.get("TEUTONIC_DASHBOARD_URL",
     "https://s3.hippius.com/teutonic-sn3/dashboard.json")
-SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-VIII")
+SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", "unconst/Teutonic-XXIV")
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
 NETWORK = os.environ.get("TEUTONIC_NETWORK", "finney")
 WALLET_NAME = os.environ.get("BT_WALLET_NAME", "teutonic")
 
-REPO_PATTERN = re.compile(r"^[^/]+/Teutonic-VIII-.+$")
+REPO_PATTERN = re.compile(r"^[^/]+/Teutonic-XXIV-.+$")
 
+# Mirror validator.validate_challenger_config so a miner can fail fast locally
+# instead of getting rejected after an HF upload + chain reveal.
 CONFIG_MATCH_KEYS = (
     "vocab_size", "hidden_size", "num_hidden_layers",
     "num_attention_heads", "num_key_value_heads", "head_dim",
     "intermediate_size", "model_type",
+    # Quasar structural fields — see teutonic/quasar/configuration_quasar.py.
+    "d_model", "n_layers", "n_heads", "d_ff",
+    "quasar_layers", "gated_layers", "use_gla_first",
+    "dense_input_layers", "moe_type",
+    "num_routed_experts", "num_shared_experts", "top_k",
+    "routed_expert_size", "shared_expert_size", "bigmac_r",
+    "memory_slots", "memory_dim",
+    "num_loops", "use_looped_injection",
+    "tie_word_embeddings", "rope_theta", "max_position_embeddings",
+    "max_seq_len",
+)
+
+# SMEBU global-bias and momentum buffers and the per-MoE-layer max_vio counter
+# are routing-stability infra, not learned weights — perturbing them collapses
+# expert routing and destroys the model. Latent-memory persistent state is
+# similarly non-learned. Skip these in the noise-perturbation baseline.
+SKIP_PERTURB_NAME_FRAGMENTS = (
+    "moe_bias", "moe_momentum", "max_vio", "expert_bias",
+    "memory.M", ".memory.M",
 )
 
 
@@ -74,6 +95,13 @@ def validate_local_config(king_dir: str, challenger_dir: str) -> str | None:
         chall_val = chall_cfg.get(key)
         if king_val is not None and chall_val is not None and king_val != chall_val:
             return f"{key} mismatch: king={king_val} challenger={chall_val}"
+
+    # Mirror validator's policy lock so the miner fails fast.
+    if "auto_map" in chall_cfg:
+        return "auto_map present in challenger config.json (custom modeling code is not allowed)"
+    py_files = [p.name for p in Path(challenger_dir).glob("*.py")]
+    if py_files:
+        return f"challenger ships *.py files (not allowed): {py_files[:3]}"
 
     st_files = list(Path(challenger_dir).glob("*.safetensors"))
     if not st_files:
@@ -184,17 +212,27 @@ def main():
     st_files = sorted(Path(challenger_dir).glob("*.safetensors"))
     rng = np.random.default_rng(int(time.time()))
 
+    skipped_smebu_or_memory: list[str] = []
     for st_file in st_files:
         log.info("perturbing %s", st_file.name)
         sd = load_file(str(st_file))
         new_sd = {}
         for name, tensor in sd.items():
+            should_skip = any(frag in name for frag in SKIP_PERTURB_NAME_FRAGMENTS)
+            if should_skip:
+                skipped_smebu_or_memory.append(name)
+                new_sd[name] = tensor
+                continue
             if tensor.dtype in (torch.bfloat16, torch.float16, torch.float32):
                 noise = torch.randn_like(tensor.float()) * args.noise
                 new_sd[name] = (tensor.float() + noise).to(tensor.dtype)
             else:
                 new_sd[name] = tensor
         save_file(new_sd, str(st_file))
+    if skipped_smebu_or_memory:
+        log.info("preserved %d SMEBU/memory tensors verbatim (sample: %s)",
+                 len(skipped_smebu_or_memory),
+                 skipped_smebu_or_memory[:3])
 
     challenger_hash = sha256_dir(challenger_dir)
     log.info("challenger hash: %s", challenger_hash[:16])
