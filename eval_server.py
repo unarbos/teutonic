@@ -116,13 +116,19 @@ class EvalRequest(BaseModel):
 # Model management
 # ---------------------------------------------------------------------------
 
-def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
+def _ensure_king(repo: str, king_hash: str = "", revision: str = "",
+                 on_phase=None):
     """Load or reuse king evaluator. Reloads if repo, revision, or king_hash changed.
 
     On a fresh load, runs the trainability probe on the king. A king that fails
     the probe is a violation of an invariant (the king got there by winning an
     eval, which already required passing the probe), so we refuse to load it
     and raise — operator must intervene.
+
+    `on_phase`, if provided, is invoked with a phase dict before/after each
+    per-GPU load and around the trainability probe. Used to emit SSE
+    heartbeats so the validator's stream-idle watchdog stays satisfied
+    during the multi-minute king-reload that follows a coronation.
     """
     global _king_evaluator, _king_repo, _king_hash, _king_revision
     if (_king_evaluator and _king_repo == repo
@@ -145,9 +151,15 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
     king_gpus = _gpu_ids[:mid] or _gpu_ids[:1]
     new_king = MultiGPUEvaluator(repo, king_gpus, label="king",
                                   force_download=False,
-                                  revision=revision or None)
+                                  revision=revision or None,
+                                  on_phase=on_phase)
 
     if PROBE_ENABLED:
+        if on_phase:
+            try:
+                on_phase({"phase": "king_probe_start", "repo": repo})
+            except Exception:
+                log.warning("on_phase callback raised (non-fatal)", exc_info=True)
         king_model = new_king.models[new_king.gpu_ids[0]]
         t0 = time.time()
         probe = trainability_probe(king_model)
@@ -184,12 +196,13 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = ""):
     return _king_evaluator
 
 
-def _load_challenger(repo: str, revision: str = ""):
+def _load_challenger(repo: str, revision: str = "", on_phase=None):
     """Load challenger on the second half of GPUs."""
     mid = len(_gpu_ids) // 2
     chall_gpus = _gpu_ids[mid:] or _gpu_ids[:1]
     return MultiGPUEvaluator(repo, chall_gpus, label="challenger",
-                              revision=revision or None)
+                              revision=revision or None,
+                              on_phase=on_phase)
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +344,36 @@ def _run_eval(eval_id: str, req: EvalRequest):
     record["state"] = "running"
     event_q: Queue = record["events"]
 
+    # Heartbeat callback: turn load-phase signals from MultiGPUEvaluator and
+    # the probes into SSE `progress` events. The validator's idle watchdog
+    # resets on every yielded line, so any phase event prevents the silent
+    # multi-minute gap (king reload + challenger load + probe + first batch)
+    # from tripping STREAM_IDLE_TIMEOUT and orphaning the eval.
+    def _on_phase(info):
+        try:
+            event_q.put({"type": "progress", "data": info})
+        except Exception:
+            log.warning("failed to enqueue heartbeat event (non-fatal)", exc_info=True)
+
+    # Periodic ticker: catches phases that don't naturally subdivide. The
+    # cold-cache HF download inside load_model._prefetch_repo can take
+    # 5-10 min and emits no per-GPU phase events of its own, so without
+    # this ticker the validator's idle watchdog can still trip during a
+    # one-off cold challenger fetch. Cancelled in `finally:`.
+    _heartbeat_stop = threading.Event()
+
+    def _heartbeat_loop():
+        while not _heartbeat_stop.wait(30.0):
+            try:
+                event_q.put({"type": "progress", "data": {"phase": "heartbeat"}})
+            except Exception:
+                log.warning("heartbeat ticker enqueue failed (non-fatal)", exc_info=True)
+
+    _heartbeat_thread = threading.Thread(target=_heartbeat_loop,
+                                          name=f"heartbeat-{eval_id[:8]}",
+                                          daemon=True)
+    _heartbeat_thread.start()
+
     try:
         # Kick off shard download in the background so it overlaps with king
         # reload + challenger load + probe. Saves ~30s/eval once the shard
@@ -342,16 +385,19 @@ def _run_eval(eval_id: str, req: EvalRequest):
             except Exception:
                 log.warning("shard prefetch kickoff failed (non-fatal)", exc_info=True)
 
-        king_eval = _ensure_king(req.king_repo, req.king_hash, req.king_revision)
+        king_eval = _ensure_king(req.king_repo, req.king_hash, req.king_revision,
+                                 on_phase=_on_phase)
 
         same_model = (req.king_repo == req.challenger_repo
                       and req.king_revision == req.challenger_revision)
         if same_model:
             challenger_eval = king_eval
         else:
-            challenger_eval = _load_challenger(req.challenger_repo, req.challenger_revision)
+            challenger_eval = _load_challenger(req.challenger_repo, req.challenger_revision,
+                                               on_phase=_on_phase)
 
         if not same_model and PROBE_ENABLED:
+            _on_phase({"phase": "challenger_probe_start", "repo": req.challenger_repo})
             chall_model = challenger_eval.models[challenger_eval.gpu_ids[0]]
             t0 = time.time()
             probe = trainability_probe(chall_model)
@@ -432,6 +478,7 @@ def _run_eval(eval_id: str, req: EvalRequest):
         event_q.put({"type": "error", "data": {"error": str(e)}})
 
     finally:
+        _heartbeat_stop.set()
         try:
             _eval_lock.release()
         except RuntimeError:

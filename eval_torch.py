@@ -969,7 +969,25 @@ def trainability_probe(model) -> dict:
 class MultiGPUEvaluator:
     """Manages model replicas across GPUs and dispatches batches in parallel."""
 
-    def __init__(self, repo, gpu_ids, label="model", force_download=False, revision=None):
+    def __init__(self, repo, gpu_ids, label="model", force_download=False,
+                 revision=None, on_phase=None):
+        """Load `repo` onto every GPU in `gpu_ids`.
+
+        Loads are SERIAL (one GPU at a time). An earlier attempt to parallelize
+        with ThreadPoolExecutor introduced silent dtype corruption: when two
+        threads ran transformers.from_pretrained() concurrently the resulting
+        models were left with mixed bf16/float32 Linear weights (notably
+        lm_head). Forward passes then died with
+        `RuntimeError: expected mat1 and mat2 to have the same dtype`.
+        Almost certainly a race on torch.set_default_dtype() / accelerate's
+        init_empty_weights() inside transformers. The 84s -> 32s wall-time
+        win is not worth incorrectly rejecting valid miners.
+
+        `on_phase`, if provided, is invoked synchronously with a dict of
+        {phase, gpu, done, total} before/after each per-GPU load. Used by
+        eval_server to emit SSE heartbeats so the validator's stream-idle
+        watchdog doesn't fire during long king/challenger reloads.
+        """
         self.gpu_ids = gpu_ids
         self.models = {}
         self.devices = {}
@@ -977,18 +995,29 @@ class MultiGPUEvaluator:
         if len(gpu_ids) == 0:
             raise ValueError("need at least one GPU")
 
-        first_model = load_model(repo, f"cuda:{gpu_ids[0]}", f"{label}-gpu{gpu_ids[0]}",
-                                 force_download=force_download, revision=revision)
-        self.models[gpu_ids[0]] = first_model
-        self.devices[gpu_ids[0]] = f"cuda:{gpu_ids[0]}"
+        n = len(gpu_ids)
 
-        for gid in gpu_ids[1:]:
-            self.models[gid] = load_model(repo, f"cuda:{gid}", f"{label}-gpu{gid}",
-                                          force_download=force_download, revision=revision)
+        for i, gid in enumerate(gpu_ids):
+            if on_phase:
+                try:
+                    on_phase({"phase": f"{label}_load_start", "gpu": gid,
+                              "done": i, "total": n, "repo": repo})
+                except Exception:
+                    log.warning("on_phase callback raised (non-fatal)", exc_info=True)
+            self.models[gid] = load_model(repo, f"cuda:{gid}",
+                                          f"{label}-gpu{gid}",
+                                          force_download=force_download,
+                                          revision=revision)
             self.devices[gid] = f"cuda:{gid}"
+            if on_phase:
+                try:
+                    on_phase({"phase": f"{label}_load_done", "gpu": gid,
+                              "done": i + 1, "total": n, "repo": repo})
+                except Exception:
+                    log.warning("on_phase callback raised (non-fatal)", exc_info=True)
 
-        self.pool = ThreadPoolExecutor(max_workers=len(gpu_ids))
-        log.info("%s evaluator ready: %d GPUs %s", label, len(gpu_ids), gpu_ids)
+        self.pool = ThreadPoolExecutor(max_workers=n)
+        log.info("%s evaluator ready: %d GPUs %s", label, n, gpu_ids)
 
     def compute_losses(self, token_batches):
         """Split token_batches across GPUs, compute in parallel, reassemble."""
