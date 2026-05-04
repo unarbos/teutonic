@@ -46,6 +46,9 @@ import json
 import logging
 import math
 import os
+
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
 import shutil
 import struct
 import subprocess
@@ -500,7 +503,7 @@ def main():
     log.info("downloading king to %s", king_dir)
     snapshot_download(king["hf_repo"], local_dir=str(king_dir),
                       revision=king.get("king_revision") or None,
-                      token=args.hf_token or None)
+                      token=args.hf_token or None, max_workers=16)
     king_hash = sha256_dir(king_dir)
     log.info("king sha256[:16]=%s", king_hash[:16])
 

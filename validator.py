@@ -751,6 +751,7 @@ import hashlib, os, sys, tempfile
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 from huggingface_hub import snapshot_download
 
 repo = sys.argv[1]
@@ -759,7 +760,7 @@ token = os.environ.get("HF_TOKEN") or None
 
 with tempfile.TemporaryDirectory(prefix="seed_king_") as tmp:
     snapshot_download(repo, local_dir=tmp, token=token, revision=revision,
-                      allow_patterns=["*.safetensors"])
+                      allow_patterns=["*.safetensors"], max_workers=16)
     h = hashlib.sha256()
     for p in sorted(Path(tmp).glob("*.safetensors")):
         with open(p, "rb") as f:

@@ -12,6 +12,7 @@ dependencies = [
     "numpy",
     "scipy",
     "huggingface-hub",
+    "hf_transfer>=0.1",
     "safetensors",
     "torch",
     "transformers",

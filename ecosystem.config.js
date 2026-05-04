@@ -29,6 +29,7 @@ module.exports = {
       // chain.toml at the repo root. Override here only for short-lived
       // experiments — the static file is the source of truth.
       HF_TOKEN: dopplerPrd("HF_TOKEN"),
+      HF_HUB_ENABLE_HF_TRANSFER: "1",
       TEUTONIC_NETUID: "3",
       TEUTONIC_NETWORK: "finney",
       BT_WALLET_NAME: "teutonic",

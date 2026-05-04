@@ -18,6 +18,8 @@ import sys
 import time
 from pathlib import Path
 
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
 import bittensor as bt
 import httpx
 import numpy as np
@@ -176,7 +178,7 @@ def main():
         shutil.rmtree(king_dir)
     log.info("downloading king from %s@%s", king_repo, (king_revision or "HEAD")[:12])
     snapshot_download(king_repo, local_dir=king_dir, token=HF_TOKEN or None,
-                      revision=king_revision)
+                      revision=king_revision, max_workers=16)
     king_hash = sha256_dir(king_dir)
     log.info("king hash: %s", king_hash[:16])
 
