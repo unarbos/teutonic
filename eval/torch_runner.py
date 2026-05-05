@@ -923,6 +923,16 @@ def trainability_probe(model) -> dict:
     # Layers 2-5: snapshot training state, run multi-seed probes, restore.
     saved_rg = {n: p.requires_grad for n, p in model.named_parameters()}
     was_training = model.training
+
+    # Snapshot every buffer so any in-place mutation inside the train()-mode
+    # forward (e.g. Quasar's MoE aux-loss-free bias EMA on `all_moe_bias`,
+    # `all_moe_momentum`, `all_moe_max_vio`, per-MoE `max_vio`) is reverted on
+    # exit. Without this, the cached king's pair-0 replica drifts away from
+    # the on-disk checkpoint by one EMA step per probe, which over many
+    # evals biases ~25% of bootstrap pairs (only pair 0 sees the probed
+    # replicas) relative to a miner's local eval. Buffers on Quasar are
+    # ~1MB total so the clone is cheap.
+    saved_buffers = {n: b.detach().clone() for n, b in model.named_buffers()}
     per_seed: list[dict] = []
 
     try:
@@ -962,6 +972,15 @@ def trainability_probe(model) -> dict:
             if p.grad is not None:
                 p.grad = None
             p.requires_grad_(saved_rg.get(n, False))
+        # Restore buffers byte-for-byte. Use .copy_ in no_grad to avoid
+        # disturbing autograd state and to keep buffers' device/dtype.
+        with torch.no_grad():
+            live_buffers = dict(model.named_buffers())
+            for n, snapshot in saved_buffers.items():
+                live = live_buffers.get(n)
+                if live is None:
+                    continue
+                live.copy_(snapshot)
         if not was_training:
             model.eval()
         torch.cuda.empty_cache()
