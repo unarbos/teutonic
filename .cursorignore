@@ -1,0 +1,202 @@
+# Cursor ignore — keep the indexer fast and skip large/binary/secret files
+# Deployed via SSH to all remote VMs
+
+# ---- VIRTUAL ENVS (Python) ----
+venv/
+.venv/
+env/
+ENV/
+virtualenv/
+**/venv/
+**/.venv/
+**/env/
+**/ENV/
+*-env/
+*_env/
+*.venv/
+bt_env/
+btenv/
+lium-env/
+session-env/
+**/site-packages/
+**/lib/python*/
+**/pyvenv.cfg
+.tox/
+.nox/
+
+# ---- PYTHON BYTECODE / METADATA ----
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+*.egg
+.eggs/
+
+# ---- BUILD ARTIFACTS ----
+build/
+dist/
+target/
+out/
+.next/
+.nuxt/
+.turbo/
+.parcel-cache/
+.svelte-kit/
+.angular/
+
+# ---- NODE / JS ----
+node_modules/
+**/node_modules/
+.npm/
+.yarn/
+.pnp.*
+.pnpm-store/
+bower_components/
+
+# ---- RUST / GO ----
+.cargo/
+.rustup/
+**/target/
+
+# ---- LANGUAGE TOOLCHAIN / PACKAGE CACHES ----
+.local/
+.cache/
+**/.cache/
+.config/
+.conda/
+miniconda3/
+anaconda3/
+miniforge3/
+__pypackages__/
+
+# ---- CURSOR / EDITOR / IDE INTERNALS ----
+.cursor-server/
+.cursor/
+.vscode-server/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- AGENT / CLI TOOLING ----
+.claude/
+.codex/
+.openclaw/
+.doppler/
+.foundry/
+.pm2/
+.modelscope/
+.bittensor/
+.lium/
+.chutes/
+.distil-secrets/
+
+# ---- SECRETS ----
+secrets/
+.ssh/
+.aws/
+.docker/
+.git-credentials
+.netrc
+*.mnemonic.txt
+*_mnemonic*
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# ---- MODEL ARTIFACTS / WEIGHTS ----
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.npy
+*.npz
+*.gguf
+*.onnx
+*.tfrecord
+*.tflite
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.parquet
+*.arrow
+*.feather
+models/
+shards/
+checkpoints/
+
+# ---- HUGGINGFACE / ML CACHES ----
+hf_cache/
+**/huggingface/
+**/transformers/cache/
+**/torch/hub/
+
+# ---- EXPERIMENT TRACKING ----
+wandb/
+mlruns/
+runs/
+tb_logs/
+lightning_logs/
+
+# ---- COMPRESSED / IMAGES / MEDIA ----
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.7z
+*.rar
+*.iso
+*.dmg
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.webp
+*.svg
+*.mp3
+*.mp4
+*.mov
+*.wav
+*.avi
+*.mkv
+
+# ---- LOGS ----
+*.log
+*.log.*
+**/logs/
+**/log/
+
+# ---- BACKUPS / SNAPSHOTS ----
+*.bak
+*.backup
+backups/
+*.pre-restore.bak/
+*.pre-restore.bak
+
+# ---- OS / SNAP / SYSTEM ----
+snap/
+nltk_data/
+
+# ---- AGENT / EDITOR TRANSIENT ----
+agent-tools/
+terminals/
+*.session.json

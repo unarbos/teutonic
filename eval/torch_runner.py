@@ -14,7 +14,6 @@ Usage:
         --n 100 --batch-size 64 --seq-len 2048 --gpus 0,1,2,3,4,5,6,7
 
 Env vars:
-    HF_TOKEN              HuggingFace token for gated repos
     TEUTONIC_R2_ENDPOINT  R2 endpoint URL
     TEUTONIC_R2_BUCKET    R2 bucket name (default: constantinople)
     TEUTONIC_R2_ACCESS_KEY R2 access key
@@ -39,20 +38,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-# hf-xet (the Rust chunked-CDN downloader) ignores huggingface_hub's HTTP
-# timeouts and has been observed to hang for hours on partial responses,
-# wedging the eval lock. Disable it and use hf_transfer instead, which is a
-# much simpler Rust shim doing parallel HTTPS range GETs against the same
-# CDN — no Tokio runtime, no chunked-CDN protocol, no observed hangs. Falls
-# back to plain requests/urllib3 (honoring HF_HUB_DOWNLOAD_TIMEOUT below) if
-# the hf_transfer wheel isn't installed. Must be set BEFORE huggingface_hub
-# imports.
-os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-# Conservative per-chunk read timeout for the plain HTTPS download path
-# (also enforced by hf_transfer per range request).
-os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
-os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
 # Belt-and-suspenders: any unguarded socket op blocks at most this long.
 socket.setdefaulttimeout(180)
 
@@ -75,6 +60,8 @@ if _workspace_root not in sys.path:
 # dispatches checkpoints without trust_remote_code. Idempotent.
 import chain_config  # noqa: E402
 chain_config.load_arch()  # noqa: E402
+from eval.raw_dataset import load_raw_sequences, raw_dataset_enabled  # noqa: E402
+from model_store import ModelRef, materialize_model  # noqa: E402
 
 log = logging.getLogger("eval_torch")
 
@@ -160,13 +147,24 @@ class R2:
 # Dataset (identical to validator.py)
 # ---------------------------------------------------------------------------
 
-def get_shard_info(r2, shard_key):
-    header = r2.ds_range_get(shard_key, 0, 1023)
-    buf = io.BytesIO(header)
-    buf.read(6)  # magic
+def _read_npy_header_bytes(raw: bytes) -> tuple[int, dict]:
+    """Parse enough of a .npy header to validate eval shard shape/dtype."""
+    buf = io.BytesIO(raw)
+    magic = buf.read(6)
+    if magic != b"\x93NUMPY":
+        raise ValueError("dataset shard is not a .npy file")
     ver = struct.unpack("BB", buf.read(2))
     hl = struct.unpack("<H" if ver[0] == 1 else "<I", buf.read(2 if ver[0] == 1 else 4))[0]
     hdr = eval(buf.read(hl).decode("latin1").strip())
+    dtype = np.dtype(hdr.get("descr"))
+    if dtype != np.dtype("<u4"):
+        raise ValueError(f"dataset shard dtype must be uint32/<u4, got {dtype}")
+    return buf.tell(), hdr
+
+
+def get_shard_info(r2, shard_key):
+    header = r2.ds_range_get(shard_key, 0, 1023)
+    _, hdr = _read_npy_header_bytes(header)
     n = 1
     for s in hdr["shape"]:
         n *= s
@@ -177,12 +175,8 @@ R2_FETCH_WORKERS = 32
 
 def _parse_shard_header(r2, shard_key):
     header = r2.ds_range_get(shard_key, 0, 1023)
-    buf = io.BytesIO(header)
-    buf.read(6)  # magic
-    ver = struct.unpack("BB", buf.read(2))
-    hl = struct.unpack("<H" if ver[0] == 1 else "<I", buf.read(2 if ver[0] == 1 else 4))[0]
-    buf.read(hl)
-    return buf.tell()
+    off, _hdr = _read_npy_header_bytes(header)
+    return off
 
 
 def fetch_sequences(r2, shard_key, indices, seq_len):
@@ -353,6 +347,29 @@ def extract_sequences(shard_data, data_offset, indices, seq_len):
     return result
 
 
+def _evaluator_vocab_size(evaluator) -> int | None:
+    try:
+        model = evaluator.primary_model()
+        vocab = int(getattr(getattr(model, "config", None), "vocab_size", 0) or 0)
+        return vocab or None
+    except Exception:
+        return None
+
+
+def validate_sequence_cache(seq_cache, seq_len: int, vocab_size: int | None = None):
+    """Fail fast on malformed token shards before model scoring."""
+    if not seq_cache:
+        raise ValueError("dataset shard produced no token sequences")
+    max_id = -1
+    for idx, seq in seq_cache.items():
+        if len(seq) != seq_len:
+            raise ValueError(f"sequence {idx} has length {len(seq)}, expected {seq_len}")
+        if seq:
+            max_id = max(max_id, max(seq))
+    if vocab_size is not None and max_id >= vocab_size:
+        raise ValueError(f"dataset token id {max_id} exceeds model vocab_size {vocab_size}")
+
+
 # ---------------------------------------------------------------------------
 # Chunked loss computation — avoids materializing full [batch, seq, vocab]
 # ---------------------------------------------------------------------------
@@ -493,47 +510,27 @@ def compute_paired_losses(king_model, chall_model, token_batches,
 # Model loading
 # ---------------------------------------------------------------------------
 
-def _prefetch_repo(repo, revision=None, timeout=600):
-    """Pre-download repo files via huggingface_hub with an explicit wall-clock
-    cap. Runs in a background thread so we can abandon a hung download (the
-    actual blocked socket can't be cancelled, but this lets the caller fail
-    fast and let the eval-server watchdog reclaim the eval lock).
-    """
-    from huggingface_hub import snapshot_download
+def _prefetch_repo(repo, digest=None, timeout=600):
+    """Materialize a Hippius Hub digest snapshot with an explicit wall-clock cap."""
     import threading
 
     result = {"path": None, "err": None}
 
     def _do():
         try:
-            for attempt in range(3):
-                try:
-                    result["path"] = snapshot_download(
-                        repo_id=repo,
-                        revision=revision or None,
-                        token=os.environ.get("HF_TOKEN") or None,
-                        allow_patterns=["*.json", "*.safetensors", "*.txt", "tokenizer*", "*.model"],
-                        etag_timeout=int(os.environ.get("HF_HUB_ETAG_TIMEOUT", "30")),
-                    )
-                    break
-                except Exception as e:
-                    if attempt == 2:
-                        raise
-                    backoff = 5 * (3 ** attempt)
-                    log.warning("prefetch attempt %d/3 failed for %s: %s; retrying in %ds (HF cache will resume)", attempt + 1, repo, e, backoff)
-                    time.sleep(backoff)
+            ref = ModelRef(repo, digest or "")
+            result["path"] = materialize_model(ref, max_workers=16)
         except Exception as e:
             result["err"] = e
 
-    t = threading.Thread(target=_do, daemon=True, name=f"hf-prefetch-{repo}")
+    t = threading.Thread(target=_do, daemon=True, name=f"hippius-prefetch-{repo}")
     t.start()
     t.join(timeout=timeout)
     if t.is_alive():
-        raise TimeoutError(f"prefetch of {repo} exceeded {timeout}s (likely stuck CDN)")
+        raise TimeoutError(f"prefetch of {repo}@{(digest or '')[:19]} exceeded {timeout}s")
     if result["err"] is not None:
         raise result["err"]
     return result["path"]
-
 
 def _build_sharded_device_map(gpu_ids: list[int],
                               per_gpu_gib: int | None = None) -> dict:
@@ -564,12 +561,12 @@ def load_model(repo, device, label="model", force_download=False, revision=None,
     set of GPUs via accelerate's device_map='auto'.
 
     Args:
-        repo:                HF repo id (or local path) to load
+        repo:                Hippius repo id or local path to load
         device:              for single-GPU mode, a string like "cuda:0".
                              Ignored when shard_across_gpus is set.
         label:               human-readable tag for log lines
         force_download:      bypass HF cache
-        revision:            pinned commit SHA
+        revision:            pinned OCI digest
         shard_across_gpus:   if set, list of GPU indices to shard across.
                              Builds one replica via device_map='auto' with
                              max_memory caps that ban every other visible GPU.
@@ -580,15 +577,15 @@ def load_model(repo, device, label="model", force_download=False, revision=None,
         target = f"sharded({','.join(str(g) for g in shard_across_gpus)})"
     else:
         target = device
-    log.info("loading %s from %s onto %s (force_download=%s, revision=%s)",
-             label, repo, target, force_download, revision[:12] if revision else None)
+    log.info("loading %s from %s onto %s (force_download=%s, digest=%s)",
+             label, repo, target, force_download, revision[:19] if revision else None)
     t0 = time.time()
     # Pre-download with hard timeout so a stuck CDN doesn't hang the eval lock
     # for half an hour. Skip on force_download (let from_pretrained re-pull).
     if not force_download:
         try:
-            _prefetch_repo(repo, revision=revision,
-                           timeout=int(os.environ.get("HF_PREFETCH_TIMEOUT", "600")))
+            _prefetch_repo(repo, digest=revision,
+                           timeout=int(os.environ.get("HIPPIUS_PREFETCH_TIMEOUT", "600")))
             log.info("%s prefetch complete in %.1fs", label, time.time() - t0)
         except TimeoutError as e:
             log.error("%s prefetch timed out: %s", label, e)
@@ -603,13 +600,15 @@ def load_model(repo, device, label="model", force_download=False, revision=None,
         load_kwargs = {"device_map": {"": device}}
     for attn_impl in ("flash_attention_2", "sdpa", "eager"):
         try:
+            local_repo = repo
+            if revision and not os.path.isdir(repo):
+                local_repo = _prefetch_repo(repo, digest=revision,
+                                           timeout=int(os.environ.get("HIPPIUS_PREFETCH_TIMEOUT", "600")))
             model = AutoModelForCausalLM.from_pretrained(
-                repo,
+                local_repo,
                 torch_dtype=torch.bfloat16,
                 attn_implementation=attn_impl,
-                token=os.environ.get("HF_TOKEN") or None,
-                force_download=force_download,
-                revision=revision or None,
+                force_download=False,
                 use_safetensors=True,
                 **load_kwargs,
             )
@@ -1425,24 +1424,40 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
 
     Calls on_progress(info_dict) after each batch if provided.
     """
-    n_tokens = get_shard_info(r2, shard_key)
-    n_sequences = n_tokens // seq_len
-    actual_N = min(eval_n, n_sequences)
     delta = EVAL_DELTA
-    log.info("bootstrap test: N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
-             eval_n, actual_N, alpha, delta, n_bootstrap)
 
     seed_material = seed_str.encode()
     seed = int.from_bytes(hashlib.blake2b(seed_material, digest_size=8).digest(), "little")
-    rng = np.random.Generator(np.random.PCG64(seed))
-    eval_indices = rng.choice(n_sequences, size=actual_N, replace=False).tolist()
+    raw_meta = None
+    if raw_dataset_enabled():
+        log.info("bootstrap test using raw Hippius dataset mode")
+        raw_sequences, raw_meta = load_raw_sequences(
+            r2, eval_n, seq_len, seed_str, chain_config.SEED_TOKENIZER_REPO,
+        )
+        actual_N = len(raw_sequences)
+        eval_indices = list(range(actual_N))
+        seq_cache = dict(enumerate(raw_sequences))
+        log.info(
+            "bootstrap test: N=%d actual_N=%d alpha=%s delta=%.6f B=%d dataset=%s",
+            eval_n, actual_N, alpha, delta, n_bootstrap, raw_meta.get("prefix"),
+        )
+    else:
+        n_tokens = get_shard_info(r2, shard_key)
+        n_sequences = n_tokens // seq_len
+        actual_N = min(eval_n, n_sequences)
+        log.info("bootstrap test: N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
+                 eval_n, actual_N, alpha, delta, n_bootstrap)
 
-    log.info("downloading shard %s ...", shard_key)
-    data_offset, shard_data = download_shard(r2, shard_key)
+        rng = np.random.Generator(np.random.PCG64(seed))
+        eval_indices = rng.choice(n_sequences, size=actual_N, replace=False).tolist()
 
-    log.info("extracting %d sequences", actual_N)
-    seq_cache = extract_sequences(shard_data, data_offset, eval_indices, seq_len)
-    log.info("extracted %d sequences", len(seq_cache))
+        log.info("downloading shard %s ...", shard_key)
+        data_offset, shard_data = download_shard(r2, shard_key)
+
+        log.info("extracting %d sequences", actual_N)
+        seq_cache = extract_sequences(shard_data, data_offset, eval_indices, seq_len)
+        validate_sequence_cache(seq_cache, seq_len, _evaluator_vocab_size(king_eval))
+        log.info("extracted %d sequences", len(seq_cache))
 
     batches = [
         eval_indices[i : i + batch_size]
@@ -1520,6 +1535,8 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
         "seqs_per_sec": round(total_done / elapsed, 1) if elapsed > 0 else 0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    if raw_meta is not None:
+        verdict["dataset"] = raw_meta
     return verdict
 
 
@@ -1563,7 +1580,10 @@ def main():
 
     r2 = R2()
 
-    if args.shard:
+    if raw_dataset_enabled():
+        shard_key = args.shard or "raw:hippius:fineweb-edu"
+        log.info("using raw Hippius dataset mode")
+    elif args.shard:
         shard_key = args.shard
     else:
         manifest = r2.ds_get("dataset/v2/manifest.json")

@@ -28,8 +28,11 @@ module.exports = {
       // Active chain (name, seed_repo, repo_pattern, arch) is read from
       // chain.toml at the repo root. Override here only for short-lived
       // experiments — the static file is the source of truth.
-      HF_TOKEN: dopplerPrd("HF_TOKEN"),
-      HF_HUB_ENABLE_HF_TRANSFER: "1",
+      TEUTONIC_EVAL_DATASET_MODE: "raw_hippius",
+      TEUTONIC_RAW_DATASET_PREFIX: "hf-mirrors/HuggingFaceFW/fineweb-edu/data",
+      TEUTONIC_RAW_DATASET_MANIFEST: "hf-mirrors/HuggingFaceFW/fineweb-edu/data/_manifest.json",
+      TEUTONIC_RAW_TOKENIZER_REPO: "Qwen/Qwen3-30B-A3B",
+      TEUTONIC_FORCE_SEED_KING: "1",
       TEUTONIC_NETUID: "3",
       TEUTONIC_NETWORK: "finney",
       BT_WALLET_NAME: "teutonic",
@@ -59,7 +62,7 @@ module.exports = {
       TEUTONIC_TICK_RESTART_AFTER: "1800",
       TEUTONIC_MAX_CONSECUTIVE_TICK_ERRORS: "20",
       // Stream-idle watchdog envelope must accommodate the multi-minute
-      // chall HF prefetch + sharded model load. The eval_server emits SSE
+      // challenger Hippius prefetch + sharded model load. The eval_server emits SSE
       // heartbeat events during these phases so this rarely actually fires
       // in normal operation. Pre-LXXX values were 300/900s.
       TEUTONIC_STREAM_IDLE_WARN_AFTER: "600",
@@ -72,6 +75,29 @@ module.exports = {
       TEUTONIC_KING_HASH_TIMEOUT_S: "2400",
     },
     max_restarts: 10,
+    restart_delay: 5000,
+    autorestart: true,
+    log_date_format: "YYYY-MM-DD HH:mm:ss",
+  }, {
+    // Fallback weight-burner. Pushes 100% weight to UID 0 every hour
+    // so the validator hotkey keeps setting weights even when the eval
+    // server is offline / wedged. MUTUALLY EXCLUSIVE with teutonic-validator
+    // — both call set_weights on the same hotkey, so stop the validator
+    // before starting this one (`pm2 stop teutonic-validator`) and vice
+    // versa.
+    name: "teutonic-burn",
+    script: "hourly_burn_weights.py",
+    interpreter: "/home/const/workspace/.venv/bin/python",
+    cwd: "/home/const/workspace",
+    env: {
+      TEUTONIC_NETUID: "3",
+      TEUTONIC_NETWORK: "finney",
+      BT_WALLET_NAME: "teutonic",
+      BT_WALLET_HOTKEY: "default",
+      BURN_UID: "0",
+      BURN_INTERVAL_SECONDS: "3600",
+    },
+    max_restarts: 1000,
     restart_delay: 5000,
     autorestart: true,
     log_date_format: "YYYY-MM-DD HH:mm:ss",

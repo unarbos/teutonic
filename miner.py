@@ -3,14 +3,10 @@
 
 1. Downloads the current king model
 2. Applies a small random perturbation to the weights
-3. Uploads as a challenger repo on HuggingFace; captures the commit SHA
+3. Uploads as a challenger model to Hippius Hub; captures the OCI digest
 4. Submits a reveal commitment on Bittensor chain in the form
-   `{king_hash[:16]}:{repo}:{revision_sha}`. The revision SHA is the
-   binding cryptographic commitment to the file tree — the validator
-   pins evaluation to exactly that revision, so any post-commit upload
-   to the same repo (e.g. swapping in a copy of a winning model after
-   the chain commit lands) is invisible to evaluation. This closed the
-   "empty repo + late upload" exploit on 2026-05-12.
+   `v2|{king_hash[:16]}|{repo}|sha256:{manifest_digest}`. The OCI digest is
+   the binding cryptographic commitment to the file tree.
 """
 import argparse
 import hashlib
@@ -23,26 +19,30 @@ import sys
 import time
 from pathlib import Path
 
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-
 import bittensor as bt
 import httpx
 import numpy as np
 import torch
-from huggingface_hub import HfApi, snapshot_download
 from safetensors.torch import load_file, save_file
 
 # chain_config sits at the repo root; ensure it imports regardless of cwd.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chain_config  # noqa: E402
+from model_store import (  # noqa: E402
+    ModelRef,
+    build_reveal_payload,
+    materialize_model,
+    sha256_safetensors,
+    upload_model_folder,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("miner")
 
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
 DASHBOARD_URL = os.environ.get("TEUTONIC_DASHBOARD_URL",
     "https://us-east-1.hippius.com/teutonic-sn3/dashboard.json")
 SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", chain_config.SEED_REPO)
+SEED_DIGEST = os.environ.get("TEUTONIC_SEED_DIGEST", getattr(chain_config, "SEED_DIGEST", ""))
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
 NETWORK = os.environ.get("TEUTONIC_NETWORK", "finney")
 WALLET_NAME = os.environ.get("BT_WALLET_NAME", "teutonic")
@@ -96,7 +96,7 @@ def validate_local_config(king_dir: str, challenger_dir: str) -> str | None:
 def sha256_dir(path):
     """sha256 over the safetensors of `path`. Used only for the king digest
     that fills the `king_hash[:16]` field of the on-chain commit (a soft
-    integrity ping; the actual binding is the challenger's HF revision)."""
+    integrity ping; the actual binding is the challenger's OCI digest)."""
     h = hashlib.sha256()
     for p in sorted(Path(path).glob("*.safetensors")):
         with open(p, "rb") as f:
@@ -143,18 +143,22 @@ def main():
 
     # Discover current king from dashboard
     king_repo = SEED_REPO
-    king_revision = None
+    king_digest = SEED_DIGEST
     dashboard = None
     try:
         resp = httpx.get(DASHBOARD_URL, timeout=15)
         resp.raise_for_status()
         dashboard = resp.json()
-        king_repo = dashboard["king"]["hf_repo"]
-        king_revision = dashboard["king"].get("king_revision") or None
-        log.info("discovered king from dashboard: %s@%s",
-                 king_repo, king_revision[:12] if king_revision else "HEAD")
+        king = dashboard["king"]
+        king_repo = king["model_repo"]
+        king_digest = king["model_digest"]
+        log.info("discovered king from dashboard: %s@%s", king_repo, king_digest[:19])
     except Exception:
-        log.warning("could not fetch dashboard, falling back to seed repo %s", SEED_REPO)
+        log.warning("could not fetch dashboard, falling back to seed model %s", SEED_REPO)
+    if not king_digest:
+        log.error("no king digest available; set TEUTONIC_SEED_DIGEST or wait for dashboard")
+        sys.exit(1)
+    king_ref = ModelRef(king_repo, king_digest)
 
     # Pre-flight: check if our hotkey is the current king
     if dashboard:
@@ -179,14 +183,13 @@ def main():
     except Exception:
         log.warning("could not check existing reveals — skipping seen-hotkey check")
 
-    # Download king model at pinned revision
+    # Download king model at the immutable Hippius digest.
     king_dir = "/tmp/teutonic/miner/king"
     if os.path.exists(king_dir):
         shutil.rmtree(king_dir)
-    log.info("downloading king from %s@%s", king_repo, (king_revision or "HEAD")[:12])
-    snapshot_download(king_repo, local_dir=king_dir, token=HF_TOKEN or None,
-                      revision=king_revision, max_workers=16)
-    king_hash = sha256_dir(king_dir)
+    log.info("downloading king from %s", king_ref.immutable_ref)
+    materialize_model(king_ref, local_dir=king_dir, max_workers=16)
+    king_hash = sha256_safetensors(king_dir)
     log.info("king hash: %s", king_hash[:16])
 
     # Create challenger by perturbing weights
@@ -216,27 +219,18 @@ def main():
         sys.exit(1)
     log.info("config validation passed")
 
-    api = HfApi(token=HF_TOKEN)
-    api.create_repo(challenger_repo, exist_ok=True, private=False)
-    log.info("uploading to %s", challenger_repo)
-    commit_info = api.upload_folder(
-        folder_path=challenger_dir,
-        repo_id=challenger_repo,
+    log.info("uploading to Hippius Hub repo %s", challenger_repo)
+    challenger_ref = upload_model_folder(
+        challenger_dir,
+        repo=challenger_repo,
+        revision=suffix,
         commit_message=f"Challenger from {args.hotkey} (noise={args.noise})",
-        allow_patterns=["*.safetensors", "config.json", "tokenizer*", "special_tokens*"],
     )
-    challenger_revision = commit_info.oid
-    log.info("uploaded to https://huggingface.co/%s @ %s",
-             challenger_repo, challenger_revision[:12])
+    log.info("uploaded to %s", challenger_ref.immutable_ref)
 
-    # On-chain reveal: 3 fields separated by ':' — king_hash[:16]:repo:revision.
-    # The 40-char HF revision SHA is the binding cryptographic commitment to the
-    # file tree at upload time; validator pins evaluation to exactly this SHA so
-    # any post-commit upload to the same repo is invisible. Pre-2026-05-12 the
-    # 3rd field was a sha256(safetensors), which was parsed but never verified —
-    # the empty-repo + late-upload exploit used that gap. Total payload length
-    # ~108 chars, well under the chain commit limit.
-    payload = f"{king_hash[:16]}:{challenger_repo}:{challenger_revision}"
+    # On-chain reveal: v2|king_hash16|repo|oci_digest. The OCI digest is the
+    # immutable artifact identity; mutable tags and URLs are not submitted.
+    payload = build_reveal_payload(king_hash, challenger_ref)
     log.info("submitting reveal: %s", payload)
 
     success, block = subtensor.set_reveal_commitment(

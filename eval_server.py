@@ -7,8 +7,10 @@ the repo changes. Streams progress via SSE.
 Usage:
     uvicorn eval_server:app --host 127.0.0.1 --port 9000
 
-Env vars: same as eval_torch.py (HF_TOKEN, TEUTONIC_R2_*)
+Env vars: same as eval_torch.py (TEUTONIC_R2_* plus Hippius Hub token env vars)
     EVAL_HOST   Bind address (default: 127.0.0.1, set to 0.0.0.0 only behind a firewall)
+    TEUTONIC_EVAL_DATASET_MODE=raw_hippius to read the FineWeb-Edu Hippius
+        Parquet mirror and tokenize at eval time.
 """
 import asyncio
 import json
@@ -21,6 +23,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from queue import Queue, Empty
+from pathlib import Path
 
 import torch
 from fastapi import FastAPI, HTTPException
@@ -32,7 +35,13 @@ chain_config.load_arch()
 
 from eval.torch_runner import (  # noqa: E402
     R2, MultiGPUEvaluator, run_bootstrap_test, parse_gpu_ids,
-    trainability_probe, load_model,
+    trainability_probe, load_model, raw_dataset_enabled,
+)
+from model_store import (  # noqa: E402
+    MODEL_CACHE_DIR,
+    ModelRef,
+    local_snapshot_path,
+    sha256_safetensors,
 )
 
 log = logging.getLogger("eval_server")
@@ -46,7 +55,7 @@ _r2: R2 | None = None
 _king_evaluator: MultiGPUEvaluator | None = None
 _king_repo: str | None = None
 _king_hash: str | None = None
-_king_revision: str | None = None
+_king_digest: str | None = None
 _eval_lock = threading.Lock()
 _evals: dict[str, dict] = {}
 
@@ -54,11 +63,11 @@ _evals: dict[str, dict] = {}
 # Set once a fatal-CUDA exit has been scheduled so we never schedule twice.
 _self_kill_scheduled = threading.Event()
 
-# Set whenever /eval or /probe is doing real work that competes with HF
+# Set whenever /eval or /probe is doing real work that competes with model
 # downloads (challenger fetch, king load, weight prefetch). Background
 # /preload threads check this and defer until cleared so speculative
 # downloads don't starve the in-flight eval's challenger fetch through
-# the same HF CDN. Cleared in _run_eval's finally and in probe_endpoint's
+# the same storage gateway. Cleared in _run_eval's finally and in probe_endpoint's
 # finally. Safe with the new self-kill: if an eval poisons CUDA and dies,
 # the supervisor restarts the process which resets this event.
 _gpu_busy = threading.Event()
@@ -201,10 +210,10 @@ async def lifespan(app: FastAPI):
     # a previous run, and re-downloading 16GB takes ~3min. After-eval cleanup
     # (in run_eval) keeps disk usage bounded between evals.
     if os.environ.get("EVAL_CLEANUP_ON_STARTUP", "0") == "1":
-        _cleanup_hf_cache()
+        _cleanup_model_cache()
     # Start the background disk-stats refresher and prime the snapshot so
     # the first /health call is fast (rather than blocking on a synchronous
-    # 600 GB scan_cache_dir from inside the request handler).
+    # 600 GB model cache scan from inside the request handler).
     _ensure_disk_stats_thread()
     yield
     log.info("eval server shutting down")
@@ -221,7 +230,7 @@ app = FastAPI(lifespan=lifespan)
 
 class ProbeRequest(BaseModel):
     repo: str
-    revision: str = ""
+    digest: str = ""
 
 
 class EvalRequest(BaseModel):
@@ -231,8 +240,8 @@ class EvalRequest(BaseModel):
     hotkey: str
     shard_key: str
     king_hash: str = ""
-    king_revision: str = ""
-    challenger_revision: str = ""
+    king_digest: str = ""
+    challenger_digest: str = ""
     eval_n: int = DEFAULT_EVAL_N
     alpha: float = DEFAULT_ALPHA
     seq_len: int = DEFAULT_SEQ_LEN
@@ -244,9 +253,9 @@ class EvalRequest(BaseModel):
 # Model management
 # ---------------------------------------------------------------------------
 
-def _ensure_king(repo: str, king_hash: str = "", revision: str = "",
+def _ensure_king(repo: str, king_hash: str = "", digest: str = "",
                  on_phase=None):
-    """Load or reuse king evaluator. Reloads if repo, revision, or king_hash changed.
+    """Load or reuse king evaluator. Reloads if repo, digest, or king_hash changed.
 
     On a fresh load, runs the trainability probe on the king. A king that fails
     the probe is a violation of an invariant (the king got there by winning an
@@ -258,19 +267,19 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = "",
     heartbeats so the validator's stream-idle watchdog stays satisfied
     during the multi-minute king-reload that follows a coronation.
     """
-    global _king_evaluator, _king_repo, _king_hash, _king_revision
+    global _king_evaluator, _king_repo, _king_hash, _king_digest
     if (_king_evaluator and _king_repo == repo
-            and (not revision or _king_revision == revision)
+            and (not digest or _king_digest == digest)
             and (not king_hash or _king_hash == king_hash)):
         log.info("reusing cached king evaluator for %s (rev=%s)",
-                 repo, (_king_revision or "?")[:12])
+                 repo, (_king_digest or "?")[:19])
         return _king_evaluator
 
     needs_reload = _king_evaluator is not None
     if needs_reload:
         log.info("king changed (%s rev=%s -> %s rev=%s), reloading",
-                 _king_repo, (_king_revision or "?")[:12],
-                 repo, revision[:12] if revision else "?")
+                 _king_repo, (_king_digest or "?")[:19],
+                 repo, digest[:19] if digest else "?")
         _king_evaluator.shutdown()
         _king_evaluator = None
         torch.cuda.empty_cache()
@@ -279,7 +288,7 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = "",
     king_gpus = _gpu_ids[:mid] or _gpu_ids[:1]
     new_king = MultiGPUEvaluator(repo, king_gpus, label="king",
                                   force_download=False,
-                                  revision=revision or None,
+                                  revision=digest or None,
                                   on_phase=on_phase,
                                   shard_across_gpus=SHARD_ACROSS_GPUS)
 
@@ -317,55 +326,23 @@ def _ensure_king(repo: str, king_hash: str = "", revision: str = "",
             del new_king
             torch.cuda.empty_cache()
             raise RuntimeError(
-                f"king {repo}@{(revision or '?')[:12]} failed trainability "
+                f"king {repo}@{(digest or '?')[:19]} failed trainability "
                 f"probe: {probe['reason']}"
             )
 
     _king_evaluator = new_king
     _king_repo = repo
     _king_hash = king_hash or None
-    _king_revision = revision or None
+    _king_digest = digest or None
     return _king_evaluator
 
 
 def _evict_for_challenger(target_repo: str):
-    """Force-evict every cached repo that's NOT the king and NOT the
-    challenger we're about to load. This is the disk-pressure backstop:
-    `_cleanup_hf_cache`'s watermark check + tier-2 logic can still leave
-    a stale just-evaluated challenger pinned (it's the "most recent
-    preload" and gets self-protected). On a tight-disk pod (1.7T overlay
-    shared with other tenants, observed ~538 GB usable on the new B200
-    pod 2026-05-08) we cannot afford that — even if HF cache is below
-    watermark, the underlying disk can be at 0 free because of host-side
-    overhead/other tenants. Calling this BEFORE downloading a new
-    challenger guarantees we have ~165 GB headroom for the incoming
-    safetensors regardless of what `_cleanup_hf_cache` thinks.
-    """
-    try:
-        from huggingface_hub import scan_cache_dir
-        cache_info = scan_cache_dir()
-        kept_repos = {_king_repo, target_repo}
-        kept_repos.discard(None)
-        kept_repos.discard("")
-        hashes = []
-        bytes_to_free = 0
-        for repo_info in cache_info.repos:
-            if repo_info.repo_id in kept_repos:
-                continue
-            for rev_info in repo_info.revisions:
-                hashes.append(rev_info.commit_hash)
-                bytes_to_free += rev_info.size_on_disk
-        if not hashes:
-            return
-        log.info("pre-load eviction: freeing %d revisions (~%.1f GB) to make room for %s "
-                 "(keeping king=%s)",
-                 len(hashes), bytes_to_free / 1e9, target_repo, _king_repo)
-        cache_info.delete_revisions(*hashes).execute()
-    except Exception:
-        log.warning("pre-load eviction failed (non-fatal)", exc_info=True)
+    """Local Hippius cache cleanup happens in _cleanup_model_cache."""
+    _ = target_repo
+    _cleanup_model_cache()
 
-
-def _load_challenger(repo: str, revision: str = "", on_phase=None):
+def _load_challenger(repo: str, digest: str = "", on_phase=None):
     """Load challenger on the second half of GPUs.
 
     In sharded mode (TEUTONIC_SHARD_ACROSS_GPUS=1) the challenger occupies
@@ -379,7 +356,7 @@ def _load_challenger(repo: str, revision: str = "", on_phase=None):
     mid = len(_gpu_ids) // 2
     chall_gpus = _gpu_ids[mid:] or _gpu_ids[:1]
     return MultiGPUEvaluator(repo, chall_gpus, label="challenger",
-                              revision=revision or None,
+                              revision=digest or None,
                               on_phase=on_phase,
                               shard_across_gpus=SHARD_ACROSS_GPUS)
 
@@ -391,119 +368,41 @@ def _load_challenger(repo: str, revision: str = "", on_phase=None):
 MAX_EVALS_KEPT = 50
 EVAL_MAX_AGE_S = 3600
 
-CACHE_HIGH_WATERMARK_GB = float(os.environ.get("HF_CACHE_HIGH_WATERMARK_GB", "200"))
+CACHE_HIGH_WATERMARK_GB = float(os.environ.get("MODEL_CACHE_HIGH_WATERMARK_GB", "200"))
 
 
-def _cleanup_hf_cache():
-    """Delete HF cached models, keeping the current king and recently
-    preloaded challengers. Only acts above CACHE_HIGH_WATERMARK_GB so that
-    speculative /preload downloads aren't immediately wiped between evals.
-
-    Tiered eviction (NEW): when cache is above watermark, we first try to
-    evict non-protected revisions (not king, not recently preloaded). If
-    that's not enough — which happens routinely with 80B (165GB) models on
-    a finite-disk pod where king + 1 just-evaluated + 1 preloading already
-    exceeds the watermark — we fall back to evicting the *oldest* protected
-    revisions too (still excluding the king and the most-recent preload
-    entry, which is the active eval). Without this fallback the cache used
-    to wedge at "above watermark but nothing eligible to delete" and every
-    subsequent download failed with ENOSPC (observed live 2026-05-08
-    05:55-05:58 UTC, blocked the validator for ~5 evals).
-    """
+def _cleanup_model_cache():
+    """Delete oldest local Hippius snapshots above the disk watermark."""
     try:
-        from huggingface_hub import scan_cache_dir
-        cache_info = scan_cache_dir()
-
-        cache_gb = cache_info.size_on_disk / 1e9
+        root = Path(MODEL_CACHE_DIR)
+        if not root.exists():
+            return
+        snapshots = [p for p in root.glob("**/snapshots/*") if p.is_dir()]
+        total = sum(sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) for d in snapshots)
+        cache_gb = total / 1e9
         if cache_gb < CACHE_HIGH_WATERMARK_GB:
-            log.debug("hf cache cleanup skipped: %.1f GB < watermark %.1f GB",
-                      cache_gb, CACHE_HIGH_WATERMARK_GB)
             return
-
-        keep_repo = _king_repo
-        keep_rev = _king_revision
-        # Build (repo -> last preload timestamp) so we know *how* recent each
-        # preload is. The most recent preload is almost always the active
-        # eval — never evict that one even in fallback. Older protected
-        # entries are fair game once non-protected eviction isn't enough.
-        now = time.time()
-        with _preload_lock:
-            preload_ts: dict[str, float] = {}
-            for (repo, _rev), ts in _preload_seen.items():
-                if now - ts >= PRELOAD_KEEP_S:
-                    continue
-                if ts > preload_ts.get(repo, 0.0):
-                    preload_ts[repo] = ts
-        most_recent_preload_repo = (max(preload_ts, key=preload_ts.get)
-                                    if preload_ts else None)
-
-        # Sort revisions by last_modified (oldest first). We delete oldest
-        # until we're back under the watermark. Note: huggingface_hub's
-        # CachedRevisionInfo exposes `last_modified`, not `last_accessed`
-        # — using the wrong name silently broke this whole function and
-        # let the cache fill /tmp to 100% on 2026-04-29 before we noticed.
-        all_revs = []
-        for repo_info in cache_info.repos:
-            for rev_info in repo_info.revisions:
-                all_revs.append((rev_info.last_modified, repo_info.repo_id, rev_info))
-        all_revs.sort()
-
-        target_bytes = CACHE_HIGH_WATERMARK_GB * 0.7 * 1e9  # 30% headroom
-        hashes_to_delete: list[str] = []
-        running_total = cache_info.size_on_disk
-
-        def _is_kept_king(repo_id: str, rev_info) -> bool:
-            return (repo_id == keep_repo
-                    and (not keep_rev or rev_info.commit_hash == keep_rev))
-
-        def _try_evict(allow_protected: bool, label: str) -> int:
-            nonlocal running_total
-            evicted_here = 0
-            for _last, repo_id, rev_info in all_revs:
-                if running_total < target_bytes:
-                    break
-                if rev_info.commit_hash in hashes_to_delete:
-                    continue
-                if _is_kept_king(repo_id, rev_info):
-                    continue
-                if not allow_protected and repo_id in preload_ts:
-                    continue
-                if allow_protected and repo_id == most_recent_preload_repo:
-                    continue  # never evict active eval
-                short = (rev_info.commit_hash or "")[:12]
-                hashes_to_delete.append(rev_info.commit_hash)
-                running_total -= rev_info.size_on_disk
-                evicted_here += 1
-                log.info("marking for deletion (%s): %s rev %s (%.1f MB)",
-                         label, repo_id, short, rev_info.size_on_disk / 1e6)
-            return evicted_here
-
-        # Pass 1: non-protected only.
-        _try_evict(allow_protected=False, label="tier-1 unprotected")
-        # Pass 2: if still above target, evict oldest protected too (LRU),
-        # excluding king and the active eval's repo.
-        if running_total >= target_bytes:
-            log.warning("hf cache cleanup: tier-1 didn't free enough (%.1f GB still > target %.1f GB), "
-                        "falling back to tier-2 (evicting older protected preloads)",
-                        running_total / 1e9, target_bytes / 1e9)
-            _try_evict(allow_protected=True, label="tier-2 protected-fallback")
-
-        if not hashes_to_delete:
-            log.warning("hf cache cleanup: above watermark but nothing eligible to delete "
-                        "(cache=%.1fGB king=%s active=%s)",
-                        cache_gb, keep_repo, most_recent_preload_repo)
-            return
-
-        strategy = cache_info.delete_revisions(*hashes_to_delete)
-        log.info("hf cache cleanup: deleting %d revisions, freeing %.1f MB (cache was %.1f GB, target %.1f GB)",
-                 len(hashes_to_delete), strategy.expected_freed_size / 1e6, cache_gb,
-                 target_bytes / 1e9)
-        strategy.execute()
-        log.info("hf cache cleanup: done")
-
+        keep = {(_king_repo, _king_digest)}
+        candidates = []
+        for d in snapshots:
+            try:
+                size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                candidates.append((d.stat().st_mtime, d, size))
+            except Exception:
+                continue
+        target_bytes = CACHE_HIGH_WATERMARK_GB * 0.7 * 1e9
+        running = total
+        for _mtime, d, size in sorted(candidates):
+            if running < target_bytes:
+                break
+            # Digest snapshots are named by digest; keep the loaded king.
+            if _king_digest and d.name == _king_digest:
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+            running -= size
+            log.info("model cache cleanup: deleted %s (%.1f GB)", d, size / 1e9)
     except Exception:
-        log.warning("hf cache cleanup failed", exc_info=True)
-
+        log.warning("model cache cleanup failed", exc_info=True)
 
 def _prune_evals():
     """Remove old completed/failed eval records to bound memory usage."""
@@ -537,7 +436,7 @@ def _prune_evals():
 
 
 # Disk-stats snapshot, refreshed by a dedicated background thread.
-# scan_cache_dir() walks ~600 GB of cache and can take 15-30 s under
+# model cache scan() walks ~600 GB of cache and can take 15-30 s under
 # heavy IO; on top of that, the default asyncio executor is shared with
 # the long-running /probe and /eval blocking tasks, so even
 # `loop.run_in_executor(None, _get_disk_stats)` would queue behind them
@@ -559,15 +458,13 @@ def _refresh_disk_stats_once():
     except Exception:
         pass
     try:
-        from huggingface_hub import scan_cache_dir
-        cache_info = scan_cache_dir()
-        stats["hf_cache_size_gb"] = round(cache_info.size_on_disk / 1e9, 2)
-        stats["hf_cache_repos"] = len(cache_info.repos)
-        stats["hf_cache_revisions"] = sum(len(r.revisions) for r in cache_info.repos)
+        root = Path(MODEL_CACHE_DIR)
+        files = [p for p in root.rglob("*") if p.is_file()] if root.exists() else []
+        stats["model_cache_size_gb"] = round(sum(p.stat().st_size for p in files) / 1e9, 2)
+        stats["model_cache_files"] = len(files)
     except Exception:
         pass
     return stats
-
 
 def _disk_stats_loop():
     global _disk_stats_snapshot
@@ -583,8 +480,8 @@ def _ensure_disk_stats_thread():
     """Start the background disk-stats refresher. Does NOT block on the
     first prime — that runs in the same background thread, so lifespan()
     finishes fast (boot in ~10 s instead of ~90 s waiting on a 600 GB
-    scan_cache_dir). /health responses during the first ~30-60 s will
-    lack the disk_*/hf_cache_* fields, which is fine — the surrounding
+    model cache scan). /health responses during the first ~30-60 s will
+    lack the disk_*/model_cache_* fields, which is fine — the surrounding
     `status: ok` is enough for liveness/readiness checks.
 
     We need the boot to be under the validator's retry budget
@@ -627,7 +524,7 @@ def _run_eval(eval_id: str, req: EvalRequest):
             log.warning("failed to enqueue heartbeat event (non-fatal)", exc_info=True)
 
     # Periodic ticker: catches phases that don't naturally subdivide. The
-    # cold-cache HF download inside load_model._prefetch_repo can take
+    # cold-cache Hippius download inside load_model._prefetch_repo can take
     # 5-10 min and emits no per-GPU phase events of its own, so without
     # this ticker the validator's idle watchdog can still trip during a
     # one-off cold challenger fetch. Cancelled in `finally:`.
@@ -649,18 +546,18 @@ def _run_eval(eval_id: str, req: EvalRequest):
         # Kick off shard download in the background so it overlaps with king
         # reload + challenger load + probe. Saves ~30s/eval once the shard
         # cache is cold for that key.
-        if req.shard_key:
+        if req.shard_key and not raw_dataset_enabled():
             try:
                 from eval.torch_runner import prefetch_shard
                 prefetch_shard(_r2, req.shard_key)
             except Exception:
                 log.warning("shard prefetch kickoff failed (non-fatal)", exc_info=True)
 
-        king_eval = _ensure_king(req.king_repo, req.king_hash, req.king_revision,
+        king_eval = _ensure_king(req.king_repo, req.king_hash, req.king_digest,
                                  on_phase=_on_phase)
 
         same_model = (req.king_repo == req.challenger_repo
-                      and req.king_revision == req.challenger_revision)
+                      and req.king_digest == req.challenger_digest)
         if same_model:
             challenger_eval = king_eval
         else:
@@ -670,12 +567,12 @@ def _run_eval(eval_id: str, req: EvalRequest):
             # challenger can blow disk capacity, manifesting as the
             # misleading "could not load model with any attention
             # implementation" error (which is really ENOSPC during
-            # safetensors mmap). See _cleanup_hf_cache docstring.
+            # safetensors mmap). See _cleanup_model_cache docstring.
             try:
-                _cleanup_hf_cache()
+                _cleanup_model_cache()
             except Exception:
                 log.warning("eval %s: pre-load cleanup failed", eval_id, exc_info=True)
-            challenger_eval = _load_challenger(req.challenger_repo, req.challenger_revision,
+            challenger_eval = _load_challenger(req.challenger_repo, req.challenger_digest,
                                                on_phase=_on_phase)
 
         if not same_model and PROBE_ENABLED:
@@ -785,13 +682,13 @@ def _run_eval(eval_id: str, req: EvalRequest):
         # _preload_seen for PRELOAD_KEEP_S (30 min) bounds the race window.
         try:
             with _preload_lock:
-                _preload_seen[(req.challenger_repo, req.challenger_revision or "")] = time.time()
+                _preload_seen[(req.challenger_repo, req.challenger_digest or "")] = time.time()
         except Exception:
             log.warning("eval %s: failed to mark chall as preloaded", eval_id, exc_info=True)
         try:
-            _cleanup_hf_cache()
+            _cleanup_model_cache()
         except Exception:
-            log.warning("eval %s: hf cleanup failed", eval_id, exc_info=True)
+            log.warning("eval %s: model cleanup failed", eval_id, exc_info=True)
         try:
             _prune_evals()
         except Exception:
@@ -803,58 +700,28 @@ def _run_eval(eval_id: str, req: EvalRequest):
 # ---------------------------------------------------------------------------
 
 @app.get("/hash")
-async def hash_endpoint(repo: str, revision: str = ""):
-    """sha256 over the cached safetensors of `repo`@`revision`.
-
-    Returns 404 if the repo isn't already in this server's local HF cache.
-
-    **Why this exists.** The validator's `_seed_king_hash` subprocess used
-    to re-download 165 GiB of safetensors to its own host every time a
-    coronation happened, just to compute the king-hash. But the eval-server
-    has the files on disk already (it just evaluated them). This endpoint
-    lets the validator fetch the digest directly via HTTP, saving ~5-15 min
-    per coronation.
-
-    Validator falls back to the local download path if this endpoint is
-    unreachable, slow, or returns 404. Hash bytes are identical between
-    paths — both stream `sha256` over the same safetensor blobs in
-    alphabetical filename order (huggingface_hub's local-snapshot layout
-    uses symlinks to `blobs/<sha>`, which `open()` follows transparently).
-    """
-    import hashlib
-    import glob
-    from huggingface_hub import snapshot_download
+async def hash_endpoint(repo: str, digest: str = ""):
+    """sha256 over cached safetensors of a Hippius digest snapshot."""
     try:
-        local_dir = snapshot_download(
-            repo,
-            revision=revision or None,
-            local_files_only=True,
-            allow_patterns=["*.safetensors"],
-        )
+        ref = ModelRef(repo, digest)
+        local_dir = local_snapshot_path(ref)
     except Exception as e:
         raise HTTPException(status_code=404,
-                            detail=f"{repo}@{revision or 'HEAD'} not in cache: {type(e).__name__}")
-    files = sorted(glob.glob(os.path.join(local_dir, "*.safetensors")))
-    if not files:
-        raise HTTPException(status_code=404,
-                            detail=f"{repo}@{revision or 'HEAD'}: no safetensors in cached snapshot")
+                            detail=f"{repo}@{digest or 'missing'} not in cache: {type(e).__name__}")
     t0 = time.time()
-    h = hashlib.sha256()
-    for p in files:
-        with open(p, "rb") as f:
-            while chunk := f.read(1 << 20):
-                h.update(chunk)
-    digest = h.hexdigest()
+    value = sha256_safetensors(local_dir)
+    if not value:
+        raise HTTPException(status_code=404, detail=f"{repo}@{digest}: no safetensors")
+    n_files = len(list(Path(local_dir).glob("*.safetensors")))
     log.info("hash: %s@%s -> %s over %d files in %.1fs",
-             repo, (revision or "HEAD")[:12], digest[:16], len(files), time.time() - t0)
+             repo, (digest or "missing")[:19], value[:16], n_files, time.time() - t0)
     return {
-        "sha256": digest,
-        "n_files": len(files),
+        "sha256": value,
+        "n_files": n_files,
         "repo": repo,
-        "revision": revision,
+        "digest": digest,
         "elapsed_s": round(time.time() - t0, 2),
     }
-
 
 @app.get("/health")
 async def health():
@@ -919,13 +786,13 @@ def _watchdog(eval_id: str, deadline: float):
     )
 
 
-def _run_probe_blocking(repo: str, revision: str) -> dict:
-    """Run the trainability probe on `repo`@`revision`, return the verdict.
+def _run_probe_blocking(repo: str, digest: str) -> dict:
+    """Run the trainability probe on `repo`@`digest`, return the verdict.
 
     Three modes (auto-selected):
 
     1. **Cached king reuse** — if `repo` matches the currently-loaded
-       `_king_evaluator` (and revision matches if specified), reuse its
+       `_king_evaluator` (and digest matches if specified), reuse its
        primary_model directly. This is the common case for the validator's
        hourly `audit_incumbent_king`. trainability_probe restores p.grad
        and named_buffers in its `finally` block, so the king replica is
@@ -943,14 +810,14 @@ def _run_probe_blocking(repo: str, revision: str) -> dict:
     if not _gpu_ids:
         raise RuntimeError("no GPUs available on eval server")
 
-    global _king_evaluator, _king_repo, _king_revision
+    global _king_evaluator, _king_repo, _king_digest
 
     # Mode 1: reuse cached king replica when probing the incumbent.
     if (_king_evaluator is not None
             and _king_repo == repo
-            and (not revision or _king_revision == revision)):
+            and (not digest or _king_digest == digest)):
         log.info("probe: reusing cached king %s@%s (no reload)",
-                 repo, (revision or "HEAD")[:12])
+                 repo, (digest or "missing")[:19])
         t0 = time.time()
         verdict = trainability_probe(_king_evaluator.primary_model)
         probe_s = time.time() - t0
@@ -966,7 +833,7 @@ def _run_probe_blocking(repo: str, revision: str) -> dict:
         verdict["timing"] = {"load_s": 0.0, "probe_s": round(probe_s, 2),
                              "total_s": round(probe_s, 2)}
         verdict["repo"] = repo
-        verdict["revision"] = revision
+        verdict["digest"] = digest
         verdict["cached"] = True
         return verdict
 
@@ -974,23 +841,23 @@ def _run_probe_blocking(repo: str, revision: str) -> dict:
     sharded = SHARD_ACROSS_GPUS and len(_gpu_ids) > 1
     if sharded:
         target = f"sharded({','.join(str(g) for g in _gpu_ids)})"
-        log.info("probe: loading %s@%s on %s", repo, (revision or "HEAD")[:12], target)
+        log.info("probe: loading %s@%s on %s", repo, (digest or "missing")[:19], target)
     else:
         probe_gpu = _gpu_ids[-1]
         device = f"cuda:{probe_gpu}"
-        log.info("probe: loading %s@%s on %s", repo, (revision or "HEAD")[:12], device)
+        log.info("probe: loading %s@%s on %s", repo, (digest or "missing")[:19], device)
     t0 = time.time()
     model = None
     try:
         if sharded:
             model = load_model(repo, device=None, label=f"probe-{repo}",
                                force_download=False,
-                               revision=revision or None,
+                               revision=digest or None,
                                shard_across_gpus=_gpu_ids)
         else:
             model = load_model(repo, device, label=f"probe-{repo}",
                                force_download=False,
-                               revision=revision or None)
+                               revision=digest or None)
         load_s = time.time() - t0
         t1 = time.time()
         verdict = trainability_probe(model)
@@ -1010,7 +877,7 @@ def _run_probe_blocking(repo: str, revision: str) -> dict:
             "total_s": round(time.time() - t0, 2),
         }
         verdict["repo"] = repo
-        verdict["revision"] = revision
+        verdict["digest"] = digest
         verdict["cached"] = False
         return verdict
     finally:
@@ -1026,12 +893,12 @@ def _run_probe_blocking(repo: str, revision: str) -> dict:
 # nudges for the same repo coalesce to one background download).
 _preload_threads: dict[str, threading.Thread] = {}
 _preload_lock = threading.Lock()
-# (repo, revision) -> wall-clock timestamp the preload was issued. Used by
-# _cleanup_hf_cache to keep speculative downloads alive long enough to be
+# (repo, digest) -> wall-clock timestamp the preload was issued. Used by
+# _cleanup_model_cache to keep speculative downloads alive long enough to be
 # consumed by the next /eval call. Entries older than PRELOAD_KEEP_S are
 # eligible for cleanup (treated as stale).
 _preload_seen: dict[tuple[str, str], float] = {}
-PRELOAD_KEEP_S = float(os.environ.get("HF_PRELOAD_KEEP_S", "1800"))
+PRELOAD_KEEP_S = float(os.environ.get("MODEL_PRELOAD_KEEP_S", "1800"))
 
 # Cap on how many preload network downloads may run concurrently. Per-IP
 # xet-bridge throttling on this box caps single-shard at ~255 MB/s and shares
@@ -1044,7 +911,7 @@ _preload_network_sem = threading.Semaphore(PRELOAD_PARALLELISM)
 
 class PreloadRequest(BaseModel):
     repo: str
-    revision: str = ""
+    digest: str = ""
 
 
 @app.post("/preload")
@@ -1072,7 +939,7 @@ async def preload_endpoint(req: PreloadRequest):
     """
     if not req.repo:
         raise HTTPException(status_code=400, detail="repo is required")
-    key = f"{req.repo}@{(req.revision or 'main')[:12]}"
+    key = f"{req.repo}@{(req.digest or 'missing')[:19]}"
     log.debug("preload %s: disabled (no-op)", key)
     return {"status": "disabled", "key": key,
             "note": "preload disabled to avoid disk pressure mid-eval"}
@@ -1080,7 +947,7 @@ async def preload_endpoint(req: PreloadRequest):
 
 @app.post("/probe")
 async def probe_endpoint(req: ProbeRequest):
-    """Out-of-band trainability probe on an arbitrary repo+revision.
+    """Out-of-band trainability probe on an arbitrary repo+digest.
 
     Used by the validator to periodically reprobe the incumbent king
     (see audit_incumbent_king in validator.py) without going through a
@@ -1098,7 +965,7 @@ async def probe_endpoint(req: ProbeRequest):
     try:
         loop = asyncio.get_running_loop()
         verdict = await loop.run_in_executor(
-            None, _run_probe_blocking, req.repo, req.revision,
+            None, _run_probe_blocking, req.repo, req.digest,
         )
         return verdict
     except HTTPException:

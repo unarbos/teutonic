@@ -33,12 +33,16 @@ from typing import Any
 
 import numpy as np
 
+from model_store import ModelRef, materialize_model
 from .torch_runner import (
     EVAL_DELTA,
     download_shard,
     extract_sequences,
     get_shard_info,
+    validate_sequence_cache,
 )
+from .raw_dataset import load_raw_sequences, raw_dataset_enabled
+import chain_config
 
 log = logging.getLogger("eval_vllm")
 
@@ -62,7 +66,7 @@ class _Cmd:
 
 def _worker_main(
     repo: str,
-    revision: str | None,
+    digest: str | None,
     gpu_ids: list[int],
     seq_len: int,
     label: str,
@@ -72,7 +76,6 @@ def _worker_main(
     """Long-lived worker: load one vLLM engine, then handle scoring requests."""
     visible = ",".join(str(g) for g in gpu_ids)
     os.environ["CUDA_VISIBLE_DEVICES"] = visible
-    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -89,13 +92,13 @@ def _worker_main(
 
     try:
         wlog.info(
-            "loading %s rev=%s on GPUs %s tp=%d",
-            repo, (revision or "HEAD")[:12], gpu_ids, len(gpu_ids),
+            "loading %s@%s on GPUs %s tp=%d",
+            repo, (digest or "missing")[:19], gpu_ids, len(gpu_ids),
         )
         t0 = time.time()
+        local_model = materialize_model(ModelRef(repo, digest or ""), max_workers=16)
         llm = LLM(
-            model=repo,
-            revision=revision or None,
+            model=local_model,
             tensor_parallel_size=len(gpu_ids),
             dtype=VLLM_DTYPE,
             trust_remote_code=VLLM_TRUST_REMOTE_CODE,
@@ -212,11 +215,11 @@ class VllmEvaluator:
         gpu_ids: list[int],
         seq_len: int,
         label: str = "model",
-        revision: str | None = None,
+        digest: str | None = None,
         on_phase=None,
     ) -> None:
         self.repo = repo
-        self.revision = revision
+        self.digest = digest
         self.gpu_ids = list(gpu_ids)
         self.seq_len = seq_len
         self.label = label
@@ -226,7 +229,7 @@ class VllmEvaluator:
         self._res_q: mp.Queue[Any] = ctx.Queue()
         self._proc = ctx.Process(
             target=_worker_main,
-            args=(repo, revision, self.gpu_ids, seq_len, label,
+            args=(repo, digest, self.gpu_ids, seq_len, label,
                   self._cmd_q, self._res_q),
             name=f"vllm-{label}-{repo[:24]}",
             daemon=False,
@@ -352,25 +355,41 @@ def run_bootstrap_test_vllm(
     The only difference is the inner forward pass: vLLM prefill in two
     subprocess engines instead of HF teacher forcing on resident models.
     """
-    n_tokens = get_shard_info(r2, shard_key)
-    n_sequences = n_tokens // seq_len
-    actual_N = min(eval_n, n_sequences)
     delta = EVAL_DELTA
-    log.info("bootstrap[vllm] N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
-             eval_n, actual_N, alpha, delta, n_bootstrap)
 
     seed = int.from_bytes(
         hashlib.blake2b(seed_str.encode(), digest_size=8).digest(), "little",
     )
-    rng = np.random.Generator(np.random.PCG64(seed))
-    eval_indices = rng.choice(n_sequences, size=actual_N, replace=False).tolist()
+    raw_meta = None
+    if raw_dataset_enabled():
+        log.info("bootstrap[vllm] using raw Hippius dataset mode")
+        raw_sequences, raw_meta = load_raw_sequences(
+            r2, eval_n, seq_len, seed_str, chain_config.SEED_TOKENIZER_REPO,
+        )
+        actual_N = len(raw_sequences)
+        eval_indices = list(range(actual_N))
+        seq_cache = dict(enumerate(raw_sequences))
+        log.info(
+            "bootstrap[vllm] N=%d actual_N=%d alpha=%s delta=%.6f B=%d dataset=%s",
+            eval_n, actual_N, alpha, delta, n_bootstrap, raw_meta.get("prefix"),
+        )
+    else:
+        n_tokens = get_shard_info(r2, shard_key)
+        n_sequences = n_tokens // seq_len
+        actual_N = min(eval_n, n_sequences)
+        log.info("bootstrap[vllm] N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
+                 eval_n, actual_N, alpha, delta, n_bootstrap)
 
-    log.info("downloading shard %s ...", shard_key)
-    data_offset, shard_data = download_shard(r2, shard_key)
+        rng = np.random.Generator(np.random.PCG64(seed))
+        eval_indices = rng.choice(n_sequences, size=actual_N, replace=False).tolist()
 
-    log.info("extracting %d sequences", actual_N)
-    seq_cache = extract_sequences(shard_data, data_offset, eval_indices, seq_len)
-    log.info("extracted %d sequences", len(seq_cache))
+        log.info("downloading shard %s ...", shard_key)
+        data_offset, shard_data = download_shard(r2, shard_key)
+
+        log.info("extracting %d sequences", actual_N)
+        seq_cache = extract_sequences(shard_data, data_offset, eval_indices, seq_len)
+        validate_sequence_cache(seq_cache, seq_len)
+        log.info("extracted %d sequences", len(seq_cache))
 
     batches = [
         eval_indices[i : i + batch_size]
@@ -432,7 +451,7 @@ def run_bootstrap_test_vllm(
     log.info("bootstrap[vllm] mu_hat=%.6f lcb=%.6f delta=%.6f accepted=%s",
              mu_hat, lcb, delta, accepted)
 
-    return {
+    verdict = {
         "accepted": accepted,
         "verdict": "challenger" if accepted else "king",
         "mu_hat": round(mu_hat, 6),
@@ -448,3 +467,6 @@ def run_bootstrap_test_vllm(
         "backend": "vllm",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    if raw_meta is not None:
+        verdict["dataset"] = raw_meta
+    return verdict

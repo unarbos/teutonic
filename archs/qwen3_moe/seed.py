@@ -55,7 +55,8 @@ TOKENIZER_REPO = os.environ.get("TEUTONIC_SEED_TOKENIZER_OVERRIDE",
 OUT_DIR = os.environ.get("TEUTONIC_SEED_DIR",
                          f"/tmp/{chain_config.NAME.lower()}")
 
-VOCAB_SIZE = int(os.environ.get("TEUTONIC_SEED_VOCAB", "262144"))
+_default_vocab = "151936" if "Qwen" in (TOKENIZER_REPO or "") else "262144"
+VOCAB_SIZE = int(os.environ.get("TEUTONIC_SEED_VOCAB", _default_vocab))
 HIDDEN_SIZE = int(os.environ.get("TEUTONIC_SEED_HIDDEN", "4096"))
 NUM_LAYERS = int(os.environ.get("TEUTONIC_SEED_NUM_LAYERS", "36"))
 NUM_HEADS = int(os.environ.get("TEUTONIC_SEED_HEADS", "32"))
@@ -95,9 +96,18 @@ def build_config() -> Qwen3MoeConfig:
         # eos=1, bos=2 — matches Quasar / live `dataset/v2/` shards. Override
         # via TEUTONIC_SEED_{BOS,EOS,PAD}_ID to seed under a different
         # tokenizer (e.g. Qwen: bos=151643, eos=151645, pad=151643).
-        bos_token_id=int(os.environ.get("TEUTONIC_SEED_BOS_ID", "2")),
-        eos_token_id=int(os.environ.get("TEUTONIC_SEED_EOS_ID", "1")),
-        pad_token_id=int(os.environ.get("TEUTONIC_SEED_PAD_ID", "0")),
+        bos_token_id=int(os.environ.get(
+            "TEUTONIC_SEED_BOS_ID",
+            "151643" if VOCAB_SIZE == 151936 else "2",
+        )),
+        eos_token_id=int(os.environ.get(
+            "TEUTONIC_SEED_EOS_ID",
+            "151645" if VOCAB_SIZE == 151936 else "1",
+        )),
+        pad_token_id=int(os.environ.get(
+            "TEUTONIC_SEED_PAD_ID",
+            "151643" if VOCAB_SIZE == 151936 else "0",
+        )),
     )
     cfg.architectures = ["Qwen3MoeForCausalLM"]
     return cfg
@@ -150,6 +160,8 @@ def main():
                              "for sharded 80B you must currently --no-probe)")
     parser.add_argument("--device", default="cuda:0",
                         help="GPU for the (optional) probe — single GPU only for now")
+    parser.add_argument("--hippius", action="store_true",
+                        help="upload to Hippius Hub (registry.hippius.com) instead of HF")
     args = parser.parse_args()
 
     out = Path(OUT_DIR)
@@ -229,7 +241,22 @@ def main():
     else:
         log.info("skipping trainability probe (--no-probe)")
 
-    if args.push:
+    if args.push and args.hippius:
+        from model_store import upload_model_folder
+
+        log.info("uploading folder %s -> Hippius %s", out, TARGET_REPO)
+        t2 = time.time()
+        ref = upload_model_folder(
+            out,
+            repo=TARGET_REPO,
+            commit_message=(
+                f"seed {chain_config.NAME} (Qwen3MoE layers={NUM_LAYERS} "
+                f"hidden={HIDDEN_SIZE} experts={NUM_EXPERTS}/top{TOP_K}, fresh init)"
+            ),
+        )
+        log.info("hippius upload done in %.1fs digest=%s", time.time() - t2, ref.digest)
+        print(f"SEED_DIGEST={ref.digest}")
+    elif args.push:
         api = HfApi(token=HF_TOKEN or None)
         private = not args.public
         log.info("creating/updating repo %s (private=%s)", TARGET_REPO, private)
@@ -251,7 +278,7 @@ def main():
         )
         log.info("uploaded in %.1fs", time.time() - t2)
     else:
-        log.info("skipped push (use --push to upload)")
+        log.info("skipped push (use --push [--hippius] to upload)")
 
     cfg_path = out / "config.json"
     with open(cfg_path) as f:
