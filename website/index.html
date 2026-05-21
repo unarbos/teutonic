@@ -486,6 +486,20 @@ var ERROR_MESSAGES = {
     }
 };
 
+function modelRepo(obj) { return (obj && (obj.model_repo || obj.challenger_repo)) || ""; }
+function modelDigest(obj) { return (obj && (obj.model_digest || obj.king_digest || obj.challenger_digest)) || ""; }
+function shortDigest(d) { return d ? d.slice(0, 19) : ""; }
+function hubUrl(repo, digest) {
+    if (!repo) return "#";
+    var parts = repo.split("/");
+    if (parts.length < 2) return "https://hub.hippius.com/models";
+    return "https://hub.hippius.com/models/" + parts[0] + "/" + parts.slice(1).join("/") + (digest ? "/" + digest : "");
+}
+function modelLink(repo, digest, label) {
+    if (!repo) return label || "--";
+    return '<a href="' + hubUrl(repo, digest) + '" target="_blank" style="color:var(--ink)">' + (label || repo) + '</a>';
+}
+
 function render(d) {
     var mkt = d.market || {};
     if (mkt.tao_price_usd) {
@@ -517,15 +531,14 @@ function render(d) {
             topModel = hist_all[ti]; break;
         }
     }
-    var kingRepo = topModel ? topModel.challenger_repo : (king.hf_repo || "--");
-    var kingRev = king.king_revision || "";
+    var kingRepo = topModel ? modelRepo(topModel) : (king.model_repo || "--");
+    var kingDigest = topModel ? modelDigest(topModel) : (king.king_digest || king.model_digest || "");
     var kingLinkTop = document.getElementById("king-link-top");
-    kingLinkTop.href = "https://huggingface.co/" + kingRepo;
+    kingLinkTop.href = hubUrl(kingRepo, kingDigest);
     kingLinkTop.textContent = kingRepo;
     var kingRevEl = document.getElementById("king-rev");
-    if (kingRev) {
-        var commitUrl = "https://huggingface.co/" + kingRepo + "/commit/" + kingRev;
-        kingRevEl.innerHTML = '@ <a href="' + commitUrl + '" target="_blank" style="color:var(--ink);opacity:0.6">' + kingRev.slice(0, 8) + '</a>';
+    if (kingDigest) {
+        kingRevEl.innerHTML = '@ <a href="' + hubUrl(kingRepo, kingDigest) + '" target="_blank" style="color:var(--ink);opacity:0.6">' + shortDigest(kingDigest) + '</a>';
     } else {
         kingRevEl.textContent = "";
     }
@@ -757,9 +770,9 @@ function render(d) {
     var duelWr = document.getElementById("duel-wr");
     if (ev) {
         duelSec.classList.remove("duel-idle");
-        var duelName = ev.challenger_repo || short(ev.hotkey, 12);
-        if (ev.challenger_repo) {
-            duelLabel.innerHTML = '<a href="https://huggingface.co/' + ev.challenger_repo + '" target="_blank" style="color:var(--ink)">' + duelName + '</a>';
+        var duelName = modelRepo(ev) || short(ev.hotkey, 12);
+        if (modelRepo(ev)) {
+            duelLabel.innerHTML = modelLink(modelRepo(ev), modelDigest(ev), duelName);
         } else {
             duelLabel.textContent = duelName;
         }
@@ -788,9 +801,9 @@ function render(d) {
         var q = d.queue || [];
         if (q.length > 0) {
             duelSec.classList.remove("duel-idle");
-            var nextRepo = q[0].hf_repo || "--";
-            if (q[0].hf_repo) {
-                duelLabel.innerHTML = '<a href="https://huggingface.co/' + q[0].hf_repo + '" target="_blank" style="color:var(--ink)">' + nextRepo + '</a>';
+            var nextRepo = q[0].model_repo || "--";
+            if (q[0].model_repo) {
+                duelLabel.innerHTML = modelLink(q[0].model_repo, q[0].model_digest, nextRepo);
             } else {
                 duelLabel.textContent = nextRepo;
             }
@@ -813,8 +826,8 @@ function render(d) {
         if (d.history[i].accepted) { winner = d.history[i]; break; }
     }
     if (winner) {
-        var repo = winner.challenger_repo || "--";
-        var link = winner.challenger_repo ? '<a href="https://huggingface.co/' + repo + '" target="_blank" style="color:var(--ink)">' + repo + '</a>' : repo;
+        var repo = modelRepo(winner) || "--";
+        var link = modelRepo(winner) ? modelLink(modelRepo(winner), modelDigest(winner), repo) : repo;
         lwEl.innerHTML = '<span style="width:100%">' + link + '</span>' +
             '<span>MU_HAT: ' + (winner.mu_hat || 0).toFixed(6) + '</span>' +
             '<span>LCB: ' + (winner.lcb || 0).toFixed(6) + '</span>' +
@@ -842,8 +855,8 @@ function render(d) {
             var weightVal = e.weight != null ? e.weight : w.weight;
             var alphaVal = e.alpha_per_hour != null ? e.alpha_per_hour : w.alpha_per_hour;
             var usdVal = e.usd_per_hour != null ? e.usd_per_hour : w.usd_per_hour;
-            var repo = e.hf_repo || "--";
-            var repoLink = e.hf_repo ? '<a href="https://huggingface.co/' + e.hf_repo + '" target="_blank" style="color:var(--ink)">' + repo + '</a>' : repo;
+            var repo = e.model_repo || "--";
+            var repoLink = e.model_repo ? modelLink(e.model_repo, e.king_digest || e.model_digest, repo) : repo;
             var hkLink = hotkeyCell(e.hotkey, e.coldkey);
             var weightPct = (weightVal != null) ? (weightVal * 100).toFixed(1) + "%" : "--";
             var alphaHr = (alphaVal != null) ? alphaVal.toFixed(3) : "--";
@@ -870,8 +883,8 @@ function render(d) {
         qEl.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:16px">Queue empty</td></tr>';
     } else {
         qEl.innerHTML = q.map(function(e) {
-            var repo = e.hf_repo || "--";
-            var repoLink = e.hf_repo ? '<a href="https://huggingface.co/' + e.hf_repo + '" target="_blank" style="color:var(--ink)">' + repo + '</a>' : repo;
+            var repo = e.model_repo || "--";
+            var repoLink = e.model_repo ? modelLink(e.model_repo, e.king_digest || e.model_digest, repo) : repo;
             var uid = e.uid != null ? e.uid : "--";
             return '<tr>' +
                 '<td>' + uid + '</td>' +
@@ -893,8 +906,8 @@ function render(d) {
             var isErr = h.verdict === "error";
             var kl = h.avg_king_loss || 0;
             var cl = h.avg_challenger_loss || 0;
-            var repo = h.challenger_repo || "--";
-            var repoLink = h.challenger_repo ? '<a href="https://huggingface.co/' + h.challenger_repo + '" target="_blank" style="color:var(--ink)">' + repo + '</a>' : repo;
+            var repo = modelRepo(h) || "--";
+            var repoLink = modelRepo(h) ? modelLink(modelRepo(h), modelDigest(h), repo) : repo;
             var uid = h.uid != null ? h.uid : "--";
 
             var verdictCell;

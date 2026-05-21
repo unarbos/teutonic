@@ -6,11 +6,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "bittensor",
+    "bittensor>=10.3,<11",
     "boto3",
     "httpx",
     "numpy",
     "scipy",
+    "hippius-hub",
     "huggingface-hub",
     "hf_transfer>=0.1",
     "safetensors",
@@ -19,6 +20,8 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pydantic",
+    "pyarrow",
+    "accelerate",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +41,7 @@ only-include = [
     "validator.py",
     "miner.py",
     "eval_server.py",
+    "model_store.py",
     "chain_config.py",
     "chain.toml",
     "archs",

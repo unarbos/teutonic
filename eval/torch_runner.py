@@ -14,7 +14,6 @@ Usage:
         --n 100 --batch-size 64 --seq-len 2048 --gpus 0,1,2,3,4,5,6,7
 
 Env vars:
-    HF_TOKEN              HuggingFace token for gated repos
     TEUTONIC_R2_ENDPOINT  R2 endpoint URL
     TEUTONIC_R2_BUCKET    R2 bucket name (default: constantinople)
     TEUTONIC_R2_ACCESS_KEY R2 access key
@@ -25,6 +24,7 @@ Env vars:
     TEUTONIC_DS_SECRET_KEY Dataset store secret key (default: R2 key)
 """
 import argparse
+import ast
 import hashlib
 import io
 import json
@@ -39,20 +39,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-# hf-xet (the Rust chunked-CDN downloader) ignores huggingface_hub's HTTP
-# timeouts and has been observed to hang for hours on partial responses,
-# wedging the eval lock. Disable it and use hf_transfer instead, which is a
-# much simpler Rust shim doing parallel HTTPS range GETs against the same
-# CDN — no Tokio runtime, no chunked-CDN protocol, no observed hangs. Falls
-# back to plain requests/urllib3 (honoring HF_HUB_DOWNLOAD_TIMEOUT below) if
-# the hf_transfer wheel isn't installed. Must be set BEFORE huggingface_hub
-# imports.
-os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-# Conservative per-chunk read timeout for the plain HTTPS download path
-# (also enforced by hf_transfer per range request).
-os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
-os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
 # Belt-and-suspenders: any unguarded socket op blocks at most this long.
 socket.setdefaulttimeout(180)
 
@@ -75,6 +61,8 @@ if _workspace_root not in sys.path:
 # dispatches checkpoints without trust_remote_code. Idempotent.
 import chain_config  # noqa: E402
 chain_config.load_arch()  # noqa: E402
+from eval.raw_dataset import load_raw_sequences, raw_dataset_enabled  # noqa: E402
+from model_store import ModelRef, materialize_model  # noqa: E402
 
 log = logging.getLogger("eval_torch")
 
@@ -160,13 +148,24 @@ class R2:
 # Dataset (identical to validator.py)
 # ---------------------------------------------------------------------------
 
-def get_shard_info(r2, shard_key):
-    header = r2.ds_range_get(shard_key, 0, 1023)
-    buf = io.BytesIO(header)
-    buf.read(6)  # magic
+def _read_npy_header_bytes(raw: bytes) -> tuple[int, dict]:
+    """Parse enough of a .npy header to validate eval shard shape/dtype."""
+    buf = io.BytesIO(raw)
+    magic = buf.read(6)
+    if magic != b"\x93NUMPY":
+        raise ValueError("dataset shard is not a .npy file")
     ver = struct.unpack("BB", buf.read(2))
     hl = struct.unpack("<H" if ver[0] == 1 else "<I", buf.read(2 if ver[0] == 1 else 4))[0]
-    hdr = eval(buf.read(hl).decode("latin1").strip())
+    hdr = ast.literal_eval(buf.read(hl).decode("latin1").strip())
+    dtype = np.dtype(hdr.get("descr"))
+    if dtype != np.dtype("<u4"):
+        raise ValueError(f"dataset shard dtype must be uint32/<u4, got {dtype}")
+    return buf.tell(), hdr
+
+
+def get_shard_info(r2, shard_key):
+    header = r2.ds_range_get(shard_key, 0, 1023)
+    _, hdr = _read_npy_header_bytes(header)
     n = 1
     for s in hdr["shape"]:
         n *= s
@@ -177,12 +176,8 @@ R2_FETCH_WORKERS = 32
 
 def _parse_shard_header(r2, shard_key):
     header = r2.ds_range_get(shard_key, 0, 1023)
-    buf = io.BytesIO(header)
-    buf.read(6)  # magic
-    ver = struct.unpack("BB", buf.read(2))
-    hl = struct.unpack("<H" if ver[0] == 1 else "<I", buf.read(2 if ver[0] == 1 else 4))[0]
-    buf.read(hl)
-    return buf.tell()
+    off, _hdr = _read_npy_header_bytes(header)
+    return off
 
 
 def fetch_sequences(r2, shard_key, indices, seq_len):
@@ -353,6 +348,32 @@ def extract_sequences(shard_data, data_offset, indices, seq_len):
     return result
 
 
+def _evaluator_vocab_size(evaluator) -> int | None:
+    try:
+        model = evaluator.primary_model
+        cfg = getattr(model, "config", None)
+        if cfg is None:
+            return None
+        vocab = int(getattr(cfg, "vocab_size", 0) or 0)
+        return vocab or None
+    except Exception:
+        return None
+
+
+def validate_sequence_cache(seq_cache, seq_len: int, vocab_size: int | None = None):
+    """Fail fast on malformed token shards before model scoring."""
+    if not seq_cache:
+        raise ValueError("dataset shard produced no token sequences")
+    max_id = -1
+    for idx, seq in seq_cache.items():
+        if len(seq) != seq_len:
+            raise ValueError(f"sequence {idx} has length {len(seq)}, expected {seq_len}")
+        if seq:
+            max_id = max(max_id, max(seq))
+    if vocab_size is not None and max_id >= vocab_size:
+        raise ValueError(f"dataset token id {max_id} exceeds model vocab_size {vocab_size}")
+
+
 # ---------------------------------------------------------------------------
 # Chunked loss computation — avoids materializing full [batch, seq, vocab]
 # ---------------------------------------------------------------------------
@@ -493,47 +514,27 @@ def compute_paired_losses(king_model, chall_model, token_batches,
 # Model loading
 # ---------------------------------------------------------------------------
 
-def _prefetch_repo(repo, revision=None, timeout=600):
-    """Pre-download repo files via huggingface_hub with an explicit wall-clock
-    cap. Runs in a background thread so we can abandon a hung download (the
-    actual blocked socket can't be cancelled, but this lets the caller fail
-    fast and let the eval-server watchdog reclaim the eval lock).
-    """
-    from huggingface_hub import snapshot_download
+def _prefetch_repo(repo, digest=None, timeout=600):
+    """Materialize a Hippius Hub digest snapshot with an explicit wall-clock cap."""
     import threading
 
     result = {"path": None, "err": None}
 
     def _do():
         try:
-            for attempt in range(3):
-                try:
-                    result["path"] = snapshot_download(
-                        repo_id=repo,
-                        revision=revision or None,
-                        token=os.environ.get("HF_TOKEN") or None,
-                        allow_patterns=["*.json", "*.safetensors", "*.txt", "tokenizer*", "*.model"],
-                        etag_timeout=int(os.environ.get("HF_HUB_ETAG_TIMEOUT", "30")),
-                    )
-                    break
-                except Exception as e:
-                    if attempt == 2:
-                        raise
-                    backoff = 5 * (3 ** attempt)
-                    log.warning("prefetch attempt %d/3 failed for %s: %s; retrying in %ds (HF cache will resume)", attempt + 1, repo, e, backoff)
-                    time.sleep(backoff)
+            ref = ModelRef(repo, digest or "")
+            result["path"] = materialize_model(ref, max_workers=16)
         except Exception as e:
             result["err"] = e
 
-    t = threading.Thread(target=_do, daemon=True, name=f"hf-prefetch-{repo}")
+    t = threading.Thread(target=_do, daemon=True, name=f"hippius-prefetch-{repo}")
     t.start()
     t.join(timeout=timeout)
     if t.is_alive():
-        raise TimeoutError(f"prefetch of {repo} exceeded {timeout}s (likely stuck CDN)")
+        raise TimeoutError(f"prefetch of {repo}@{(digest or '')[:19]} exceeded {timeout}s")
     if result["err"] is not None:
         raise result["err"]
     return result["path"]
-
 
 def _build_sharded_device_map(gpu_ids: list[int],
                               per_gpu_gib: int | None = None) -> dict:
@@ -564,12 +565,12 @@ def load_model(repo, device, label="model", force_download=False, revision=None,
     set of GPUs via accelerate's device_map='auto'.
 
     Args:
-        repo:                HF repo id (or local path) to load
+        repo:                Hippius repo id or local path to load
         device:              for single-GPU mode, a string like "cuda:0".
                              Ignored when shard_across_gpus is set.
         label:               human-readable tag for log lines
         force_download:      bypass HF cache
-        revision:            pinned commit SHA
+        revision:            pinned OCI digest
         shard_across_gpus:   if set, list of GPU indices to shard across.
                              Builds one replica via device_map='auto' with
                              max_memory caps that ban every other visible GPU.
@@ -580,15 +581,15 @@ def load_model(repo, device, label="model", force_download=False, revision=None,
         target = f"sharded({','.join(str(g) for g in shard_across_gpus)})"
     else:
         target = device
-    log.info("loading %s from %s onto %s (force_download=%s, revision=%s)",
-             label, repo, target, force_download, revision[:12] if revision else None)
+    log.info("loading %s from %s onto %s (force_download=%s, digest=%s)",
+             label, repo, target, force_download, revision[:19] if revision else None)
     t0 = time.time()
     # Pre-download with hard timeout so a stuck CDN doesn't hang the eval lock
     # for half an hour. Skip on force_download (let from_pretrained re-pull).
     if not force_download:
         try:
-            _prefetch_repo(repo, revision=revision,
-                           timeout=int(os.environ.get("HF_PREFETCH_TIMEOUT", "600")))
+            _prefetch_repo(repo, digest=revision,
+                           timeout=int(os.environ.get("HIPPIUS_PREFETCH_TIMEOUT", "600")))
             log.info("%s prefetch complete in %.1fs", label, time.time() - t0)
         except TimeoutError as e:
             log.error("%s prefetch timed out: %s", label, e)
@@ -603,13 +604,15 @@ def load_model(repo, device, label="model", force_download=False, revision=None,
         load_kwargs = {"device_map": {"": device}}
     for attn_impl in ("flash_attention_2", "sdpa", "eager"):
         try:
+            local_repo = repo
+            if revision and not os.path.isdir(repo):
+                local_repo = _prefetch_repo(repo, digest=revision,
+                                           timeout=int(os.environ.get("HIPPIUS_PREFETCH_TIMEOUT", "600")))
             model = AutoModelForCausalLM.from_pretrained(
-                repo,
+                local_repo,
                 torch_dtype=torch.bfloat16,
                 attn_implementation=attn_impl,
-                token=os.environ.get("HF_TOKEN") or None,
-                force_download=force_download,
-                revision=revision or None,
+                force_download=False,
                 use_safetensors=True,
                 **load_kwargs,
             )
@@ -1396,69 +1399,128 @@ def compute_paired_multi_gpu(king_eval, chall_eval, token_batches):
 
 
 # ---------------------------------------------------------------------------
-# Bootstrap test
+# Holdout sampling + paired bootstrap
 # ---------------------------------------------------------------------------
 
-# Effect-size floor in nats/token. The challenger's bootstrapped LCB on the
-# per-token log-loss advantage must exceed this for a dethrone. Restored
-# 2026-05-09 from the temporary `1/N` resolution-only floor (~1e-4 at
-# N=10000) which was too permissive once the king matured: at low per-seq
-# variance the LCB itself stops being the binding constraint and trivial
-# improvements were clearing the bar. 0.0025 nats/token (~0.25%) is a
-# meaningful effect floor that still lets real gains through but blocks
-# noise-grade wins.
+# CLI fallback. Production runs eval_server.py, which gets `delta_threshold`
+# per-request from the validator (computed as `c · king_loss_ema`). Kept so
+# `python -m eval.torch_runner` and scripts/smoke_eval.py still work with a
+# sensible default.
 EVAL_DELTA = float(os.environ.get("EVAL_DELTA", "0.0025"))
 
 
-def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
-                       alpha, seq_len, batch_size, seed_str,
-                       n_bootstrap=10000, on_progress=None):
-    """Paired bootstrap test on per-token log-loss differences.
+def is_accepted(lcb: float, delta_threshold: float) -> bool:
+    return lcb > delta_threshold
 
-    Scores M fixed-length blocks on both models, computes d_i = king_loss_i -
-    challenger_loss_i (positive means challenger is better), then bootstraps the
-    mean to get a one-sided lower confidence bound (LCB).  Accepts only if
-    LCB > delta, where delta = EVAL_DELTA (default 0.0025 nats/token). The
-    fixed effect floor blocks both numerical-noise wins and tiny real-but-
-    economically-trivial improvements, putting the burden on miners to ship
-    a meaningful gain rather than grinding the LCB toward zero.
 
-    Calls on_progress(info_dict) after each batch if provided.
+def sample_public_holdout(r2, shard_key, public_seed: bytes,
+                          n_public: int, seq_len: int,
+                          vocab_size: int | None = None
+                          ) -> tuple[torch.Tensor, str, dict | None]:
+    """Sample `n_public` sequences of `seq_len` tokens from the public corpus.
+
+    Returns (sequences [n_public, seq_len] int64, public_indices_digest hex,
+    raw_meta or None). The indices digest is sha256 of the int64 indices
+    array used to sample — the second piece of the public audit triple
+    (corpus_digest, seed, indices_digest).
+
+    In raw_hippius mode the underlying parquet path is non-index-based so
+    `public_indices_digest` becomes sha256 of a `b"raw:<seed_hex>"` marker;
+    auditors recompute by replaying the same seed against the same corpus
+    digest. The shard mode returns the real indices digest.
     """
+    seed_int = int.from_bytes(public_seed, "little")
+    seed_str = public_seed.hex()
+    if raw_dataset_enabled():
+        log.info("public holdout: raw Hippius dataset mode")
+        if n_public == 0:
+            marker = f"raw:{seed_str}".encode()
+            return (torch.empty((0, seq_len), dtype=torch.long),
+                    hashlib.sha256(marker).hexdigest(), None)
+        raw_sequences, raw_meta = load_raw_sequences(
+            r2, n_public, seq_len, seed_str, chain_config.SEED_TOKENIZER_REPO,
+        )
+        if len(raw_sequences) < n_public:
+            log.warning("public holdout undersized: got %d, requested %d",
+                        len(raw_sequences), n_public)
+        # Bind the digest to the set of source files actually used + the seed.
+        # An auditor with the same manifest + seed reproduces the same files
+        # and therefore the same digest. File-bytes shifts on the upstream
+        # mirror would shift the digest only via the file keys, not the bytes
+        # themselves — for a stronger fingerprint, set
+        # TEUTONIC_AUDIT_FINGERPRINT_N=8 to hash the first N sampled sequence
+        # tensors (probabilistic content binding). Left as a flag rather than
+        # default because it makes the digest sequence-order-sensitive.
+        used_files = (raw_meta or {}).get("used_files", []) or []
+        h = hashlib.sha256()
+        for key in sorted(used_files):
+            h.update(key.encode())
+            h.update(b"\n")
+        h.update(public_seed)
+        fingerprint_n = int(os.environ.get("TEUTONIC_AUDIT_FINGERPRINT_N", "0") or "0")
+        if fingerprint_n > 0 and raw_sequences:
+            fp_count = min(fingerprint_n, len(raw_sequences))
+            fp_tensor = torch.tensor(raw_sequences[:fp_count], dtype=torch.long)
+            h.update(b"|fp|")
+            h.update(fp_tensor.numpy().tobytes())
+        indices_digest = h.hexdigest()
+        return torch.tensor(raw_sequences, dtype=torch.long), indices_digest, raw_meta
+
+    if n_public == 0:
+        sentinel = hashlib.sha256(b"shard:empty:" + public_seed).hexdigest()
+        return torch.empty((0, seq_len), dtype=torch.long), sentinel, None
     n_tokens = get_shard_info(r2, shard_key)
     n_sequences = n_tokens // seq_len
-    actual_N = min(eval_n, n_sequences)
-    delta = EVAL_DELTA
-    log.info("bootstrap test: N=%d actual_N=%d alpha=%s delta=%.6f B=%d",
-             eval_n, actual_N, alpha, delta, n_bootstrap)
+    actual_n = min(n_public, n_sequences)
+    rng = np.random.Generator(np.random.PCG64(seed_int))
+    indices = rng.choice(n_sequences, size=actual_n, replace=False).astype("<i8")
+    indices_digest = hashlib.sha256(indices.tobytes()).hexdigest()
 
-    seed_material = seed_str.encode()
-    seed = int.from_bytes(hashlib.blake2b(seed_material, digest_size=8).digest(), "little")
-    rng = np.random.Generator(np.random.PCG64(seed))
-    eval_indices = rng.choice(n_sequences, size=actual_N, replace=False).tolist()
-
-    log.info("downloading shard %s ...", shard_key)
+    log.info("public holdout: shard=%s n=%d/%d", shard_key, actual_n, n_sequences)
     data_offset, shard_data = download_shard(r2, shard_key)
+    seq_cache = extract_sequences(shard_data, data_offset, indices.tolist(), seq_len)
+    validate_sequence_cache(seq_cache, seq_len, vocab_size)
+    # Preserve sample order so the indices_digest matches the sequence order.
+    seqs = [seq_cache[i] for i in indices.tolist()]
+    return torch.tensor(seqs, dtype=torch.long), indices_digest, None
 
-    log.info("extracting %d sequences", actual_N)
-    seq_cache = extract_sequences(shard_data, data_offset, eval_indices, seq_len)
-    log.info("extracted %d sequences", len(seq_cache))
 
-    batches = [
-        eval_indices[i : i + batch_size]
-        for i in range(0, len(eval_indices), batch_size)
-    ]
+def run_paired_eval(king_eval, challenger_eval,
+                    holdout_seqs: torch.Tensor,
+                    public_count: int,
+                    boot_seed: bytes,
+                    eval_alpha: float,
+                    delta_threshold: float,
+                    n_bootstrap: int = 10000,
+                    batch_size: int = 256,
+                    on_progress=None) -> dict:
+    """Paired CE duel on a pre-prepared holdout tensor.
 
-    all_diffs = []
-    king_sum, chall_sum = 0.0, 0.0
+    holdout_seqs: int64 [n_total, seq_len]; first `public_count` rows are the
+    public component, the rest are private. Bootstrap LCB is computed over all
+    `n_total` rows; per-component means are diagnostic.
+    """
+    if holdout_seqs.dim() != 2:
+        raise ValueError(f"holdout_seqs must be 2D, got shape {tuple(holdout_seqs.shape)}")
+    n_total = holdout_seqs.shape[0]
+    if not (0 <= public_count <= n_total):
+        raise ValueError(f"public_count={public_count} out of range [0, {n_total}]")
+
+    n_private = n_total - public_count
+    same_evaluator = king_eval is challenger_eval
+    sequences = holdout_seqs.tolist()
+    batches = [sequences[i:i + batch_size] for i in range(0, n_total, batch_size)]
+
+    log.info("paired eval: n_total=%d (public=%d private=%d) alpha=%s delta=%.6f B=%d",
+             n_total, public_count, n_private, eval_alpha, delta_threshold, n_bootstrap)
+
+    king_losses_all: list[float] = []
+    chall_losses_all: list[float] = []
+    king_sum = chall_sum = 0.0
     total_done = 0
     t0 = time.time()
 
-    same_evaluator = king_eval is challenger_eval
-
-    for bi, batch_indices in enumerate(batches):
-        token_batches = [seq_cache[idx] for idx in batch_indices]
-
+    for bi, token_batches in enumerate(batches):
         if same_evaluator:
             king_losses = king_eval.compute_losses(token_batches)
             chall_losses = king_losses
@@ -1466,60 +1528,102 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
             king_losses, chall_losses = compute_paired_multi_gpu(
                 king_eval, challenger_eval, token_batches,
             )
-
-        for k_loss, c_loss in zip(king_losses, chall_losses):
+        for kl, cl in zip(king_losses, chall_losses):
+            king_losses_all.append(kl)
+            chall_losses_all.append(cl)
+            king_sum += kl
+            chall_sum += cl
             total_done += 1
-            king_sum += k_loss
-            chall_sum += c_loss
-            all_diffs.append(k_loss - c_loss)
 
         elapsed = time.time() - t0
-        seqs_per_sec = total_done / elapsed if elapsed > 0 else 0
-        mu_hat = np.mean(all_diffs) if all_diffs else 0.0
-        log.info(
-            "batch %d/%d | done=%d/%d | mu_hat=%.6f | %.1f seq/s",
-            bi + 1, len(batches), total_done, actual_N, mu_hat, seqs_per_sec,
-        )
-
+        sps = total_done / elapsed if elapsed > 0 else 0
+        d_so_far = np.subtract(king_losses_all, chall_losses_all)
+        mu_so_far = float(d_so_far.mean()) if d_so_far.size else 0.0
+        log.info("batch %d/%d | done=%d/%d | mu_hat=%.6f | %.1f seq/s",
+                 bi + 1, len(batches), total_done, n_total, mu_so_far, sps)
         if on_progress:
             on_progress({
-                "done": total_done, "total": actual_N,
-                "mu_hat": round(float(mu_hat), 6),
+                "done": total_done, "total": n_total,
+                "mu_hat": round(mu_so_far, 6),
                 "avg_king_loss": round(king_sum / total_done, 6),
                 "avg_challenger_loss": round(chall_sum / total_done, 6),
-                "seqs_per_sec": round(seqs_per_sec, 1),
+                "seqs_per_sec": round(sps, 1),
             })
 
     elapsed = time.time() - t0
-    d = np.array(all_diffs)
+    king_arr = np.asarray(king_losses_all)
+    chall_arr = np.asarray(chall_losses_all)
+    d = king_arr - chall_arr
     mu_hat = float(d.mean())
+    mu_hat_public = float(d[:public_count].mean()) if public_count else 0.0
+    mu_hat_private = float(d[public_count:].mean()) if n_private else 0.0
 
-    boot_rng = np.random.Generator(np.random.PCG64(seed ^ 0xB007))
+    boot_rng = np.random.Generator(np.random.PCG64(int.from_bytes(boot_seed, "little")))
     boot_means = np.empty(n_bootstrap)
+    n = len(d)
     for b in range(n_bootstrap):
-        idx = boot_rng.integers(0, len(d), size=len(d))
+        idx = boot_rng.integers(0, n, size=n)
         boot_means[b] = d[idx].mean()
-    lcb = float(np.quantile(boot_means, alpha))
+    lcb = float(np.quantile(boot_means, eval_alpha))
 
-    accepted = lcb > delta
-    log.info("bootstrap result: mu_hat=%.6f lcb=%.6f delta=%.6f accepted=%s",
-             mu_hat, lcb, delta, accepted)
+    accepted = is_accepted(lcb, delta_threshold)
+    log.info("paired result: mu_hat=%.6f (pub=%.6f priv=%.6f) lcb=%.6f delta=%.6f accepted=%s",
+             mu_hat, mu_hat_public, mu_hat_private, lcb, delta_threshold, accepted)
 
-    verdict = {
+    return {
         "accepted": accepted,
         "verdict": "challenger" if accepted else "king",
         "mu_hat": round(mu_hat, 6),
+        "mu_hat_public": round(mu_hat_public, 6),
+        "mu_hat_private": round(mu_hat_private, 6),
         "lcb": round(lcb, 6),
-        "delta": delta,
-        "alpha": alpha,
+        "delta_threshold": delta_threshold,
+        "alpha": eval_alpha,
         "n_bootstrap": n_bootstrap,
-        "N": actual_N,
-        "avg_king_loss": round(king_sum / total_done, 6) if total_done else 0,
-        "avg_challenger_loss": round(chall_sum / total_done, 6) if total_done else 0,
+        "n_sequences": n_total,
+        "n_public_seqs": public_count,
+        "n_private_seqs": n_private,
+        "avg_king_loss": round(king_sum / total_done, 6) if total_done else 0.0,
+        "avg_challenger_loss": round(chall_sum / total_done, 6) if total_done else 0.0,
         "wall_time_s": round(elapsed, 1),
-        "seqs_per_sec": round(total_done / elapsed, 1) if elapsed > 0 else 0,
+        "seqs_per_sec": round(total_done / elapsed, 1) if elapsed > 0 else 0.0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
+                       alpha, seq_len, batch_size, seed_str,
+                       n_bootstrap=10000, on_progress=None,
+                       delta_threshold: float | None = None):
+    """Public-only paired bootstrap test (CLI / smoke compat).
+
+    Used by main() and scripts/smoke_eval.py. The eval-server path uses
+    sample_public_holdout + sample_private_pool + run_paired_eval directly
+    so it can layer the private holdout and surface audit digests.
+
+    `delta_threshold` defaults to EVAL_DELTA for backward compat.
+    """
+    delta = EVAL_DELTA if delta_threshold is None else float(delta_threshold)
+    public_seed = hashlib.blake2b(seed_str.encode(), digest_size=8).digest()
+    boot_seed = hashlib.blake2b(seed_str.encode() + b":boot", digest_size=8).digest()
+
+    holdout, indices_digest, raw_meta = sample_public_holdout(
+        r2, shard_key, public_seed, eval_n, seq_len,
+        vocab_size=_evaluator_vocab_size(king_eval),
+    )
+    verdict = run_paired_eval(
+        king_eval, challenger_eval,
+        holdout, holdout.shape[0],
+        boot_seed=boot_seed, eval_alpha=alpha,
+        delta_threshold=delta, n_bootstrap=n_bootstrap,
+        batch_size=batch_size, on_progress=on_progress,
+    )
+    # Legacy field names that smoke_eval / main() print.
+    verdict["delta"] = delta
+    verdict["N"] = verdict["n_sequences"]
+    verdict["public_indices_digest"] = indices_digest
+    if raw_meta is not None:
+        verdict["dataset"] = raw_meta
     return verdict
 
 
@@ -1563,7 +1667,10 @@ def main():
 
     r2 = R2()
 
-    if args.shard:
+    if raw_dataset_enabled():
+        shard_key = args.shard or "raw:hippius:fineweb-edu"
+        log.info("using raw Hippius dataset mode")
+    elif args.shard:
         shard_key = args.shard
     else:
         manifest = r2.ds_get("dataset/v2/manifest.json")

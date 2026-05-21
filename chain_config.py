@@ -43,6 +43,7 @@ ARCH_MODULE: str = _arch.get("module", "")
 EXTRA_LOCK_KEYS: tuple[str, ...] = tuple(_arch.get("extra_lock_keys", []))
 
 SEED_TOKENIZER_REPO: str = _seed.get("tokenizer_repo", "")
+SEED_DIGEST: str = _seed.get("seed_digest", "")
 
 # HF namespace inferred from the seed repo. Miners default their challenger
 # repo to "<namespace>/<NAME>-<suffix>" though they can override to publish
@@ -69,6 +70,7 @@ __all__ = [
     "ARCH_MODULE",
     "EXTRA_LOCK_KEYS",
     "SEED_TOKENIZER_REPO",
+    "SEED_DIGEST",
     "SEED_NAMESPACE",
     "load_arch",
 ]

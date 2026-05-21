@@ -48,6 +48,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .torch_runner import R2, parse_gpu_ids, download_shard
+from .raw_dataset import raw_dataset_enabled
 from .vllm_runner import VllmEvaluator, run_bootstrap_test_vllm
 
 log = logging.getLogger("eval_server_vllm")
@@ -358,7 +359,7 @@ def _run_eval(eval_id: str, req: EvalRequest):
     )
 
     try:
-        if req.shard_key:
+        if req.shard_key and not raw_dataset_enabled():
             try:
                 download_shard(_r2, req.shard_key)
             except Exception:

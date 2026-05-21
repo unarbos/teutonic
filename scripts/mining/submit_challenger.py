@@ -2,29 +2,24 @@
 """Submit a pre-built challenger to the chain.
 
 Reads a verdict.json produced by train_challenger.py (king_hash,
-uploaded_repo, uploaded_revision) and posts the bittensor reveal commitment
-in the form `{king_hash[:16]}:{repo}:{revision_sha}`.
+uploaded_repo, uploaded_digest) and posts the bittensor reveal commitment
+in the form `v2|{king_hash[:16]}|{repo}|sha256:{manifest_digest}`.
 
-The HF revision SHA is the binding cryptographic commitment to the file
-tree — the validator pins evaluation to exactly that revision, so any
-post-commit upload to the same repo is invisible to evaluation. Pre-
-2026-05-12 the 3rd field was a sha256(safetensors) which was parsed but
-never verified — see miner.py docstring for the empty-repo + late-upload
-exploit it enabled.
+The OCI manifest digest is the immutable commitment to the file tree.
 
 Run this on the templar host where the wallet lives.
 
 IMPORTANT — coldkey gate (added 2026-04-29):
-    The validator REJECTS any HF repo whose name does NOT contain the
+    The validator REJECTS any Hippius repo whose name does NOT contain the
     first 8 ss58 chars of your **coldkey** (case-insensitive substring
     match against the full "<account>/<basename>" string).
 
-    This stops anyone from re-revealing somebody else's HF URL under
+    This stops anyone from re-revealing somebody else's Hippius URL under
     their own hotkey: only YOU know your coldkey, and an imposter who
     lifts your URL ends up advertising YOUR coldkey on chain — which is
     self-incriminating.
 
-    So an HF repo like:
+    So an Hippius repo like:
         my-team/<chain.name>-5DhAqMpd-v3
                              ^^^^^^^^
     works (matches my coldkey 5DhAqMpd...). Without that prefix, the
@@ -41,6 +36,8 @@ import sys
 from pathlib import Path
 
 import bittensor as bt
+
+from model_store import ModelRef, build_reveal_v3
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s [submit] %(message)s",
@@ -65,52 +62,63 @@ def main():
     args = ap.parse_args()
 
     v = json.loads(Path(args.verdict).read_text())
-    king_hash = v["king_hash"][:16]
-    repo = v.get("uploaded_repo")
-    revision = v.get("uploaded_revision")
-    if not repo or not revision:
-        log.error("verdict missing uploaded_repo / uploaded_revision — train script must run with --upload-repo and accept the model")
+    # v3 requires the FULL 64-hex king digest, not a 16-char prefix. The
+    # train_challenger verdict file format hasn't been updated yet, so
+    # surface the right field name and fail hard if it's missing rather
+    # than silently dropping the submission.
+    king_digest_full = v.get("king_digest") or v.get("king_hash")
+    if not king_digest_full or len(king_digest_full.replace("sha256:", "")) < 64:
+        # TODO: train_challenger.py must persist `king_digest` (full 64-hex).
+        log.error("verdict missing full 64-hex `king_digest`; update train_challenger.py "
+                  "to write the full king sha256 from the dashboard (not a 16-char prefix)")
+        sys.exit(7)
+    repo = v.get("uploaded_repo") or v.get("model_repo")
+    digest = v.get("uploaded_digest") or v.get("model_digest")
+    if not repo or not digest:
+        log.error("verdict missing uploaded_repo / uploaded_digest — train script must upload to Hippius Hub")
         sys.exit(2)
-    if len(revision) != 40 or not all(c in "0123456789abcdef" for c in revision.lower()):
-        log.error("uploaded_revision %r is not a 40-char HF commit SHA — re-run train_challenger.py to regenerate verdict.json", revision)
+    try:
+        model_ref = ModelRef(repo, digest)
+    except ValueError as exc:
+        log.error("invalid Hippius model ref: %s", exc)
         sys.exit(2)
     if not v["best"]["accepted"]:
         log.error("offline eval rejected (mu_hat=%.6f, lcb=%.6f, delta=%.6f) — refusing to burn TAO",
                   v["best"]["mu_hat"], v["best"]["lcb"], v["best"]["delta"])
         sys.exit(3)
 
-    wallet = bt.wallet(name=args.wallet_name, hotkey=args.hotkey)
+    wallet = bt.Wallet(name=args.wallet_name, hotkey=args.hotkey)
     log.info("wallet hotkey: %s", wallet.hotkey.ss58_address)
 
     coldkey_ss58 = wallet.coldkeypub.ss58_address
     expected_prefix = coldkey_ss58[:COLDKEY_PREFIX_LEN]
     if expected_prefix.lower() not in repo.lower():
         log.error(
-            "HF repo '%s' does NOT contain your coldkey prefix '%s' "
+            "Hippius repo '%s' does NOT contain your coldkey prefix '%s' "
             "(first %d chars of %s).\n"
             "    The validator will reject this submission with "
             "`coldkey_required` and your tx will be wasted.\n"
-            "    Rename your HF repo or HF account so its full id "
+            "    Rename your Hippius repo or Hippius namespace so its full id "
             "contains '%s' (case-insensitive substring) anywhere — e.g.\n"
             "        %s/<chain.name>-%s-v1\n"
             "    then re-upload and rerun this script.",
             repo, expected_prefix, COLDKEY_PREFIX_LEN, coldkey_ss58,
             expected_prefix,
-            repo.split("/", 1)[0] if "/" in repo else "<your-hf-account>",
+            repo.split("/", 1)[0] if "/" in repo else "<your-hippius-namespace>",
             expected_prefix,
         )
         sys.exit(6)
     log.info("coldkey gate ok: repo '%s' contains coldkey prefix '%s'",
              repo, expected_prefix)
 
-    payload = f"{king_hash}:{repo}:{revision}"
-    log.info("payload: %s (rev=%s)", payload, revision[:12])
+    payload = build_reveal_v3(king_digest_full, model_ref, wallet.hotkey.ss58_address)
+    log.info("payload: %s", payload)
 
     if args.dry_run:
         log.info("[dry-run] not submitting")
         return
 
-    sub = bt.subtensor(network=args.network)
+    sub = bt.Subtensor(network=args.network)
     meta = sub.metagraph(args.netuid)
     if wallet.hotkey.ss58_address not in meta.hotkeys:
         log.error("hotkey not registered on netuid %d", args.netuid)
@@ -118,14 +126,15 @@ def main():
     uid = meta.hotkeys.index(wallet.hotkey.ss58_address)
     log.info("registered as uid=%d", uid)
 
-    ok, block = sub.set_reveal_commitment(
+    resp = sub.set_reveal_commitment(
         wallet=wallet, netuid=args.netuid,
         data=payload, blocks_until_reveal=args.blocks_until_reveal,
+        wait_for_revealed_execution=False,
     )
-    if ok:
-        log.info("reveal committed at block %d -- validator should pick up after reveal", block)
+    if resp.success:
+        log.info("reveal committed: %s -- validator should pick up after reveal", resp.message)
     else:
-        log.error("commitment failed")
+        log.error("commitment failed: %s", resp.message)
         sys.exit(5)
 
 
