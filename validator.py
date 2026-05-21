@@ -62,11 +62,10 @@ POLL_INTERVAL = 30
 WEIGHT_INTERVAL = 300
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
 
-# Burn-only weight policy. The validator NEVER emits to miners. Every weight
-# write is 100% to BURN_UID (default 0 = subnet-owner burn slot). The eval +
-# duel + dashboard pipeline keeps running for observability so the operator
-# always has a canonical king artifact ready, but no chain emission flows to
-# any miner.
+# Weight policy: 100% to the current king's UID. If the king is unknown or
+# its hotkey isn't on the metagraph, fall back to BURN_UID (default 0 =
+# subnet-owner burn slot) so emission still leaves the subnet rather than
+# stalling. Same-hotkey rolling-5 distribution per DESIGN.md is not wired.
 BURN_UID = int(os.environ.get("TEUTONIC_BURN_UID", "0"))
 
 # Watchdogs / anti-stuckness safeguards.
@@ -609,9 +608,9 @@ def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys):
 
 async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
                             reason: str = "") -> bool:
-    """Push 100% weight to BURN_UID. Burn-only by design — the validator never
-    emits to miners. Eval + duel + dashboard continue to run for observability,
-    but the chain side is fixed at burn.
+    """Push 100% weight to the current king's UID. Falls back to BURN_UID if
+    no king is set or the king's hotkey isn't on the metagraph (e.g. fresh
+    seed king with no on-chain registration).
 
     Async — the underlying `set_weights` call blocks for inclusion +
     finalization (~25-50s) so it runs in a thread executor to keep the event
@@ -625,20 +624,32 @@ async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
         return False
     if not force and current_block - state.last_weight_block < WEIGHT_INTERVAL:
         return False
-    log.info("burning at block %d (last=%d, %s) -> uid=%d:1.0",
+
+    king_hotkey = (state.king or {}).get("hotkey", "")
+    king_uid = state.uid_map.get(king_hotkey) if king_hotkey else None
+    if king_uid is not None:
+        target_uid = int(king_uid)
+        winner_label = king_hotkey
+        log_target = f"king uid={target_uid} hotkey={king_hotkey[:16]}"
+    else:
+        target_uid = BURN_UID
+        winner_label = f"burn:uid={BURN_UID}"
+        log_target = f"burn uid={BURN_UID} (king {'unregistered' if king_hotkey else 'unset'})"
+
+    log.info("set_weights at block %d (last=%d, %s) -> %s:1.0",
              current_block, state.last_weight_block,
-             reason or ("forced" if force else "interval"), BURN_UID)
+             reason or ("forced" if force else "interval"), log_target)
     loop = asyncio.get_running_loop()
     try:
         resp = await loop.run_in_executor(
             None,
             lambda: subtensor.set_weights(
-                wallet=wallet, netuid=NETUID, uids=[BURN_UID], weights=[1.0],
+                wallet=wallet, netuid=NETUID, uids=[target_uid], weights=[1.0],
                 wait_for_revealed_execution=False,
             ),
         )
     except Exception:
-        log.exception("failed to set burn weights")
+        log.exception("failed to set weights")
         return False
     if not resp.success:
         # bt's internal rate-limit guard returns success=False with no message
@@ -651,12 +662,12 @@ async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
             log.error("set_weights failed: %s", resp.message)
         return False
     state.last_weight_block = current_block
-    state.last_winner_hotkey = f"burn:uid={BURN_UID}"
+    state.last_winner_hotkey = winner_label
     try:
         state.flush()
         state.flush_dashboard()
     except Exception:
-        log.exception("failed to flush state after burn-weight set")
+        log.exception("failed to flush state after weight set")
     return True
 
 
