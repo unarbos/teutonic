@@ -52,12 +52,26 @@ chain_config.load_arch()
 # Config
 # ---------------------------------------------------------------------------
 
-EVAL_N = 5_000
+EVAL_N = int(os.environ.get("TEUTONIC_EVAL_N", "5000"))
+# Public + private split per §6.1. Default 50/50 of EVAL_N. Operators without
+# a populated private holdout pool should set TEUTONIC_EVAL_N_PRIVATE=0; the
+# whole-corpus-overfit defense is then disabled (public-only mode).
+EVAL_N_PRIVATE = int(os.environ.get("TEUTONIC_EVAL_N_PRIVATE", str(EVAL_N // 2)))
+EVAL_N_PUBLIC = int(os.environ.get("TEUTONIC_EVAL_N_PUBLIC", str(EVAL_N - EVAL_N_PRIVATE)))
 EVAL_ALPHA = 0.001
 SEQ_LEN = 2048
 POLL_INTERVAL = 30
 WEIGHT_INTERVAL = 300
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
+
+# Burn-only weight policy. The validator NEVER emits to miners. Every weight
+# write is 100% to BURN_UID (default 0 = subnet-owner burn slot). The eval +
+# duel + dashboard pipeline keeps running for observability so the operator
+# always has a canonical king artifact ready, but no chain emission flows to
+# any miner. To turn emission on (future operator decision), set
+# TEUTONIC_EMIT_TO_KING=1 explicitly — defaults to off.
+BURN_UID = int(os.environ.get("TEUTONIC_BURN_UID", "0"))
+EMIT_TO_KING = os.environ.get("TEUTONIC_EMIT_TO_KING", "0") == "1"
 
 # Adaptive δ — §6.4. δ_t = DELTA_C * king_loss_ema, with king_loss_ema an EMA
 # (~10-duel half-life via EMA_ALPHA=0.1) over eval-server avg_king_loss. The
@@ -557,6 +571,34 @@ import re
 _SAFETENSORS_SHARD_RE = re.compile(r"^model-\d{5}-of-\d{5}\.safetensors$")
 
 
+def get_all_revealed_commitments_tolerant(subtensor, netuid):
+    """bt 10.3's `get_all_revealed_commitments` raises if ANY commitment on the
+    subnet has non-hex content (legacy v1 plaintext, garbage from earlier in
+    chain history). One bad row poisons the whole scan and the validator can't
+    see any reveals at all. We replicate the query but isolate per-pair decode
+    failures so a single bad commitment doesn't wedge the entire pipeline.
+    """
+    from bittensor.core.chain_data.utils import decode_revealed_commitment_with_hotkey
+    try:
+        query = subtensor.query_map(
+            module="Commitments", name="RevealedCommitments", params=[netuid],
+        )
+    except Exception:
+        log.exception("query_map RevealedCommitments failed")
+        return {}
+    result = {}
+    bad = 0
+    for pair in query:
+        try:
+            hotkey_ss58, commitment_msg = decode_revealed_commitment_with_hotkey(pair)
+            result[hotkey_ss58] = commitment_msg
+        except Exception:
+            bad += 1
+    if bad:
+        log.warning("scan_reveals: skipped %d undecodable on-chain commitments", bad)
+    return result
+
+
 def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys, legacy_drop_set):
     """Pull v3 reveals; return latest per hotkey not previously enqueued.
 
@@ -566,11 +608,7 @@ def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys, legacy_drop_s
     check belongs there (§4 stale-parent enforcement). v2 reveals are warned
     once per hotkey then dropped — same legacy-drop pattern v2 used for v1.
     """
-    try:
-        all_reveals = subtensor.get_all_revealed_commitments(netuid)
-    except Exception:
-        log.exception("failed to fetch reveals")
-        return []
+    all_reveals = get_all_revealed_commitments_tolerant(subtensor, netuid)
     if not all_reveals:
         return []
 
@@ -611,30 +649,22 @@ def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys, legacy_drop_s
     return new
 
 
-def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
-                      reason: str = "") -> bool:
-    """Push winner-takes-all weights to the current king.
+async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
+                            reason: str = "") -> bool:
+    """Push 100% weight to BURN_UID. Burn-only by design — the validator never
+    emits to miners. Eval + duel + dashboard continue to run for observability,
+    but the chain side is fixed at burn until the operator explicitly flips
+    `TEUTONIC_EMIT_TO_KING=1` (and the king-emission path is re-enabled).
 
-    §9: `weights = {king_hotkey: 1.0}`. No rolling window, no smoothing.
-    bt 10.3 `set_weights` defaults to `commit_reveal_version=4`; routes through
-    the timelocked commit-reveal extrinsic iff the subnet has CR enabled
-    (`subtensor.commit_reveal_enabled(NETUID)`). The deploy checklist must
-    include enabling CR on SN3 via the owner-key `sudo_set_commit_reveal_weights_enabled`
-    extrinsic; without it, parallel-validator weight-copying is unblocked.
-
-    If `state.king_lost` is set we let prior on-chain weights stand.
+    Async — the underlying `set_weights` call blocks for inclusion +
+    finalization (~25-50s) so it runs in a thread executor to keep the event
+    loop responsive. Routes through commit-reveal v4 when SN3 has CR enabled
+    (asserted at startup). Rate-limited per `WEIGHT_INTERVAL`.
     """
-    if state.king_lost:
-        if force:
-            log.warning("skipping weight set: king_lost=True (operator intervention required)")
-        return False
-    king_hotkey = state.king.get("hotkey") if state.king else None
-    if not king_hotkey:
-        if force:
-            log.info("skipping weight set (%s): no king yet", reason or "forced")
-        return False
-    if king_hotkey not in state.uid_map:
-        log.warning("king hotkey %s not in metagraph, skipping weight set", king_hotkey[:16])
+    if EMIT_TO_KING:
+        log.error("TEUTONIC_EMIT_TO_KING=1 is set but the king-emission code path "
+                  "is intentionally not wired. Refusing to set weights to a miner. "
+                  "Unset the env var to resume burn-only operation.")
         return False
     try:
         current_block = subtensor.block
@@ -643,37 +673,38 @@ def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
         return False
     if not force and current_block - state.last_weight_block < WEIGHT_INTERVAL:
         return False
-
-    uid = state.uid_map[king_hotkey]
-    log.info("setting weights at block %d (last=%d, %s) -> uid=%d:%s:1.0",
+    log.info("burning at block %d (last=%d, %s) -> uid=%d:1.0",
              current_block, state.last_weight_block,
-             reason or ("forced" if force else "interval"),
-             uid, king_hotkey[:16])
+             reason or ("forced" if force else "interval"), BURN_UID)
+    loop = asyncio.get_running_loop()
     try:
-        # bt 10.3: set_weights returns ExtrinsicResponse (tuple-like, yields
-        # (success, message)). With commit_reveal_version=4 it routes through
-        # commit_timelocked_mechanism_weights_extrinsic iff the subnet has CR
-        # enabled; else direct set. wait_for_revealed_execution=False so we
-        # don't block the async loop for the multi-tempo reveal interval —
-        # the reveal lands automatically via the timelock.
-        resp = subtensor.set_weights(
-            wallet=wallet, netuid=NETUID, uids=[uid], weights=[1.0],
-            wait_for_revealed_execution=False,
+        resp = await loop.run_in_executor(
+            None,
+            lambda: subtensor.set_weights(
+                wallet=wallet, netuid=NETUID, uids=[BURN_UID], weights=[1.0],
+                wait_for_revealed_execution=False,
+            ),
         )
     except Exception:
-        log.exception("failed to set weights")
+        log.exception("failed to set burn weights")
         return False
     if not resp.success:
-        log.error("set_weights failed: %s", resp.message)
+        # bt's internal rate-limit guard returns success=False with no message
+        # when blocks_since_last_update <= weights_rate_limit. Treat as no-op
+        # and advance last_weight_block so we don't hammer every tick.
+        if not resp.message:
+            log.info("set_weights rate-limited (no-op); advancing last_weight_block")
+            state.last_weight_block = current_block
+        else:
+            log.error("set_weights failed: %s", resp.message)
         return False
-
     state.last_weight_block = current_block
-    state.last_winner_hotkey = king_hotkey
+    state.last_winner_hotkey = f"burn:uid={BURN_UID}"
     try:
         state.flush()
         state.flush_dashboard()
     except Exception:
-        log.exception("failed to flush state after weight set")
+        log.exception("failed to flush state after burn-weight set")
     return True
 
 
@@ -764,6 +795,10 @@ class State:
         # dethrones + weight-sets until operator runs the resume protocol
         # (env TEUTONIC_RESUME_KING="<repo>:<digest>" at startup).
         self.king_lost: bool = False
+        # Consecutive failures of check_king_alive (resets on first success).
+        # Hippius is flaky; trip king_lost only after KING_ALIVE_FAILS_BEFORE_LOST
+        # consecutive ticks (see check_king_alive).
+        self.king_alive_consecutive_fails: int = 0
         # §10: append-only counter + rolling sha256 over canonical-json
         # bytes of every audit record. Every AUDIT_CHAIN_COMMIT_EVERY records
         # the rolling digest is committed on-chain via set_commitment.
@@ -1137,12 +1172,7 @@ class State:
         a 370-reveal stampede would queue ~62 hours of work. Idempotent."""
         if not self.seen:
             return
-        try:
-            all_reveals = subtensor.get_all_revealed_commitments(netuid)
-        except Exception:
-            log.warning("backfill_completed_from_chain: failed to fetch reveals",
-                        exc_info=True)
-            return
+        all_reveals = get_all_revealed_commitments_tolerant(subtensor, netuid)
         if not all_reveals:
             return
         added = 0
@@ -1324,22 +1354,37 @@ class State:
 # King liveness
 # ---------------------------------------------------------------------------
 
+KING_ALIVE_FAILS_BEFORE_LOST = int(os.environ.get("TEUTONIC_KING_ALIVE_FAILS", "5"))
+
+
 def check_king_alive(state):
     """Verify king repo+digest still resolvable. On failure: §3 halt-and-notify.
     No auto-revert: reverting to a stale ancestor crowns a possibly-removed
-    checkpoint. Operator clears via TEUTONIC_RESUME_KING at startup."""
+    checkpoint. Operator clears via TEUTONIC_RESUME_KING at startup.
+
+    Requires KING_ALIVE_FAILS_BEFORE_LOST (default 5) *consecutive* failures
+    before tripping `king_lost`. Single Hippius transient ⇒ retry next tick;
+    persistent failure ⇒ halt. Counter resets on the first success."""
     if state.king_lost:
         return False
     repo = state.king.get("model_repo", "")
     rev = state.king.get("king_digest", "")
     if not repo or not rev:
+        state.king_alive_consecutive_fails = 0
         return True
     try:
         ensure_ref_exists(ModelRef(repo, rev))
+        state.king_alive_consecutive_fails = 0
         return True
     except Exception as exc:
-        handle_king_lost(state, repo, rev, reason=f"king repo/digest no longer resolvable: {exc}")
-        return False
+        state.king_alive_consecutive_fails = getattr(state, "king_alive_consecutive_fails", 0) + 1
+        if state.king_alive_consecutive_fails >= KING_ALIVE_FAILS_BEFORE_LOST:
+            handle_king_lost(state, repo, rev,
+                             reason=f"king unresolvable for {state.king_alive_consecutive_fails} consecutive ticks: {exc}")
+            return False
+        log.warning("king liveness check failed (%d/%d): %s",
+                    state.king_alive_consecutive_fails, KING_ALIVE_FAILS_BEFORE_LOST, exc)
+        return True
 
 
 def handle_king_lost(state, king_repo, king_digest, *, reason: str):
@@ -1552,24 +1597,37 @@ async def write_audit_record(state, r2, subtensor, wallet, cid, entry,
     }
     body = _canonical_json(record)
     record_hash = hashlib.sha256(body).digest()
-    try:
-        record["validator_signature"] = "0x" + wallet.hotkey.sign(record_hash).hex()
-    except Exception as exc:
-        log.error("audit signing failed: %s", exc)
-        record["validator_signature"] = "UNSIGNED"
+    sig = None
+    for attempt in range(3):
+        try:
+            sig = "0x" + wallet.hotkey.sign(record_hash).hex()
+            break
+        except Exception as exc:
+            log.error("audit signing failed (attempt %d/3): %s", attempt + 1, exc)
+            await asyncio.sleep(0.5 * (attempt + 1))
+    if sig is None:
+        # Audit chain integrity is the trust anchor (§10). Refuse to fold a
+        # signature-less record into the rolling digest — sideline it for
+        # operator review and keep the chain auditable.
+        r2.put_dashboard_raw(f"state/audit/unsigned/{cid}.json", body, "application/json")
+        log.error("AUDIT SIDELINED: cid=%s — signing failed 3x. Record at state/audit/unsigned/%s.json. "
+                  "Investigate keypair access before continuing.", cid, cid)
+        state.event({"event": "audit_sidelined_signing_failed", "cid": cid})
+        return
+    record["validator_signature"] = sig
     final_body = _canonical_json(record)
     r2.put_dashboard_raw(f"state/audit/{cid}.json", final_body, "application/json")
 
     state.audit_counter += 1
-    state.audit_running_digest = hashlib.sha256(
-        (state.audit_running_digest + cid).encode() + final_body
-    ).hexdigest()
+    prev = bytes.fromhex(state.audit_running_digest) if state.audit_running_digest else b""
+    state.audit_running_digest = hashlib.sha256(prev + final_body).hexdigest()
 
     if state.audit_counter - state.audit_last_committed_counter >= AUDIT_CHAIN_COMMIT_EVERY:
         payload = f"v3-audit|{state.audit_last_committed_counter + 1}-{state.audit_counter}|{state.audit_running_digest}"
         try:
             resp = subtensor.set_commitment(
                 wallet=wallet, netuid=NETUID, data=payload,
+                wait_for_inclusion=False, wait_for_finalization=False,
                 wait_for_revealed_execution=False,
             )
             if not resp.success:
@@ -1789,8 +1847,8 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "king_digest": king_digest,
             "challenger_digest": challenger_digest,
             "delta_threshold": delta_for_duel,
-            "n_public": EVAL_N // 2,
-            "n_private": EVAL_N // 2,
+            "n_public": EVAL_N_PUBLIC,
+            "n_private": EVAL_N_PRIVATE,
             "n_bootstrap": 10_000,
             "alpha": EVAL_ALPHA,
             "seq_len": SEQ_LEN,
@@ -1933,8 +1991,8 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
                            challenge_id=cid, king_digest=challenger_digest)
             state.last_winner_hotkey = hotkey
             try:
-                maybe_set_weights(subtensor, wallet, state,
-                                   force=True, reason="dethrone")
+                await maybe_set_weights(subtensor, wallet, state,
+                                        force=True, reason="dethrone")
             except Exception:
                 log.exception("force weight-set after dethrone failed")
             await notify_new_king({
@@ -1968,6 +2026,17 @@ async def main():
 
     wallet = bt.Wallet(name=WALLET_NAME, hotkey=WALLET_HOTKEY)
     subtensor = bt.Subtensor(network=NETWORK)
+
+    # §9: commit-reveal weights is the single load-bearing defense against
+    # parallel-validator weight-copying. If SN3 doesn't have CR enabled,
+    # set_weights silently degrades to unencrypted set_mechanism_weights and
+    # the design's trust assumption is gone. Refuse to start.
+    if not subtensor.commit_reveal_enabled(NETUID):
+        log.error("commit-reveal NOT enabled on netuid %d. "
+                  "Run sudo_set_commit_reveal_weights_enabled from the subnet-owner "
+                  "key before starting this validator.", NETUID)
+        sys.exit(2)
+
     state.refresh_uid_map(subtensor, NETUID)
     # One-shot chain backfill of completed_repos for already-seen hotkeys.
     # Prevents post-migration re-eval stampede (see method docstring).
@@ -2039,7 +2108,7 @@ async def main():
                        subtensor.block, king_digest=seed_ref.digest)
 
     state.clear_restart_request()
-    maybe_set_weights(subtensor, wallet, state, force=True, reason="startup")
+    await maybe_set_weights(subtensor, wallet, state, force=True, reason="startup")
 
     # Verify eval server is reachable
     try:
@@ -2228,8 +2297,8 @@ async def main():
                                      "count": queued_count, "kind": "mid-cycle"})
 
                 try:
-                    maybe_set_weights(subtensor, wallet, state,
-                                      reason="in-queue interval")
+                    await maybe_set_weights(subtensor, wallet, state,
+                                            reason="in-queue interval")
                 except Exception:
                     log.exception("in-queue weight-set failed")
 
@@ -2251,8 +2320,8 @@ async def main():
             state.flush_dashboard()
 
             try:
-                maybe_set_weights(subtensor, wallet, state,
-                                  reason="periodic interval")
+                await maybe_set_weights(subtensor, wallet, state,
+                                        reason="periodic interval")
             except Exception:
                 log.exception("periodic weight-set failed")
 

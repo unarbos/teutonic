@@ -1,25 +1,30 @@
-# Teutonic-LXXXI — Qwen3-MoE 80B / 7.6B active with native Qwen tokenizer (vocab 151936).
-# Replaces Teutonic-LXXX (Gemma/Teutonic-I tokenizer, vocab 262144). Eval uses the
-# public FineWeb-Edu Hippius mirror tokenized at eval time with this tokenizer.
+# Teutonic-Q3-4B — Qwen3-4B dense as genesis king (vanilla HF Qwen3ForCausalLM, no fork).
+# vocab 151936, 36 layers x hidden 2560, GQA 32/8 heads, RoPE theta=1e6, ~8 GB bf16.
+# Public eval corpus: FineWeb-Edu Hippius mirror tokenized at eval time with Qwen3 tokenizer.
+#
+# Genesis is loaded directly from HuggingFace at the pinned commit SHA (no Hippius
+# mirror). model_store dispatches by digest prefix: `sha256:` for Hippius OCI,
+# `hf:` for HF revisions. Challenger uploads still go through Hippius as normal.
 [chain]
-name = "Teutonic-LXXXI"
-seed_repo = "unconst/Teutonic-LXXXI-mock-king"
-# repo_pattern auto-derives to "^[^/]+/Teutonic-LXXXI-.+$" if omitted.
+name = "Teutonic-Q3-4B"
+seed_repo = "Qwen/Qwen3-4B"
+# Custom repo_pattern: challengers go to Hippius under <ns>/Teutonic-Q3-4B-<suffix>,
+# while seed_repo points at HF. Validator checks pattern only for challengers.
+repo_pattern = "^[^/]+/Teutonic-Q3-4B-.+$"
 
 [arch]
-module = "archs.qwen3_moe"
+module = "archs.qwen3"
+# Generic structural keys (vocab/hidden/heads/etc.) are enforced by
+# validate_challenger_config automatically. Anything Qwen3-specific that we
+# require challengers to preserve goes here.
 extra_lock_keys = [
-  "num_experts",
-  "num_experts_per_tok",
-  "moe_intermediate_size",
-  "decoder_sparse_step",
-  "norm_topk_prob",
-  "router_aux_loss_coef",
-  "mlp_only_layers",
-  "rope_parameters",
+  "rope_theta",
+  "rope_scaling",
+  "tie_word_embeddings",
+  "max_position_embeddings",
 ]
 
 [seed]
-tokenizer_repo = "Qwen/Qwen3-30B-A3B"
-# Populated after `python scripts/seed.py --push --hippius` on the GPU box.
-seed_digest = ""
+tokenizer_repo = "Qwen/Qwen3-4B"
+# HF commit SHA pinned at the time of writing. To update: `huggingface_hub.HfApi().model_info("Qwen/Qwen3-4B").sha`.
+seed_digest = "hf:1cfa9a7208912126459214e8b04321603b3df60c"

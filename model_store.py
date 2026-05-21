@@ -24,7 +24,13 @@ HUB_TOKEN = (
 REVEAL_VERSION = "v2"
 REVEAL_V3_PREFIX = "v3"
 REPO_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
-DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# Two digest shapes accepted:
+#   - "sha256:<64hex>"  Hippius OCI manifest digest (challenger uploads)
+#   - "hf:<40hex>"      HuggingFace commit SHA (genesis king pinned to a vanilla
+#                       HF repo without a Hippius mirror)
+HIPPIUS_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+HF_DIGEST_RE = re.compile(r"^hf:[0-9a-f]{40}$")
+DIGEST_RE = re.compile(r"^(sha256:[0-9a-f]{64}|hf:[0-9a-f]{40})$")
 BARE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 LEGACY_HF_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 LEGACY_MODEL_HASH_RE = BARE_SHA256_RE
@@ -146,6 +152,23 @@ def local_snapshot_path(ref: ModelRef) -> str:
 
 
 def _call_snapshot_download(ref: ModelRef, local_dir: str | None, max_workers: int | None) -> str:
+    # HF-direct path: bypass Hippius, pull straight from huggingface.co at the
+    # pinned commit SHA. Used for the genesis king when we don't want to mirror
+    # to Hippius first. Challenger uploads still go through the Hippius path.
+    if HF_DIGEST_RE.match(ref.digest):
+        from huggingface_hub import snapshot_download as hf_snapshot_download
+        revision = ref.digest.split(":", 1)[1]
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY")
+        return str(hf_snapshot_download(
+            repo_id=ref.repo,
+            revision=revision,
+            local_dir=local_dir,
+            allow_patterns=ALLOW_PATTERNS,
+            max_workers=max_workers or 8,
+            token=hf_token,
+        ))
+
+    # Hippius OCI path.
     kwargs = {
         "repo": ref.repo,
         "repo_id": ref.repo,
