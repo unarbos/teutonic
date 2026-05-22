@@ -8,9 +8,9 @@ Sizing default (verified by `archs/qwen3_moe/size.py`):
     intermediate_size=11008, num_experts=128, top_k=8, moe_intermediate_size=1408
     => 82.33B total / 7.59B active
 
-Default target repo + tokenizer come from chain.toml ([chain].seed_repo and
-[seed].tokenizer_repo). On the live LXXX chain that's
-`unconst/Teutonic-LXXX-mock-king` + `unconst/Teutonic-I`. Override the push
+Default target repo, upload backend, and tokenizer come from chain.toml
+([chain].seed_repo plus [seed].repo_backend / [seed].tokenizer_repo). On the
+live LXXX chain that's `unconst/Teutonic-LXXX-mock-king`. Override the push
 target via TEUTONIC_SEED_REPO_OVERRIDE if you want to seed a sibling repo
 (e.g. for a fresh genesis bake without overwriting the live king).
 
@@ -50,8 +50,15 @@ log = logging.getLogger("seed-qwen3moe")
 
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 TARGET_REPO = os.environ.get("TEUTONIC_SEED_REPO_OVERRIDE", chain_config.SEED_REPO)
+TARGET_BACKEND = os.environ.get(
+    "TEUTONIC_SEED_REPO_BACKEND_OVERRIDE",
+    getattr(chain_config, "SEED_REPO_BACKEND", "hf"),
+)
+_default_tokenizer_repo = chain_config.SEED_TOKENIZER_REPO
+if not _default_tokenizer_repo and TARGET_BACKEND == "hf":
+    _default_tokenizer_repo = chain_config.SEED_REPO
 TOKENIZER_REPO = os.environ.get("TEUTONIC_SEED_TOKENIZER_OVERRIDE",
-                                chain_config.SEED_TOKENIZER_REPO or chain_config.SEED_REPO)
+                                _default_tokenizer_repo)
 OUT_DIR = os.environ.get("TEUTONIC_SEED_DIR",
                          f"/tmp/{chain_config.NAME.lower()}")
 
@@ -160,9 +167,20 @@ def main():
                              "for sharded 80B you must currently --no-probe)")
     parser.add_argument("--device", default="cuda:0",
                         help="GPU for the (optional) probe — single GPU only for now")
+    parser.add_argument("--repo-backend", choices=("hf", "hippius"),
+                        default=TARGET_BACKEND,
+                        help=f"upload backend for {TARGET_REPO} (default: {TARGET_BACKEND})")
     parser.add_argument("--hippius", action="store_true",
-                        help="upload to Hippius Hub (registry.hippius.com) instead of HF")
+                        help="deprecated alias for --repo-backend hippius")
     args = parser.parse_args()
+    if args.hippius:
+        args.repo_backend = "hippius"
+
+    if not TOKENIZER_REPO:
+        raise SystemExit(
+            "No tokenizer repo configured. Set [seed].tokenizer_repo in chain.toml "
+            "or TEUTONIC_SEED_TOKENIZER_OVERRIDE when [seed].repo_backend = \"hippius\"."
+        )
 
     out = Path(OUT_DIR)
     if out.exists():
@@ -241,7 +259,7 @@ def main():
     else:
         log.info("skipping trainability probe (--no-probe)")
 
-    if args.push and args.hippius:
+    if args.push and args.repo_backend == "hippius":
         from model_store import upload_model_folder
 
         log.info("uploading folder %s -> Hippius %s", out, TARGET_REPO)
@@ -255,6 +273,7 @@ def main():
             ),
         )
         log.info("hippius upload done in %.1fs digest=%s", time.time() - t2, ref.digest)
+        print(f"SEED_REPO={ref.repo}")
         print(f"SEED_DIGEST={ref.digest}")
     elif args.push:
         api = HfApi(token=HF_TOKEN or None)
@@ -276,9 +295,12 @@ def main():
                 "vocab*", "merges*",
             ],
         )
-        log.info("uploaded in %.1fs", time.time() - t2)
+        info = api.model_info(TARGET_REPO)
+        log.info("uploaded in %.1fs to %s @ hf:%s", time.time() - t2, TARGET_REPO, info.sha)
+        print(f"SEED_REPO={TARGET_REPO}")
+        print(f"SEED_DIGEST=hf:{info.sha}")
     else:
-        log.info("skipped push (use --push [--hippius] to upload)")
+        log.info("skipped push (use --push to upload)")
 
     cfg_path = out / "config.json"
     with open(cfg_path) as f:

@@ -44,6 +44,7 @@ from model_store import (  # noqa: E402
     parse_reveal_v3,
     snapshot_size,
 )
+from startup_policy import should_seed_king  # noqa: E402
 
 chain_config.load_arch()
 
@@ -80,6 +81,9 @@ MAX_CONSECUTIVE_TICK_ERRORS = int(os.environ.get("TEUTONIC_MAX_CONSECUTIVE_TICK_
 NETWORK = os.environ.get("TEUTONIC_NETWORK", "finney")
 SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", chain_config.SEED_REPO)
 SEED_DIGEST = os.environ.get("TEUTONIC_SEED_DIGEST", getattr(chain_config, "SEED_DIGEST", ""))
+FORCE_SEED_KING = os.environ.get("TEUTONIC_FORCE_SEED_KING", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 EVAL_SERVER_URL = os.environ.get("TEUTONIC_EVAL_SERVER", "http://localhost:9000")
 EVAL_DATASET_MODE = os.environ.get("TEUTONIC_EVAL_DATASET_MODE", "")
 WALLET_NAME = os.environ.get("BT_WALLET_NAME", "teutonic")
@@ -1644,10 +1648,18 @@ async def main():
         )
         log.info("uploaded dashboard to Hippius (build=%s)", build_id)
 
-    if not state.king:
+    if should_seed_king(FORCE_SEED_KING, state.king):
         if not SEED_DIGEST:
-            log.error("set TEUTONIC_SEED_DIGEST for the initial Hippius seed king")
+            log.error("set TEUTONIC_SEED_DIGEST for the initial seed king")
             sys.exit(1)
+        if state.king and FORCE_SEED_KING:
+            log.warning(
+                "TEUTONIC_FORCE_SEED_KING enabled: overriding persisted king %s@%s with seed %s@%s",
+                state.king.get("model_repo", "?"),
+                (state.king.get("king_digest") or "")[:19],
+                SEED_REPO,
+                SEED_DIGEST[:19],
+            )
         seed_ref = ModelRef(SEED_REPO, SEED_DIGEST)
         materialize_model(seed_ref, max_workers=4, config_only=True)
         log.info("seed king %s", seed_ref.immutable_ref)

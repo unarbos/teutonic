@@ -16,8 +16,9 @@ Sizing (verified by `archs/quasar/size.py`):
     memory_slots=128, memory_dim=128, num_loops=1
     => 7.962B active / 24.873B total
 
-Default target repo + tokenizer come from chain.toml ([chain].seed_repo and
-[seed].tokenizer_repo). Override via TEUTONIC_SEED_REPO_OVERRIDE /
+Default target repo, upload backend, and tokenizer come from chain.toml
+([chain].seed_repo plus [seed].repo_backend / [seed].tokenizer_repo). Override
+via TEUTONIC_SEED_REPO_OVERRIDE / TEUTONIC_SEED_REPO_BACKEND_OVERRIDE /
 TEUTONIC_SEED_TOKENIZER_OVERRIDE if you want to push elsewhere.
 
 Run on the GPU box (CPU init of 24B params takes ~12 min; on a B200 it is
@@ -44,6 +45,7 @@ from huggingface_hub import HfApi, snapshot_download
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import chain_config
+from model_store import upload_model_folder
 
 chain_config.load_arch()
 from archs.quasar import QuasarConfig
@@ -55,8 +57,15 @@ log = logging.getLogger("seed")
 
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 TARGET_REPO = os.environ.get("TEUTONIC_SEED_REPO_OVERRIDE", chain_config.SEED_REPO)
+TARGET_BACKEND = os.environ.get(
+    "TEUTONIC_SEED_REPO_BACKEND_OVERRIDE",
+    getattr(chain_config, "SEED_REPO_BACKEND", "hf"),
+)
+_default_tokenizer_repo = chain_config.SEED_TOKENIZER_REPO
+if not _default_tokenizer_repo and TARGET_BACKEND == "hf":
+    _default_tokenizer_repo = chain_config.SEED_REPO
 TOKENIZER_REPO = os.environ.get("TEUTONIC_SEED_TOKENIZER_OVERRIDE",
-                                chain_config.SEED_TOKENIZER_REPO or chain_config.SEED_REPO)
+                                _default_tokenizer_repo)
 OUT_DIR = os.environ.get("TEUTONIC_SEED_DIR",
                          f"/tmp/{chain_config.NAME.lower()}")
 
@@ -162,11 +171,20 @@ def main():
                         help=f"upload to {TARGET_REPO} (private by default)")
     parser.add_argument("--public", action="store_true",
                         help="when --push, create public (overrides default private)")
+    parser.add_argument("--repo-backend", choices=("hf", "hippius"),
+                        default=TARGET_BACKEND,
+                        help=f"upload backend for {TARGET_REPO} (default: {TARGET_BACKEND})")
     parser.add_argument("--no-probe", action="store_true",
                         help="skip on-GPU trainability probe")
     parser.add_argument("--device", default="cuda:0",
                         help="GPU for the probe (default cuda:0)")
     args = parser.parse_args()
+
+    if not TOKENIZER_REPO:
+        raise SystemExit(
+            "No tokenizer repo configured. Set [seed].tokenizer_repo in chain.toml "
+            "or TEUTONIC_SEED_TOKENIZER_OVERRIDE when [seed].repo_backend = \"hippius\"."
+        )
 
     out = Path(OUT_DIR)
     if out.exists():
@@ -246,7 +264,22 @@ def main():
             log.error("probe FAILED — aborting before push")
             sys.exit(1)
 
-    if args.push:
+    if args.push and args.repo_backend == "hippius":
+        if args.public:
+            log.warning("--public has no effect for Hippius Hub uploads")
+        log.info("uploading folder %s -> Hippius %s", out, TARGET_REPO)
+        ref = upload_model_folder(
+            out,
+            repo=TARGET_REPO,
+            commit_message=(
+                f"seed {chain_config.NAME} (Quasar n_layers={NUM_LAYERS} d_model={HIDDEN_SIZE} "
+                f"experts={NUM_ROUTED_EXPERTS}/top{TOP_K}, fresh init)"
+            ),
+        )
+        log.info("uploaded to %s", ref.immutable_ref)
+        print(f"SEED_REPO={ref.repo}")
+        print(f"SEED_DIGEST={ref.digest}")
+    elif args.push:
         api = HfApi(token=HF_TOKEN or None)
         private = not args.public
         log.info("creating/updating repo %s (private=%s)", TARGET_REPO, private)
@@ -265,7 +298,10 @@ def main():
             ],
             # No *.py upload — vendored modeling code lives only in archs/quasar/.
         )
-        log.info("uploaded.")
+        info = api.model_info(TARGET_REPO)
+        log.info("uploaded to %s @ hf:%s", TARGET_REPO, info.sha)
+        print(f"SEED_REPO={TARGET_REPO}")
+        print(f"SEED_DIGEST=hf:{info.sha}")
     else:
         log.info("skipped push (use --push to upload)")
 
