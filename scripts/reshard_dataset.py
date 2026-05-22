@@ -28,6 +28,12 @@ import boto3
 import numpy as np
 from botocore.config import Config as BotoConfig
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from s3_transfer import safe_upload_file
+
 DTYPE = np.dtype("<u4")
 BYTES_PER_TOKEN = DTYPE.itemsize  # 4
 
@@ -140,7 +146,7 @@ class ReshardState:
         info = ShardInfo(key=key, n_tokens=n_tokens, size_bytes=size_bytes, sha256=sha)
 
         if not dry_run:
-            client.upload_file(tmp_path, R2_CFG["bucket"], key)
+            safe_upload_file(client, tmp_path, R2_CFG["bucket"], key)
             print(f"  Uploaded {key} ({size_bytes / 1e9:.2f} GB, {n_tokens:,} tokens)")
         else:
             print(f"  [DRY RUN] Would upload {key} ({size_bytes / 1e9:.2f} GB, {n_tokens:,} tokens)")

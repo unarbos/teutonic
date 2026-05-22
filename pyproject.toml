@@ -8,6 +8,7 @@ license = { text = "MIT" }
 dependencies = [
     "bittensor>=10.3,<11",
     "boto3",
+    "minio",
     "httpx",
     "numpy",
     "scipy",
