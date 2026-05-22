@@ -923,6 +923,7 @@ class State:
         # Default everything so a partial verdict still records cleanly.
         king_loss = verdict.get("avg_king_loss", 0)
         chall_loss = verdict.get("avg_challenger_loss", 0)
+        delta = verdict.get("delta", verdict.get("delta_threshold", 0))
         entry = {
             "challenge_id": verdict.get("challenge_id"),
             "hotkey": hotkey,
@@ -934,7 +935,7 @@ class State:
             "verdict": verdict.get("verdict", "unknown"),
             "mu_hat": verdict.get("mu_hat", 0),
             "lcb": verdict.get("lcb", 0),
-            "delta": verdict.get("delta", 0),
+            "delta": delta,
             "avg_king_loss": king_loss,
             "avg_challenger_loss": chall_loss,
             "best_loss": min(king_loss, chall_loss) if (king_loss or chall_loss) else 0,
@@ -1552,9 +1553,10 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         raise RuntimeError("eval stream ended without verdict")
 
     r2.put(f"eval/{cid}/verdict.json", verdict)
+    verdict_delta = verdict.get("delta", verdict.get("delta_threshold", 0))
     log.info("verdict: %s (mu_hat=%.6f lcb=%.6f delta=%.6f %.1fs)",
              verdict.get("verdict", "unknown"), verdict.get("mu_hat", 0), verdict.get("lcb", 0),
-             verdict.get("delta", 0), verdict.get("wall_time_s", 0))
+             verdict_delta, verdict.get("wall_time_s", 0))
 
     state.current_eval = None
     state.set_phase("post_eval", challenge_id=cid, notes="recording verdict")
