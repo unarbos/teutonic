@@ -41,6 +41,12 @@ from pathlib import Path
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from s3_transfer import safe_upload_file
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [tokenize_qwen] %(message)s",
@@ -118,7 +124,7 @@ def _flush_shard(state: State, shard_size: int, dest: str,
         if not dry_run and dest.startswith("s3://"):
             bucket, _, prefix = dest[5:].partition("/")
             obj_key = f"{prefix.rstrip('/')}/shards/shard_{state.shard_idx:06d}.npy"
-            s3_client.upload_file(str(local), bucket, obj_key)
+            safe_upload_file(s3_client, str(local), bucket, obj_key)
             log.info("uploaded -> s3://%s/%s", bucket, obj_key)
 
         state.shards.append(ShardInfo(

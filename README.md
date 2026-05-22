@@ -22,7 +22,7 @@ full mechanism.
 | Path | What it is |
 | --- | --- |
 | [`validator.py`](validator.py) | Single-file king-of-the-hill validator. Polls chain, dispatches duels to the eval server, manages king lifecycle on HF, persists state to R2. |
-| [`miner.py`](miner.py) | Reference miner: clones the king, perturbs weights, uploads to HF, commits the reveal on-chain. |
+| [`miner.py`](miner.py) | Reference miner: clones the king, perturbs weights, uploads to HF, commits a `v4` reveal on-chain. |
 | [`eval_server.py`](eval_server.py) | Persistent FastAPI service wrapping the eval pipeline. Caches the king across duels. SSE-streams progress to the validator. |
 | [`eval/`](eval/) | Eval runners: [`torch_runner.py`](eval/torch_runner.py) (multi-GPU PyTorch paired-bootstrap CE), [`vllm_runner.py`](eval/vllm_runner.py) (vLLM evaluator), [`vllm_server.py`](eval/vllm_server.py) (vLLM-backed alternative eval server, not yet in production). |
 | [`chain.toml`](chain.toml), [`chain_config.py`](chain_config.py) | Single source of truth for the active king (name, seed repo, repo pattern, vendored arch module, arch-specific config-lock keys). All other code reads from here. |

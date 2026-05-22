@@ -44,6 +44,12 @@ from botocore.config import Config as BotoConfig
 from huggingface_hub import HfApi, hf_hub_download
 from transformers import AutoTokenizer
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from s3_transfer import safe_upload_file
+
 log = logging.getLogger("ingest_hf")
 
 TOKENIZER_NAME = "unsloth/gemma-3-1b-it"
@@ -126,7 +132,7 @@ def flush_shard(buf: bytearray, shard_idx: int, client, dry_run: bool) -> dict:
     sha = file_hasher.hexdigest()
 
     if not dry_run:
-        client.upload_file(tmp_path, DS_BUCKET, key)
+        safe_upload_file(client, tmp_path, DS_BUCKET, key)
 
     Path(tmp_path).unlink(missing_ok=True)
 

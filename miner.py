@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""Teutonic miner — create a challenger model and submit on-chain.
+"""Teutonic miner — build a challenger and submit it on-chain.
 
-1. Downloads the current king model
-2. Applies a small random perturbation to the weights
-3. Uploads as a challenger model to Hippius Hub; captures the OCI digest
-4. Submits a reveal commitment on Bittensor chain in the form
-   `v2|{king_hash[:16]}|{repo}|sha256:{manifest_digest}`. The OCI digest is
-   the binding cryptographic commitment to the file tree.
+Downloads the current king, produces a challenger by perturbing every float
+tensor with low-amplitude Gaussian noise, uploads to Hippius Hub, and posts a
+v4 reveal commitment binding (challenger_repo, challenger_digest).
+
+Noise perturbation will not clear `delta` on a mature king — it is a pipeline
+test stub, not a strategy. Real dethrones come from real fine-tuning (LoRA,
+full fine-tune, distillation, whatever) against the pinned king. The protocol
+does not prescribe the training recipe; swap the perturb step for an actual
+training loop and the rest of this script applies unchanged.
 """
 import argparse
-import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import sys
-import time
 from pathlib import Path
 
 import bittensor as bt
 import httpx
-import numpy as np
 import torch
 from safetensors.torch import load_file, save_file
 
@@ -30,9 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chain_config  # noqa: E402
 from model_store import (  # noqa: E402
     ModelRef,
-    build_reveal_payload,
+    build_reveal_v4,
     materialize_model,
-    sha256_safetensors,
     upload_model_folder,
 )
 
@@ -93,18 +92,6 @@ def validate_local_config(king_dir: str, challenger_dir: str) -> str | None:
     return None
 
 
-def sha256_dir(path):
-    """sha256 over the safetensors of `path`. Used only for the king digest
-    that fills the `king_hash[:16]` field of the on-chain commit (a soft
-    integrity ping; the actual binding is the challenger's OCI digest)."""
-    h = hashlib.sha256()
-    for p in sorted(Path(path).glob("*.safetensors")):
-        with open(p, "rb") as f:
-            while chunk := f.read(1 << 20):
-                h.update(chunk)
-    return h.hexdigest()
-
-
 def main():
     parser = argparse.ArgumentParser(description="Teutonic miner")
     parser.add_argument("--hotkey", default="h0", help="Wallet hotkey name")
@@ -125,8 +112,8 @@ def main():
         sys.exit(1)
 
     # Connect to chain
-    wallet = bt.wallet(name=WALLET_NAME, hotkey=args.hotkey)
-    subtensor = bt.subtensor(network=NETWORK)
+    wallet = bt.Wallet(name=WALLET_NAME, hotkey=args.hotkey)
+    subtensor = bt.Subtensor(network=NETWORK)
     my_hotkey = wallet.hotkey.ss58_address
     log.info("wallet: %s", my_hotkey)
 
@@ -151,8 +138,10 @@ def main():
         dashboard = resp.json()
         king = dashboard["king"]
         king_repo = king["model_repo"]
-        king_digest = king["model_digest"]
-        log.info("discovered king from dashboard: %s@%s", king_repo, king_digest[:19])
+        # Dashboard publishes `king_digest`; older dashboards (pre-v3 cutover)
+        # used `model_digest`. Fall back to that for back-compat.
+        king_digest = king.get("king_digest") or king.get("model_digest")
+        log.info("discovered king from dashboard: %s@%s", king_repo, (king_digest or "")[:19])
     except Exception:
         log.warning("could not fetch dashboard, falling back to seed model %s", SEED_REPO)
     if not king_digest:
@@ -189,17 +178,14 @@ def main():
         shutil.rmtree(king_dir)
     log.info("downloading king from %s", king_ref.immutable_ref)
     materialize_model(king_ref, local_dir=king_dir, max_workers=16)
-    king_hash = sha256_safetensors(king_dir)
-    log.info("king hash: %s", king_hash[:16])
 
-    # Create challenger by perturbing weights
+    # Create challenger by perturbing weights (stub; replace with real training).
     challenger_dir = f"/tmp/teutonic/miner/challenger-{suffix}"
     if os.path.exists(challenger_dir):
         shutil.rmtree(challenger_dir)
     shutil.copytree(king_dir, challenger_dir)
 
     st_files = sorted(Path(challenger_dir).glob("*.safetensors"))
-    rng = np.random.default_rng(int(time.time()))
 
     for st_file in st_files:
         log.info("perturbing %s", st_file.name)
@@ -228,23 +214,24 @@ def main():
     )
     log.info("uploaded to %s", challenger_ref.immutable_ref)
 
-    # On-chain reveal: v2|king_hash16|repo|oci_digest. The OCI digest is the
-    # immutable artifact identity; mutable tags and URLs are not submitted.
-    payload = build_reveal_payload(king_hash, challenger_ref)
+    # On-chain reveal: v4|repo|challenger_digest|author_hotkey.
+    # challenger_digest carries its format prefix (sha256:/hf:).
+    payload = build_reveal_v4(challenger_ref, my_hotkey)
     log.info("submitting reveal: %s", payload)
 
-    success, block = subtensor.set_reveal_commitment(
+    resp = subtensor.set_reveal_commitment(
         wallet=wallet,
         netuid=NETUID,
         data=payload,
         blocks_until_reveal=3,
+        wait_for_revealed_execution=False,
     )
 
-    if success:
-        log.info("reveal committed at block %d", block)
+    if resp.success:
+        log.info("reveal committed: %s", resp.message)
         log.info("the validator will pick this up once revealed (~30 seconds)")
     else:
-        log.error("reveal commitment failed")
+        log.error("reveal commitment failed: %s", resp.message)
         sys.exit(1)
 
     log.info("done!")

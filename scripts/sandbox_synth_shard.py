@@ -27,6 +27,12 @@ from pathlib import Path
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from s3_transfer import safe_upload_file
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -67,7 +73,7 @@ def main():
     )
     print(f"uploading to s3://{bucket}/{args.key} ...", flush=True)
     t0 = time.time()
-    s3.upload_file(str(out), bucket, args.key)
+    safe_upload_file(s3, str(out), bucket, args.key)
     print(f"upload done in {time.time()-t0:.1f}s -> s3://{bucket}/{args.key}", flush=True)
     return 0
 

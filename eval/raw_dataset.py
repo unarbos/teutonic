@@ -19,8 +19,13 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
+import torch
+
+from s3_transfer import safe_download_file
 
 log = logging.getLogger("eval_raw_dataset")
+
+PRIVATE_POOL_DEFAULT_DIR = "/var/teutonic/private_pool"
 
 RAW_MODE_VALUES = {"raw", "raw_hippius", "fineweb", "fineweb_edu"}
 DEFAULT_PREFIX = "hf-mirrors/HuggingFaceFW/fineweb-edu/data/"
@@ -199,7 +204,7 @@ def _download_parquet(r2, cfg: RawDatasetConfig, key: str) -> pathlib.Path:
     tmp = pathlib.Path(tmp_name)
     try:
         log.info("downloading raw parquet s3://%s/%s", r2.ds_bucket, key)
-        r2.ds_client.download_file(r2.ds_bucket, key, str(tmp))
+        safe_download_file(r2.ds_client, r2.ds_bucket, key, str(tmp))
         tmp.replace(path)
     except Exception:
         tmp.unlink(missing_ok=True)
@@ -229,3 +234,134 @@ def _iter_parquet_texts(path: pathlib.Path, text_column: str) -> Iterable[str]:
         for value in table.column(column).to_pylist():
             if isinstance(value, str) and value:
                 yield value
+
+
+_FILE_HASH_CACHE: dict[str, tuple[int, float, str]] = {}
+
+
+def _hash_file(path: pathlib.Path) -> str:
+    key = str(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        stat = None
+    if stat is not None:
+        cached = _FILE_HASH_CACHE.get(key)
+        if cached is not None and cached[0] == stat.st_size and cached[1] == stat.st_mtime:
+            return cached[2]
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    if stat is not None:
+        _FILE_HASH_CACHE[key] = (stat.st_size, stat.st_mtime, digest)
+    return digest
+
+
+def _pool_digest(file_digests: list[str]) -> str:
+    return hashlib.sha256("\n".join(sorted(file_digests)).encode()).hexdigest()
+
+
+def sample_private_pool(
+    seq_len: int,
+    n_sequences: int,
+    tokenizer_repo: str,
+    rng_seed: bytes | None = None,
+) -> tuple[torch.Tensor, str]:
+    """Sample n_sequences x seq_len from the validator's private pool directory.
+
+    Pool location: env TEUTONIC_PRIVATE_POOL_DIR (default /var/teutonic/private_pool).
+    Pool format: directory of *.parquet files; each parquet has a `text` column.
+    Pool digest is sha256 over sorted({sha256(file) for file in pool_dir}).
+
+    Sampling: enumerate parquet files, weight uniformly by row count, sample
+    without replacement at the row level, tokenize, pack into fixed-length
+    windows. Tokenization matches the public-corpus path.
+
+    rng_seed is derived deterministically by the eval server from
+    `blake2b(block_hash || hotkey || b"private")` so the validator can replay
+    its own verdicts. Defaults to `os.urandom(8)` only if the caller omits it
+    (smoke-test / CLI path).
+    """
+    pool_dir = pathlib.Path(os.environ.get("TEUTONIC_PRIVATE_POOL_DIR", PRIVATE_POOL_DEFAULT_DIR))
+    files = sorted(pool_dir.glob("*.parquet")) if pool_dir.exists() else []
+    if not files:
+        raise RuntimeError("private pool empty; configure TEUTONIC_PRIVATE_POOL_DIR")
+
+    file_digests = [_hash_file(p) for p in files]
+    pool_digest = _pool_digest(file_digests)
+
+    if n_sequences == 0:
+        return torch.empty((0, seq_len), dtype=torch.long), pool_digest
+
+    import pyarrow.parquet as pq
+
+    row_counts = [pq.ParquetFile(p).metadata.num_rows for p in files]
+    total_rows = sum(row_counts)
+    if total_rows == 0:
+        raise RuntimeError(f"private pool has 0 rows across {len(files)} files")
+
+    seed = rng_seed if rng_seed is not None else os.urandom(8)
+    rng = np.random.Generator(np.random.PCG64(int.from_bytes(seed, "little")))
+
+    # Sample more rows than strictly required — packed tokens may underfill
+    # `n_sequences * seq_len` if rows are short. 4x is comfortably safe for
+    # CommonCrawl/GitHub/ArXiv-grade text at seq_len=2048.
+    target_tokens = n_sequences * seq_len
+    n_rows_target = min(total_rows, max(n_sequences * 4, n_sequences + 8))
+    row_choice = rng.choice(total_rows, size=n_rows_target, replace=False)
+    row_choice.sort()
+
+    cumulative = np.cumsum([0] + row_counts)
+    rows_per_file: dict[int, set[int]] = {}
+    for r in row_choice:
+        f_idx = int(np.searchsorted(cumulative, r, side="right") - 1)
+        rows_per_file.setdefault(f_idx, set()).add(int(r - cumulative[f_idx]))
+
+    from transformers import AutoTokenizer
+
+    token = os.environ.get("HF_TOKEN") or None
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_repo, token=token, use_fast=True)
+    eos_id = tokenizer.eos_token_id
+    if eos_id is None:
+        eos_id = tokenizer.sep_token_id
+
+    column = os.environ.get("TEUTONIC_RAW_TEXT_COLUMN", "text")
+    sequences: list[list[int]] = []
+    remainder: list[int] = []
+
+    for f_idx, want_rows in rows_per_file.items():
+        pf = pq.ParquetFile(files[f_idx])
+        cur_row = 0
+        for rg_idx in range(pf.num_row_groups):
+            table = pf.read_row_group(rg_idx, columns=[column])
+            n_rg = table.num_rows
+            for i, value in enumerate(table.column(column).to_pylist()):
+                if cur_row + i in want_rows and isinstance(value, str) and value:
+                    ids = tokenizer.encode(value, add_special_tokens=False)
+                    if eos_id is not None:
+                        ids.append(int(eos_id))
+                    remainder.extend(ids)
+                    while len(remainder) >= seq_len:
+                        sequences.append(remainder[:seq_len])
+                        remainder = remainder[seq_len:]
+                        if len(sequences) >= n_sequences:
+                            break
+                if len(sequences) >= n_sequences:
+                    break
+            cur_row += n_rg
+            if len(sequences) >= n_sequences:
+                break
+        if len(sequences) >= n_sequences:
+            break
+
+    if len(sequences) < n_sequences:
+        raise RuntimeError(
+            f"private pool yielded only {len(sequences)}/{n_sequences} "
+            f"sequences from {len(files)} files (~{target_tokens} tokens requested)"
+        )
+
+    if not sequences:
+        return torch.empty((0, seq_len), dtype=torch.long), pool_digest
+    return torch.tensor(sequences, dtype=torch.long), pool_digest

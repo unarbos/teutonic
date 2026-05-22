@@ -12,7 +12,7 @@ module.exports = {
   apps: [{
     name: "teutonic-eval-tunnel",
     script: "./tunnel.sh",
-    cwd: "/home/const/workspace",
+    cwd: "/home/const/workspace2",
     autorestart: true,
     restart_delay: 5000,
     max_restarts: 1000,
@@ -21,8 +21,8 @@ module.exports = {
     name: "teutonic-validator",
     script: "validator.py",
     args: "",
-    interpreter: "/home/const/workspace/.venv/bin/python",
-    cwd: "/home/const/workspace",
+    interpreter: "/home/const/workspace2/.venv/bin/python",
+    cwd: "/home/const/workspace2",
     env: {
       TEUTONIC_EVAL_SERVER: "http://localhost:9000",
       // Active chain (name, seed_repo, repo_pattern, arch) is read from
@@ -31,8 +31,14 @@ module.exports = {
       TEUTONIC_EVAL_DATASET_MODE: "raw_hippius",
       TEUTONIC_RAW_DATASET_PREFIX: "hf-mirrors/HuggingFaceFW/fineweb-edu/data",
       TEUTONIC_RAW_DATASET_MANIFEST: "hf-mirrors/HuggingFaceFW/fineweb-edu/data/_manifest.json",
-      TEUTONIC_RAW_TOKENIZER_REPO: "Qwen/Qwen3-30B-A3B",
+      TEUTONIC_RAW_TOKENIZER_REPO: "Qwen/Qwen3-4B",
       TEUTONIC_FORCE_SEED_KING: "1",
+      // First-deploy degraded mode: no private holdout pool yet, so use
+      // public-only eval. Once /var/teutonic/private_pool is populated, bump
+      // TEUTONIC_EVAL_N_PRIVATE to 2500 and TEUTONIC_EVAL_N_PUBLIC to 2500.
+      TEUTONIC_EVAL_N: "5000",
+      TEUTONIC_EVAL_N_PUBLIC: "5000",
+      TEUTONIC_EVAL_N_PRIVATE: "0",
       TEUTONIC_NETUID: "3",
       TEUTONIC_NETWORK: "finney",
       BT_WALLET_NAME: "teutonic",
@@ -67,37 +73,11 @@ module.exports = {
       // in normal operation. Pre-LXXX values were 300/900s.
       TEUTONIC_STREAM_IDLE_WARN_AFTER: "600",
       TEUTONIC_STREAM_IDLE_TIMEOUT: "1800",
-      // 165 GiB seed-king HF download + sha256 takes ~25-30 min on this
-      // box's network; pre-LXXX default 1200s (20 min) timed out. Bump
-      // to 2400s (40 min) for headroom on the next coronation download
-      // and any out-of-cycle king-hash recompute (State.load placeholder
-      // path).
-      TEUTONIC_KING_HASH_TIMEOUT_S: "2400",
+      // Qwen3-4B is ~8 GB bf16; Hippius prefetch should complete in 1-2 min.
+      // 600s (10 min) is generous; bump if you swap to a larger king.
+      TEUTONIC_KING_HASH_TIMEOUT_S: "600",
     },
     max_restarts: 10,
-    restart_delay: 5000,
-    autorestart: true,
-    log_date_format: "YYYY-MM-DD HH:mm:ss",
-  }, {
-    // Fallback weight-burner. Pushes 100% weight to UID 0 every hour
-    // so the validator hotkey keeps setting weights even when the eval
-    // server is offline / wedged. MUTUALLY EXCLUSIVE with teutonic-validator
-    // — both call set_weights on the same hotkey, so stop the validator
-    // before starting this one (`pm2 stop teutonic-validator`) and vice
-    // versa.
-    name: "teutonic-burn",
-    script: "hourly_burn_weights.py",
-    interpreter: "/home/const/workspace/.venv/bin/python",
-    cwd: "/home/const/workspace",
-    env: {
-      TEUTONIC_NETUID: "3",
-      TEUTONIC_NETWORK: "finney",
-      BT_WALLET_NAME: "teutonic",
-      BT_WALLET_HOTKEY: "default",
-      BURN_UID: "0",
-      BURN_INTERVAL_SECONDS: "3600",
-    },
-    max_restarts: 1000,
     restart_delay: 5000,
     autorestart: true,
     log_date_format: "YYYY-MM-DD HH:mm:ss",

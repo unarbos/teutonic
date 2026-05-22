@@ -362,44 +362,29 @@ Changes from Quasar:
   network throughput drops from ~11.5 evals/hour to ~5–6 evals/hour.
   Validator's `TEUTONIC_TICK_RESTART_AFTER` grew from 1800 s to 3600 s to match.
 
-### A.4 On-chain reveal commitment (REVISED 2026-05-12)
+### A.4 On-chain reveal commitment (REVISED 2026-05-22)
 
-**Wire format** (3 colon-separated fields, ~108 chars total):
+**Wire format** (`|`-delimited, ~160 chars total):
 
 ```
-{king_hash[:16]}:{challenger_repo}:{revision_sha}
+v4|{challenger_repo}|{challenger_digest}|{author_hotkey}
 ```
 
 | field | length | meaning |
 |---|---|---|
-| `king_hash[:16]` | 16 hex | first 16 chars of `sha256(king.safetensors)` at the time you forked. Soft integrity ping; not enforced — kept so the on-chain audit log shows which king you targeted. |
-| `challenger_repo` | ~30–60 | your HF repo, must match `chain.toml::repo_pattern` and contain your 8-char coldkey prefix anywhere (substring, case-insensitive). |
-| `revision_sha` | 40 hex | **binding commitment**. The HF commit SHA returned by `huggingface_hub.upload_folder(...).oid`. Validator pins evaluation to exactly this revision via `model_info(repo, revision=revision_sha)` — any post-commit upload to the same repo is invisible. |
+| `v4` | 2 | Format version. |
+| `challenger_repo` | ~30–80 | your Hippius repo, must match `chain.toml::repo_pattern` and contain your 8-char coldkey prefix anywhere (substring, case-insensitive). |
+| `challenger_digest` | 71 or 43 chars | **binding commitment**. Immutable snapshot digest returned by Hippius upload: `sha256:<64hex>` or `hf:<40hex>`. |
+| `author_hotkey` | 47–48 chars | submitter hotkey ss58, cross-checked against the chain reveal key. |
 
-**What changed and why** (security advisory, 2026-05-12):
+**What changed and why**:
 
-Pre-fork, the 3rd field was `sha256(safetensors)` — parsed by `scan_reveals`
-but never verified against the downloaded model. The validator pinned
-`revision="main"` at evaluation time, not at commit time, so a miner could
-commit an empty repo with a bogus model_hash, then upload a copy of any
-winning model into the repo before the validator dequeued the entry
-(~30–60 min window with current throughput) and get evaluated on the copied
-model. The revision-pinned format closes this: the SHA is the Merkle root
-of the HF commit tree at upload time, and `set_reveal_commitment` is a
-commit-reveal extrinsic so the SHA is locked into the chain commit at
-block N (3 blocks before the reveal).
+The protocol no longer accepts a king-bound submission payload. Miners submit
+the challenger they want evaluated, full stop. The validator already scores
+that challenger against the current king at evaluation time, so forcing the
+miner to also pin a `king_digest` in the on-chain payload only added racey,
+failure-prone complexity.
 
-**Legacy 3-field commits with a 64-char `model_hash` in the 3rd position
-are now silently dropped** at `scan_reveals` with a one-time WARN per
-hotkey. The hotkey is **not** burned (`seen` is only mutated by `enqueue`),
-so the same hotkey can resubmit on the new format without re-registering.
-
-**How to update your miner**: `git pull && python miner.py --hotkey ...`
-(or update your custom training script — the [`miner.py`](../miner.py)
-upload+commit pattern at lines ~219–245 is the reference). If you use the
-[`scripts/mining/submit_challenger.py`](../scripts/mining/submit_challenger.py)
-flow with [`train_challenger.py`](../scripts/mining/train_challenger.py),
-both are already updated — re-run training to refresh `verdict.json` with
-`uploaded_revision` (it was already being recorded; submit just reads a
-different field now).
-
+**Legacy reveals that still include `king_digest` are dropped** at
+`scan_reveals`. They are not enqueued, and any old queued entry that still
+has the legacy field is failed as `legacy_reveal_version`.

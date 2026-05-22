@@ -4,7 +4,7 @@
 Thin chain-agnostic driver: imports `<chain.toml [arch].module>.seed` and
 delegates to its `main()`. The arch package owns the model-specific build
 (architecture, dimensions, tokenizer); chain.toml controls *which* arch and
-*what* HF repo to push to.
+*what* repo/backend to push to.
 """
 import importlib
 import os

@@ -9,8 +9,8 @@ Usage:
 
 The current king and the historical reject list (the knsimon/Teutonic-I-3xxxx
 series and the iotaminer trick variants) should produce a clear bimodal
-separation: honest models pass all 5 layers, trick models trip Layer 1
-(norm cap) or Layer 3/4 (grad cap).
+separation: honest models pass, while trick models trip the active finiteness
+or gradient-norm defenses.
 """
 import argparse
 import gc
@@ -29,14 +29,11 @@ sys.path.insert(0, TEUTONIC_DIR)
 # overrides must be applied to os.environ before importing trainability_probe.
 _pre = argparse.ArgumentParser(add_help=False)
 _pre.add_argument("--seeds", type=int, default=None)
-_pre.add_argument("--norm-weight-max", type=float, default=None)
 _pre.add_argument("--grad-norm-max", type=float, default=None)
 _pre.add_argument("--param-group-grad-max", type=float, default=None)
 _pre_args, _ = _pre.parse_known_args()
 if _pre_args.seeds is not None:
     os.environ["TEUTONIC_PROBE_SEEDS"] = str(_pre_args.seeds)
-if _pre_args.norm_weight_max is not None:
-    os.environ["TEUTONIC_FINETUNE_NORM_WEIGHT_MAX"] = str(_pre_args.norm_weight_max)
 if _pre_args.grad_norm_max is not None:
     os.environ["TEUTONIC_FINETUNE_GRAD_NORM_MAX"] = str(_pre_args.grad_norm_max)
 if _pre_args.param_group_grad_max is not None:
@@ -44,7 +41,7 @@ if _pre_args.param_group_grad_max is not None:
 
 from eval.torch_runner import (  # noqa: E402
     load_model, trainability_probe,
-    FINETUNE_NORM_WEIGHT_MAX, FINETUNE_GRAD_NORM_MAX,
+    FINETUNE_GRAD_NORM_MAX,
     FINETUNE_PARAM_GROUP_GRAD_MAX,
     PROBE_SEEDS, PROBE_BATCH, PROBE_SEQ_LEN,
 )
@@ -142,17 +139,15 @@ def main():
                     help="Override repo list. Default: built-in known-good + known-trick.")
     ap.add_argument("--seeds", type=int, default=None,
                     help="Independent random batches (overrides TEUTONIC_PROBE_SEEDS).")
-    ap.add_argument("--norm-weight-max", type=float, default=None,
-                    help="LN/RMSNorm |w|.max() cap (overrides TEUTONIC_FINETUNE_NORM_WEIGHT_MAX).")
     ap.add_argument("--grad-norm-max", type=float, default=None,
                     help="Global ||grad||_2 cap (overrides TEUTONIC_FINETUNE_GRAD_NORM_MAX).")
     ap.add_argument("--param-group-grad-max", type=float, default=None,
                     help="Per-group ||grad||_2 cap (overrides TEUTONIC_FINETUNE_PARAM_GROUP_GRAD_MAX).")
     args = ap.parse_args()
     log.info("probe knobs: seeds=%d batch=%d seq_len=%d "
-             "norm_weight_max=%.2f grad_norm_max=%.1f param_group_grad_max=%.1f",
+             "grad_norm_max=%.1f param_group_grad_max=%.1f",
              PROBE_SEEDS, PROBE_BATCH, PROBE_SEQ_LEN,
-             FINETUNE_NORM_WEIGHT_MAX, FINETUNE_GRAD_NORM_MAX,
+             FINETUNE_GRAD_NORM_MAX,
              FINETUNE_PARAM_GROUP_GRAD_MAX)
 
     device = f"cuda:{args.gpu}"
@@ -224,10 +219,6 @@ def main():
               f"midpoint {midpoint:.4g}, {factor}x safety {safe_floor:.4g})")
 
     print("\n--- Suggested thresholds (calibrated against current cohorts) ---")
-    _suggest("norm weight cap", "TEUTONIC_FINETUNE_NORM_WEIGHT_MAX",
-             _finite_vals(good, "max_norm_weight"),
-             _finite_vals(trick, "max_norm_weight"),
-             factor=3.0)
     _suggest("global grad cap", "TEUTONIC_FINETUNE_GRAD_NORM_MAX",
              _finite_vals(good, "global_grad_norm"),
              _finite_vals(trick, "global_grad_norm"),

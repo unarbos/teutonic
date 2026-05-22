@@ -6,7 +6,7 @@ import sys
 try:
     import bittensor as bt
 
-    sub = bt.subtensor(network="finney")
+    sub = bt.Subtensor(network="finney")
     meta = sub.metagraph(3)
     block = sub.block
 
@@ -14,7 +14,7 @@ try:
     hotkeys_info = []
     for hk_name in ["default", "h0", "h1", "h2", "h3", "h4", "h5"]:
         try:
-            w = bt.wallet(name=wallet_name, hotkey=hk_name)
+            w = bt.Wallet(name=wallet_name, hotkey=hk_name)
             uid = sub.get_uid_for_hotkey_on_subnet(w.hotkey.ss58_address, 3)
             hotkeys_info.append({
                 "hotkey": hk_name,

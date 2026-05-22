@@ -35,6 +35,17 @@ _chain = _doc.get("chain", {})
 _arch = _doc.get("arch", {})
 _seed = _doc.get("seed", {})
 
+_VALID_SEED_REPO_BACKENDS = {"hf", "hippius"}
+
+
+def _default_seed_repo_backend(seed_digest: str) -> str:
+    digest = (seed_digest or "").strip()
+    if digest.startswith("sha256:"):
+        return "hippius"
+    if digest.startswith("hf:"):
+        return "hf"
+    return "hf"
+
 NAME: str = _chain["name"]
 SEED_REPO: str = _chain["seed_repo"]
 REPO_PATTERN: str = _chain.get("repo_pattern") or rf"^[^/]+/{re.escape(NAME)}-.+$"
@@ -44,6 +55,12 @@ EXTRA_LOCK_KEYS: tuple[str, ...] = tuple(_arch.get("extra_lock_keys", []))
 
 SEED_TOKENIZER_REPO: str = _seed.get("tokenizer_repo", "")
 SEED_DIGEST: str = _seed.get("seed_digest", "")
+SEED_REPO_BACKEND: str = (_seed.get("repo_backend") or _default_seed_repo_backend(SEED_DIGEST)).strip().lower()
+if SEED_REPO_BACKEND not in _VALID_SEED_REPO_BACKENDS:
+    raise RuntimeError(
+        f"chain.toml [seed].repo_backend must be one of "
+        f"{sorted(_VALID_SEED_REPO_BACKENDS)}, got {SEED_REPO_BACKEND!r}"
+    )
 
 # HF namespace inferred from the seed repo. Miners default their challenger
 # repo to "<namespace>/<NAME>-<suffix>" though they can override to publish
@@ -71,6 +88,7 @@ __all__ = [
     "EXTRA_LOCK_KEYS",
     "SEED_TOKENIZER_REPO",
     "SEED_DIGEST",
+    "SEED_REPO_BACKEND",
     "SEED_NAMESPACE",
     "load_arch",
 ]

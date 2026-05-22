@@ -6,8 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "bittensor",
+    "bittensor>=10.3,<11",
     "boto3",
+    "minio",
     "httpx",
     "numpy",
     "scipy",

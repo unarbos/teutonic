@@ -13,6 +13,7 @@ Env vars: same as eval_torch.py (TEUTONIC_R2_* plus Hippius Hub token env vars)
         Parquet mirror and tokenize at eval time.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -28,15 +29,17 @@ from pathlib import Path
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import chain_config  # noqa: E402
 chain_config.load_arch()
 
 from eval.torch_runner import (  # noqa: E402
-    R2, MultiGPUEvaluator, run_bootstrap_test, parse_gpu_ids,
+    R2, MultiGPUEvaluator, parse_gpu_ids,
     trainability_probe, load_model, raw_dataset_enabled,
+    sample_public_holdout, run_paired_eval, is_accepted,
 )
+from eval.raw_dataset import sample_private_pool  # noqa: E402
 from model_store import (  # noqa: E402
     MODEL_CACHE_DIR,
     ModelRef,
@@ -64,24 +67,22 @@ _evals: dict[str, dict] = {}
 _self_kill_scheduled = threading.Event()
 
 # Set whenever /eval or /probe is doing real work that competes with model
-# downloads (challenger fetch, king load, weight prefetch). Background
-# /preload threads check this and defer until cleared so speculative
-# downloads don't starve the in-flight eval's challenger fetch through
-# the same storage gateway. Cleared in _run_eval's finally and in probe_endpoint's
-# finally. Safe with the new self-kill: if an eval poisons CUDA and dies,
-# the supervisor restarts the process which resets this event.
+# downloads. Cleared in _run_eval's finally and in probe_endpoint's finally.
+# Safe with the new self-kill: if an eval poisons CUDA and dies, the
+# supervisor restarts the process which resets this event.
 _gpu_busy = threading.Event()
 
 DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "256"))
-DEFAULT_EVAL_N = int(os.environ.get("EVAL_N", "10000"))
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
+DEFAULT_N_PUBLIC = int(os.environ.get("EVAL_N_PUBLIC", "1000"))
+DEFAULT_N_PRIVATE = int(os.environ.get("EVAL_N_PRIVATE", "1000"))
 
 # Server-side caps. The validator can request a larger eval_n / n_bootstrap
 # in its POST body; we clamp to these to keep per-eval wall time bounded
 # while clearing a backed-up duel queue. Restore via env if not needed.
-EVAL_N_CAP = int(os.environ.get("EVAL_N_CAP", "999999"))
+EVAL_N_CAP = int(os.environ.get("EVAL_N_CAP", "20000"))
 EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 
 PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
@@ -129,14 +130,22 @@ _CUDA_FATAL_TOKENS = (
 CUDA_FATAL_EXIT_DELAY_S = float(os.environ.get("CUDA_FATAL_EXIT_DELAY_S", "3"))
 CUDA_FATAL_EXIT_CODE = int(os.environ.get("CUDA_FATAL_EXIT_CODE", "75"))
 
-# How aggressively /preload yields to in-flight /eval or /probe.
-PRELOAD_DEFER_POLL_S = float(os.environ.get("PRELOAD_DEFER_POLL_S", "2"))
-# Hard ceiling on how long a preload may wait for the GPU to free up
-# before it just goes ahead anyway. Should be longer than EVAL_MAX_RUNTIME_S
-# because the watchdog should always hit first; this is just a safety net
-# against a bug that wedges _gpu_busy permanently.
-PRELOAD_MAX_DEFER_S = float(os.environ.get("PRELOAD_MAX_DEFER_S",
-                                            str(EVAL_MAX_RUNTIME_S + 300)))
+
+# sha256 over the eval-pipeline source files. Echoed back to the validator
+# so an external auditor can pin the exact code that produced a verdict.
+# Aggregated digest (concatenated bytes); auditor rehashes the same three
+# files in the same order.
+def _compute_eval_code_digest() -> str:
+    h = hashlib.sha256()
+    here = Path(__file__).resolve().parent
+    for relpath in ("eval/torch_runner.py", "eval/raw_dataset.py", "eval_server.py",
+                    "chain_config.py", "model_store.py"):
+        with open(here / relpath, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()
+
+
+_EVAL_CODE_DIGEST = _compute_eval_code_digest()
 
 
 def _is_cuda_fatal(exc_msg: str) -> bool:
@@ -238,11 +247,13 @@ class EvalRequest(BaseModel):
     challenger_repo: str
     block_hash: str
     hotkey: str
-    shard_key: str
+    delta_threshold: float = Field(..., ge=0.0, lt=1.0)
+    n_public: int = DEFAULT_N_PUBLIC
+    n_private: int = DEFAULT_N_PRIVATE
     king_hash: str = ""
     king_digest: str = ""
     challenger_digest: str = ""
-    eval_n: int = DEFAULT_EVAL_N
+    shard_key: str = ""
     alpha: float = DEFAULT_ALPHA
     seq_len: int = DEFAULT_SEQ_LEN
     batch_size: int = DEFAULT_BATCH_SIZE
@@ -395,8 +406,9 @@ def _cleanup_model_cache():
         for _mtime, d, size in sorted(candidates):
             if running < target_bytes:
                 break
-            # Digest snapshots are named by digest; keep the loaded king.
-            if _king_digest and d.name == _king_digest:
+            # Digest snapshots are named by digest with `:` → `-` (see
+            # model_store._cache_snapshot_path); keep the loaded king.
+            if _king_digest and d.name == _king_digest.replace(":", "-"):
                 continue
             shutil.rmtree(d, ignore_errors=True)
             running -= size
@@ -506,6 +518,54 @@ def _get_disk_stats():
 # Eval runner (runs in a thread)
 # ---------------------------------------------------------------------------
 
+def _derive_seeds(block_hash: str, hotkey: str) -> tuple[bytes, bytes, bytes]:
+    """Deterministic per-duel seeds. `public_seed` and `boot_seed` are pinned
+    in the audit record; `private_seed` is validator-side replay (the private
+    pool is not published, but the same validator must be able to reproduce
+    its own past duel by re-running with the same block_hash + hotkey)."""
+    material = block_hash.encode() + hotkey.encode()
+    public_seed = hashlib.blake2b(material + b"public", digest_size=8).digest()
+    boot_seed = hashlib.blake2b(material + b"boot", digest_size=8).digest()
+    private_seed = hashlib.blake2b(material + b"private", digest_size=8).digest()
+    return public_seed, boot_seed, private_seed
+
+
+_PUBLIC_CORPUS_DIGEST_CACHE: dict = {"digest": "", "expires": 0.0, "fallback": False}
+_PUBLIC_CORPUS_DIGEST_TTL_S = 60.0
+
+
+def _public_corpus_digest() -> tuple[str, bool]:
+    """sha256 of the actual public corpus manifest bytes. Returns (digest, fallback).
+
+    `fallback=True` means the manifest fetch failed and the digest is derived
+    from the tokenizer string only — auditors should treat the verdict as
+    degraded for replay purposes.
+    """
+    now = time.monotonic()
+    if _PUBLIC_CORPUS_DIGEST_CACHE["digest"] and now < _PUBLIC_CORPUS_DIGEST_CACHE["expires"]:
+        return _PUBLIC_CORPUS_DIGEST_CACHE["digest"], _PUBLIC_CORPUS_DIGEST_CACHE["fallback"]
+    digest, fallback = "", False
+    try:
+        from eval.raw_dataset import RawDatasetConfig
+        cfg = RawDatasetConfig.from_env(chain_config.SEED_TOKENIZER_REPO)
+        if _r2 is not None:
+            body = _r2.ds_client.get_object(
+                Bucket=_r2.ds_bucket, Key=cfg.manifest_key,
+            )["Body"].read()
+            digest = hashlib.sha256(body).hexdigest()
+    except Exception:
+        log.warning("public_corpus_digest: manifest fetch failed; using tokenizer fallback",
+                    exc_info=True)
+    if not digest:
+        material = chain_config.SEED_TOKENIZER_REPO.encode()
+        digest = hashlib.sha256(material).hexdigest()
+        fallback = True
+    _PUBLIC_CORPUS_DIGEST_CACHE["digest"] = digest
+    _PUBLIC_CORPUS_DIGEST_CACHE["fallback"] = fallback
+    _PUBLIC_CORPUS_DIGEST_CACHE["expires"] = now + _PUBLIC_CORPUS_DIGEST_TTL_S
+    return digest, fallback
+
+
 def _run_eval(eval_id: str, req: EvalRequest):
     record = _evals[eval_id]
     record["state"] = "running"
@@ -543,9 +603,30 @@ def _run_eval(eval_id: str, req: EvalRequest):
     _heartbeat_thread.start()
 
     try:
+        n_public = max(0, int(req.n_public))
+        n_private = max(0, int(req.n_private))
+        total = n_public + n_private
+        if total > EVAL_N_CAP:
+            # Scale both sides proportionally so we keep the public/private
+            # ratio the validator asked for; integer floor + remainder goes
+            # to public so the cap is hard.
+            scale = EVAL_N_CAP / total
+            new_pub = int(n_public * scale)
+            new_priv = int(n_private * scale)
+            slack = EVAL_N_CAP - (new_pub + new_priv)
+            new_pub += slack
+            n_public, n_private = new_pub, new_priv
+        n_bootstrap = min(req.n_bootstrap, EVAL_BOOTSTRAP_B_CAP)
+        if n_public != req.n_public or n_private != req.n_private or n_bootstrap != req.n_bootstrap:
+            log.info("eval %s: capped n_public %d->%d n_private %d->%d n_bootstrap %d->%d",
+                     eval_id, req.n_public, n_public, req.n_private, n_private,
+                     req.n_bootstrap, n_bootstrap)
+
+        public_seed, boot_seed, private_seed = _derive_seeds(req.block_hash, req.hotkey)
+
         # Kick off shard download in the background so it overlaps with king
         # reload + challenger load + probe. Saves ~30s/eval once the shard
-        # cache is cold for that key.
+        # cache is cold for that key. No-op in raw-dataset mode.
         if req.shard_key and not raw_dataset_enabled():
             try:
                 from eval.torch_runner import prefetch_shard
@@ -623,30 +704,62 @@ def _run_eval(eval_id: str, req: EvalRequest):
                         "warnings": probe.get("warnings", []),
                     },
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "eval_code_digest": _EVAL_CODE_DIGEST,
                 }
                 record["state"] = "completed"
                 record["verdict"] = verdict
                 event_q.put({"type": "verdict", "data": verdict})
                 return
 
-        seed_str = f"{req.block_hash}:{req.hotkey}"
-
         def _on_progress(info):
             record["progress"] = info
             event_q.put({"type": "progress", "data": info})
 
-        eval_n_capped = min(req.eval_n, EVAL_N_CAP)
-        n_bootstrap_capped = min(req.n_bootstrap, EVAL_BOOTSTRAP_B_CAP)
-        if eval_n_capped < req.eval_n or n_bootstrap_capped < req.n_bootstrap:
-            log.info("eval %s: capped eval_n %d->%d n_bootstrap %d->%d",
-                     eval_id, req.eval_n, eval_n_capped, req.n_bootstrap, n_bootstrap_capped)
-        verdict = run_bootstrap_test(
+        vocab_size = None
+        try:
+            vocab_size = int(getattr(getattr(king_eval.primary_model, "config", None),
+                                     "vocab_size", 0)) or None
+        except Exception:
+            pass
+
+        public_seqs, public_indices_digest, raw_meta = sample_public_holdout(
+            _r2, req.shard_key, public_seed, n_public, req.seq_len,
+            vocab_size=vocab_size,
+        )
+
+        if n_private > 0:
+            private_seqs, private_pool_digest = sample_private_pool(
+                req.seq_len, n_private, chain_config.SEED_TOKENIZER_REPO,
+                rng_seed=private_seed,
+            )
+        else:
+            private_seqs = torch.zeros((0, req.seq_len), dtype=torch.int64)
+            private_pool_digest = ""
+
+        actual_public = public_seqs.shape[0]
+        holdout = public_seqs if private_seqs.shape[0] == 0 else torch.cat([public_seqs, private_seqs], dim=0)
+
+        verdict = run_paired_eval(
             king_eval, challenger_eval,
-            _r2, req.shard_key, eval_n_capped, req.alpha,
-            req.seq_len, req.batch_size, seed_str,
-            n_bootstrap=n_bootstrap_capped,
+            holdout, actual_public,
+            boot_seed=boot_seed,
+            eval_alpha=req.alpha,
+            delta_threshold=req.delta_threshold,
+            n_bootstrap=n_bootstrap,
+            batch_size=req.batch_size,
             on_progress=_on_progress,
         )
+
+        _pcd, _pcd_fallback = _public_corpus_digest()
+        verdict["public_corpus_digest"] = _pcd
+        verdict["public_corpus_digest_fallback"] = _pcd_fallback
+        verdict["public_seed"] = public_seed.hex()
+        verdict["public_indices_digest"] = public_indices_digest
+        verdict["private_pool_digest"] = private_pool_digest
+        verdict["boot_seed"] = boot_seed.hex()
+        verdict["eval_code_digest"] = _EVAL_CODE_DIGEST
+        if raw_meta is not None:
+            verdict["dataset"] = raw_meta
 
         if not same_model:
             challenger_eval.shutdown()
@@ -672,19 +785,6 @@ def _run_eval(eval_id: str, req: EvalRequest):
             _eval_lock.release()
         except RuntimeError:
             log.warning("eval %s: eval_lock was not held at release time", eval_id)
-        # Mark the just-evaluated challenger as "preloaded" so the cleanup
-        # below doesn't immediately evict it. Without this guard, the
-        # validator's coronation-side `_seed_king_hash` -> `GET /hash` race
-        # against this very cleanup: cleanup picks the chall as the largest
-        # eviction candidate, deletes its blobs, validator's /hash arrives
-        # ~1s later and gets a 404. Validator then falls back to its slow
-        # local download path (5-30 min). Keeping the chall in
-        # _preload_seen for PRELOAD_KEEP_S (30 min) bounds the race window.
-        try:
-            with _preload_lock:
-                _preload_seen[(req.challenger_repo, req.challenger_digest or "")] = time.time()
-        except Exception:
-            log.warning("eval %s: failed to mark chall as preloaded", eval_id, exc_info=True)
         try:
             _cleanup_model_cache()
         except Exception:
@@ -887,62 +987,6 @@ def _run_probe_blocking(repo: str, digest: str) -> dict:
             torch.cuda.empty_cache()
         except Exception:
             pass
-
-
-# Track in-flight preloads so /preload is idempotent (multiple validator
-# nudges for the same repo coalesce to one background download).
-_preload_threads: dict[str, threading.Thread] = {}
-_preload_lock = threading.Lock()
-# (repo, digest) -> wall-clock timestamp the preload was issued. Used by
-# _cleanup_model_cache to keep speculative downloads alive long enough to be
-# consumed by the next /eval call. Entries older than PRELOAD_KEEP_S are
-# eligible for cleanup (treated as stale).
-_preload_seen: dict[tuple[str, str], float] = {}
-PRELOAD_KEEP_S = float(os.environ.get("MODEL_PRELOAD_KEEP_S", "1800"))
-
-# Cap on how many preload network downloads may run concurrently. Per-IP
-# xet-bridge throttling on this box caps single-shard at ~255 MB/s and shares
-# that cap across concurrent connections; running multiple preloads in
-# parallel divides bandwidth and inflates p50 time-to-ready. Default 1
-# (strict serialisation); override via env if a faster box ever justifies it.
-PRELOAD_PARALLELISM = max(1, int(os.environ.get("PRELOAD_PARALLELISM", "1")))
-_preload_network_sem = threading.Semaphore(PRELOAD_PARALLELISM)
-
-
-class PreloadRequest(BaseModel):
-    repo: str
-    digest: str = ""
-
-
-@app.post("/preload")
-async def preload_endpoint(req: PreloadRequest):
-    """No-op (kept for validator backward compat).
-
-    Speculative preload was disabled 2026-05-08 after repeatedly causing
-    ENOSPC mid-eval: a parallel background download of the next 165 GB
-    challenger races the current /eval's challenger load → the in-flight
-    `from_pretrained` mmap fails with [Errno 28] and surfaces as the
-    misleading "could not load model with any attention implementation"
-    error. On disk-tight pods (1.7 T overlay shared with other tenants,
-    ~538 GB usable on the new B200) there's simply not room for king +
-    in-flight challenger + speculative-next at once, and the cache
-    eviction can't safely remove the in-flight one.
-
-    The cost is per-eval wall time: instead of the next challenger being
-    pre-downloaded during the current eval (~5 min saved), /eval has to
-    download on demand (~7-10 min added). Net throughput drops from
-    ~6 evals/hour to ~4 evals/hour, but evals stop *failing*.
-
-    The endpoint still returns 200 OK so the validator's call site
-    (post-/eval-dispatch) doesn't need to change. We don't even mark
-    `_preload_seen` because nothing is actually preloaded.
-    """
-    if not req.repo:
-        raise HTTPException(status_code=400, detail="repo is required")
-    key = f"{req.repo}@{(req.digest or 'missing')[:19]}"
-    log.debug("preload %s: disabled (no-op)", key)
-    return {"status": "disabled", "key": key,
-            "note": "preload disabled to avoid disk pressure mid-eval"}
 
 
 @app.post("/probe")
