@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Side-load smoke for the new trainability_probe.
+"""Side-load smoke for the current trainability_probe.
 
 Run on the GPU box. Loads /root/eval_torch.NEW.py via importlib (so the live
 /root/eval_torch.py used by the running eval_server is untouched), pulls the
 current live king onto a single GPU, and verifies:
 
-  1. honest king passes all 5 layers (ok=True, status="ok")
-  2. after pumping RMSNorm weights by 1000x the same king fails Layer 1
-     (norm_weight_cap), no compute spent
-  3. after pumping a single projection group by a large factor the same king
-     fails Layer 4 (param_group_grad)
-  4. resets and re-probes -> ok=True again (snapshot/restore is intact)
+  1. honest king passes the probe (ok=True, status="ok")
+  2. after injecting a non-finite norm weight the same king fails the live
+     finiteness check
+  3. after restoring, the same king passes again (snapshot/restore is intact)
+  4. after pumping a single projection group by a large factor the same king
+     fails the global or per-group grad cap
+  5. resets and re-probes -> ok=True again
 
 Usage (on GPU box):
     cd /root && . .venv/bin/activate && . env.sh
@@ -67,29 +68,29 @@ def main():
     print(json.dumps(summarize(v1), default=str, indent=2))
     assert v1["ok"] is True, f"honest king should pass: {v1.get('reason')}"
     assert v1["status"] == "ok"
-    assert v1["max_norm_weight"] <= m.FINETUNE_NORM_WEIGHT_MAX
     assert v1["global_grad_norm"] <= m.FINETUNE_GRAD_NORM_MAX
     for cat, gn in (v1.get("param_group_grad_norms") or {}).items():
         assert gn <= m.FINETUNE_PARAM_GROUP_GRAD_MAX, f"group {cat} {gn}"
     print("[smoke] TEST 1 PASS")
 
-    print("\n[smoke] === TEST 2: layer-1 norm pump ===")
+    print("\n[smoke] === TEST 2: non-finite norm weight ===")
     snapshot_norm = []
-    pump = 1000.0
     with torch.no_grad():
         for n, p in model.named_parameters():
             if "norm" in n.lower() and n.endswith(".weight"):
                 snapshot_norm.append((n, p.data.clone()))
-                p.data.mul_(pump)
-                if len(snapshot_norm) >= 4:
-                    break  # one pumped layer is enough to trip L1
+                p.data.view(-1)[0] = float("inf")
+                break
     assert snapshot_norm, "no norm weights found?!"
-    print(f"[smoke] pumped {len(snapshot_norm)} norm tensors by {pump}x")
+    print(f"[smoke] poisoned {len(snapshot_norm)} norm tensor with +inf")
     v2 = m.trainability_probe(model)
     print(json.dumps(summarize(v2), default=str, indent=2))
     assert v2["ok"] is False
     assert v2["status"] == "anti_finetune"
-    assert v2["reason"].startswith("norm_weight_cap"), v2["reason"]
+    assert ("loss_non_finite" in v2["reason"]
+            or "grad_non_finite" in v2["reason"]
+            or "forward_raised" in v2["reason"]
+            or "backward_raised" in v2["reason"]), v2["reason"]
     print("[smoke] TEST 2 PASS")
     # restore
     with torch.no_grad():
@@ -104,9 +105,8 @@ def main():
     print("[smoke] TEST 3 PASS")
 
     print("\n[smoke] === TEST 4: param-group grad blow-up ===")
-    # Pump every q_proj weight by 1e3 — Layer 1 untouched (those aren't norms),
-    # forward stays finite for one batch, but the gradient on the attn group
-    # explodes way past the per-group cap.
+    # Pump every q_proj weight by 1e3. This keeps the check on the active
+    # grad-based defenses rather than the removed static norm-weight cap.
     snapshot_qp = []
     qp_pump = 1000.0
     with torch.no_grad():
