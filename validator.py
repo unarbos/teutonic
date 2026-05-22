@@ -528,11 +528,7 @@ _SAFETENSORS_SHARD_RE = re.compile(r"^model-\d{5}-of-\d{5}\.safetensors$")
 def _decode_commitment_pair(pair):
     """Return (hotkey_ss58, [(block, payload), ...]) for one RevealedCommitments row.
 
-    bittensor 10.3's `decode_revealed_commitment` assumes the payload is hex
-    and does `bytes.fromhex()` on it — but substrate hands back the raw
-    commitment bytes already wrapped in a Python str via latin-1, with a
-    SCALE compact-length prefix in front. We strip the prefix and decode the
-    rest as UTF-8 ourselves.
+    Depending on the substrate client path, the payload may arrive as either a hex-serialized SCALE byte string (`0x...`) or raw commitment bytes wrapped in a Python str via latin-1. We normalize both shapes to bytes, strip the SCALE compact-length prefix, and decode the rest as UTF-8.
     """
     key, data = pair
     if not isinstance(key, str):
@@ -542,7 +538,10 @@ def _decode_commitment_pair(pair):
         text, block = entry
         if not isinstance(text, str):
             raise ValueError(f"unexpected commitment payload type {type(text).__name__}")
-        raw = text.encode("latin-1")
+        if text.startswith(("0x", "0X")):
+            raw = bytes.fromhex(text[2:])
+        else:
+            raw = text.encode("latin-1")
         if not raw:
             raise ValueError("empty commitment payload")
         mode = raw[0] & 0b11
