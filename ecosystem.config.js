@@ -12,7 +12,7 @@ module.exports = {
   apps: [{
     name: "teutonic-eval-tunnel",
     script: "./tunnel.sh",
-    cwd: "/home/const/workspace2",
+    cwd: "/home/const/workspace",
     autorestart: true,
     restart_delay: 5000,
     max_restarts: 1000,
@@ -21,8 +21,8 @@ module.exports = {
     name: "teutonic-validator",
     script: "validator.py",
     args: "",
-    interpreter: "/home/const/workspace2/.venv/bin/python",
-    cwd: "/home/const/workspace2",
+    interpreter: "/home/const/workspace/.venv/bin/python",
+    cwd: "/home/const/workspace",
     env: {
       TEUTONIC_EVAL_SERVER: "http://localhost:9000",
       // Active chain (name, seed_repo, repo_pattern, arch) is read from
@@ -32,7 +32,7 @@ module.exports = {
       TEUTONIC_RAW_DATASET_PREFIX: "hf-mirrors/HuggingFaceFW/fineweb-edu/data",
       TEUTONIC_RAW_DATASET_MANIFEST: "hf-mirrors/HuggingFaceFW/fineweb-edu/data/_manifest.json",
       TEUTONIC_RAW_TOKENIZER_REPO: "Qwen/Qwen3-4B",
-      TEUTONIC_FORCE_SEED_KING: "1",
+      ///TEUTONIC_FORCE_SEED_KING: "1", 22.05.2026 16:07 override
       // First-deploy degraded mode: no private holdout pool yet, so use
       // public-only eval. Once /var/teutonic/private_pool is populated, bump
       // TEUTONIC_EVAL_N_PRIVATE to 2500 and TEUTONIC_EVAL_N_PUBLIC to 2500.

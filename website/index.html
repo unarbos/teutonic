@@ -489,15 +489,15 @@ var ERROR_MESSAGES = {
 function modelRepo(obj) { return (obj && (obj.model_repo || obj.challenger_repo)) || ""; }
 function modelDigest(obj) { return (obj && (obj.model_digest || obj.king_digest || obj.challenger_digest)) || ""; }
 function shortDigest(d) { return d ? d.slice(0, 19) : ""; }
-function hubUrl(repo, digest) {
+function hubUrl(repo) {
     if (!repo) return "#";
     var parts = repo.split("/");
     if (parts.length < 2) return "https://hub.hippius.com/models";
-    return "https://hub.hippius.com/models/" + parts[0] + "/" + parts.slice(1).join("/") + (digest ? "/" + digest : "");
+    return "https://hub.hippius.com/models/" + parts[0] + "/" + parts.slice(1).join("/") + "/main";
 }
 function modelLink(repo, digest, label) {
     if (!repo) return label || "--";
-    return '<a href="' + hubUrl(repo, digest) + '" target="_blank" style="color:var(--ink)">' + (label || repo) + '</a>';
+    return '<a href="' + hubUrl(repo) + '" target="_blank" style="color:var(--ink)">' + (label || repo) + '</a>';
 }
 
 function render(d) {
@@ -534,11 +534,11 @@ function render(d) {
     var kingRepo = topModel ? modelRepo(topModel) : (king.model_repo || "--");
     var kingDigest = topModel ? modelDigest(topModel) : (king.king_digest || king.model_digest || "");
     var kingLinkTop = document.getElementById("king-link-top");
-    kingLinkTop.href = hubUrl(kingRepo, kingDigest);
+    kingLinkTop.href = hubUrl(kingRepo);
     kingLinkTop.textContent = kingRepo;
     var kingRevEl = document.getElementById("king-rev");
     if (kingDigest) {
-        kingRevEl.innerHTML = '@ <a href="' + hubUrl(kingRepo, kingDigest) + '" target="_blank" style="color:var(--ink);opacity:0.6">' + shortDigest(kingDigest) + '</a>';
+        kingRevEl.innerHTML = '@ <a href="' + hubUrl(kingRepo) + '" target="_blank" style="color:var(--ink);opacity:0.6">' + shortDigest(kingDigest) + '</a>';
     } else {
         kingRevEl.textContent = "";
     }

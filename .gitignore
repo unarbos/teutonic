@@ -52,3 +52,4 @@ teutonic/
 
 # Hippius PoC bench harness writes per-run env files containing live secrets.
 scripts/experiments/hippius_poc/runs/*/remote.env
+scripts/experiments/services/
