@@ -1,10 +1,16 @@
-# Teutonic-LXXXI — Qwen3-4B dense king hosted on Hippius Hub.
-# Public eval corpus: FineWeb-Edu Hippius mirror tokenized at eval time with
-# the Qwen3 tokenizer.
+# Teutonic-Q3-4B — Qwen3-4B dense as genesis king (vanilla HF Qwen3ForCausalLM, no fork).
+# vocab 151936, 36 layers x hidden 2560, GQA 32/8 heads, RoPE theta=1e6, ~8 GB bf16.
+# Public eval corpus: FineWeb-Edu Hippius mirror tokenized at eval time with Qwen3 tokenizer.
+#
+# Genesis is loaded directly from HuggingFace at the pinned commit SHA (no Hippius
+# mirror). model_store dispatches by digest prefix: `sha256:` for Hippius OCI,
+# `hf:` for HF revisions. Challenger uploads still go through Hippius as normal.
 [chain]
-name = "Teutonic-LXXXI"
-seed_repo = "teutonic/Teutonic-LXXXI-mock-king"
-# repo_pattern auto-derives to "^[^/]+/Teutonic-LXXXI-.+$" if omitted.
+name = "Teutonic-Q3-4B"
+seed_repo = "Qwen/Qwen3-4B"
+# Custom repo_pattern: challengers go to Hippius under <ns>/Teutonic-Q3-4B-<suffix>,
+# while seed_repo points at HF. Validator checks pattern only for challengers.
+repo_pattern = "^[^/]+/Teutonic-Q3-4B-.+$"
 
 [arch]
 module = "archs.qwen3"
@@ -19,7 +25,6 @@ extra_lock_keys = [
 ]
 
 [seed]
-tokenizer_repo = "Qwen/Qwen3-30B-A3B"
-repo_backend = "hippius"
-
-seed_digest = "placeholder"
+tokenizer_repo = "Qwen/Qwen3-4B"
+# HF commit SHA pinned at the time of writing. To update: `huggingface_hub.HfApi().model_info("Qwen/Qwen3-4B").sha`.
+seed_digest = "hf:1cfa9a7208912126459214e8b04321603b3df60c"

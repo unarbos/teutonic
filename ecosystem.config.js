@@ -31,7 +31,7 @@ module.exports = {
       TEUTONIC_EVAL_DATASET_MODE: "raw_hippius",
       TEUTONIC_RAW_DATASET_PREFIX: "hf-mirrors/HuggingFaceFW/fineweb-edu/data",
       TEUTONIC_RAW_DATASET_MANIFEST: "hf-mirrors/HuggingFaceFW/fineweb-edu/data/_manifest.json",
-      TEUTONIC_RAW_TOKENIZER_REPO: "Qwen/Qwen3-30B-A3B",
+      TEUTONIC_RAW_TOKENIZER_REPO: "Qwen/Qwen3-4B",
       TEUTONIC_FORCE_SEED_KING: "1",
       // First-deploy degraded mode: no private holdout pool yet, so use
       // public-only eval. Once /var/teutonic/private_pool is populated, bump
