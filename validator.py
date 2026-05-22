@@ -81,9 +81,8 @@ MAX_CONSECUTIVE_TICK_ERRORS = int(os.environ.get("TEUTONIC_MAX_CONSECUTIVE_TICK_
 NETWORK = os.environ.get("TEUTONIC_NETWORK", "finney")
 SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", chain_config.SEED_REPO)
 SEED_DIGEST = os.environ.get("TEUTONIC_SEED_DIGEST", getattr(chain_config, "SEED_DIGEST", ""))
-FORCE_SEED_KING = os.environ.get("TEUTONIC_FORCE_SEED_KING", "").strip().lower() in {
-    "1", "true", "yes", "on",
-}
+# NOTE: TEUTONIC_FORCE_SEED_KING is intentionally ignored here. PM2 can keep stale env vars across restarts, and honoring this flag would reseed the king on every validator boot. Re-enable only with a one-shot startup policy.
+FORCE_SEED_KING = False
 EVAL_SERVER_URL = os.environ.get("TEUTONIC_EVAL_SERVER", "http://localhost:9000")
 EVAL_DATASET_MODE = os.environ.get("TEUTONIC_EVAL_DATASET_MODE", "")
 WALLET_NAME = os.environ.get("BT_WALLET_NAME", "teutonic")
@@ -150,6 +149,9 @@ BLOCKS_PER_HOUR = 300
 # off the hot path and fail open when the public endpoint is degraded.
 DASHBOARD_FLUSH_MIN_INTERVAL = float(os.environ.get("TEUTONIC_DASHBOARD_FLUSH_MIN_INTERVAL", "5"))
 HIPPIUS_COOLDOWN_SECONDS = int(os.environ.get("TEUTONIC_HIPPIUS_COOLDOWN_SECONDS", "300"))
+
+# Number of most-recent kings that share equal weight and appear in the Reigns table.
+KING_CHAIN_SIZE = int(os.environ.get("TEUTONIC_KING_CHAIN_SIZE", "5"))
 
 # Transient infra-side failures should not lose queue priority. If an eval
 # fails because the eval server/stream/watchdog got wedged, requeue the same
@@ -633,18 +635,29 @@ async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
     if not force and current_block - state.last_weight_block < WEIGHT_INTERVAL:
         return False
 
+    # Collect up to KING_CHAIN_SIZE distinct hotkeys: current king first, then past kings.
+    all_king_hks: list[str] = []
     king_hotkey = (state.king or {}).get("hotkey", "")
-    king_uid = state.uid_map.get(king_hotkey) if king_hotkey else None
-    if king_uid is not None:
-        target_uid = int(king_uid)
-        winner_label = king_hotkey
-        log_target = f"king uid={target_uid} hotkey={king_hotkey[:16]}"
-    else:
-        target_uid = BURN_UID
-        winner_label = f"burn:uid={BURN_UID}"
-        log_target = f"burn uid={BURN_UID} (king {'unregistered' if king_hotkey else 'unset'})"
+    if king_hotkey:
+        all_king_hks.append(king_hotkey)
+    for e in (state.king_chain or []):
+        hk = e.get("hotkey", "")
+        if hk and hk not in all_king_hks:
+            all_king_hks.append(hk)
 
-    log.info("set_weights at block %d (last=%d, %s) -> %s:1.0",
+    target_uids = [int(state.uid_map[hk]) for hk in all_king_hks if hk in state.uid_map]
+    if not target_uids:
+        target_uids = [BURN_UID]
+        weights_list = [1.0]
+        winner_label = f"burn:uid={BURN_UID}"
+        log_target = f"burn uid={BURN_UID} (no kings registered)"
+    else:
+        w = round(1.0 / len(target_uids), 9)
+        weights_list = [w] * len(target_uids)
+        winner_label = king_hotkey or "multi"
+        log_target = f"uids={target_uids} weight={w:.4f} each ({len(target_uids)} kings)"
+
+    log.info("set_weights at block %d (last=%d, %s) -> %s",
              current_block, state.last_weight_block,
              reason or ("forced" if force else "interval"), log_target)
     loop = asyncio.get_running_loop()
@@ -652,8 +665,7 @@ async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
         resp = await loop.run_in_executor(
             None,
             lambda: subtensor.set_weights(
-                wallet=wallet, netuid=NETUID, uids=[target_uid], weights=[1.0],
-                wait_for_revealed_execution=False,
+                wallet=wallet, netuid=NETUID, uids=target_uids, weights=weights_list
             ),
         )
     except Exception:
@@ -740,6 +752,7 @@ class State:
         self.uid_emission_per_block: dict[str, float] = {}
         self.hotkey_coldkey: dict[str, str] = {}
         self.known_digests: dict[str, dict[str, str]] = {}
+        self.king_chain: list[dict] = []
         self.watchdog = {
             "started_at": _now(),
             "last_tick_started_at": None,
@@ -780,6 +793,9 @@ class State:
         h = self.r2.get("state/dashboard_history.json")
         if h:
             self.history = h.get("history", [])
+        kc = self.r2.get("state/king_chain.json")
+        if kc:
+            self.king_chain = kc.get("chain", [])
         wd = self.r2.get("state/watchdog.json")
         if wd:
             self.watchdog.update(wd)
@@ -809,6 +825,7 @@ class State:
             "repos": sorted(self.completed_repos), "updated_at": now,
         })
         self.r2.put("state/watchdog.json", self.watchdog)
+        self.r2.put("state/king_chain.json", {"chain": self.king_chain})
 
     def next_id(self):
         self.counter += 1
@@ -915,6 +932,12 @@ class State:
         self.evaluated_repos.clear()
         reign = self.king.get("reign_number", 0) + (0 if challenge_id == "seed" else 1)
         prev_repo = self.king.get("model_repo") if self.king else ""
+        if self.king and challenge_id != "seed":
+            past = {**self.king,
+                    "uid": self.uid_map.get(self.king.get("hotkey", "")),
+                    "coldkey": self.coldkey_for(self.king.get("hotkey", ""))}
+            self.king_chain.insert(0, past)
+            self.king_chain = self.king_chain[:KING_CHAIN_SIZE - 1]
         self.king = {
             "hotkey": hotkey, "model_repo": model_repo,
             "king_digest": king_digest,
@@ -1049,6 +1072,22 @@ class State:
             alpha_tao = float(mkt.get("sn3_alpha_price_tao") or 0.0)
             alpha_usd = float(mkt.get("sn3_alpha_price_usd") or 0.0)
             sn3_alpha_per_block = float(mkt.get("sn3_alpha_per_block") or 0.0)
+            
+            # Compute equal-share payout across all registered kings in the chain.
+            all_king_hks: list[str] = []
+            if self.king:
+                all_king_hks.append(self.king.get("hotkey", ""))
+            for e in self.king_chain:
+                hk = e.get("hotkey", "")
+                if hk and hk not in all_king_hks:
+                    all_king_hks.append(hk)
+            registered_kings = [hk for hk in all_king_hks if hk in self.uid_map]
+            n_kings = max(len(registered_kings), 1)
+            alpha_per_hour_total = sn3_alpha_per_block * BLOCKS_PER_HOUR
+            equal_alpha = round(alpha_per_hour_total / n_kings, 6)
+            equal_usd = round(equal_alpha * alpha_usd, 4)
+            equal_weight = round(1.0 / n_kings, 9)
+
             king_hk = self.king.get("hotkey") if self.king else None
             if king_hk and king_hk in self.uid_map:
                 em_per_block = float(self.uid_emission_per_block.get(king_hk, 0.0))
@@ -1070,6 +1109,52 @@ class State:
             else:
                 king_payout = None
 
+
+            # Build king_chain for dashboard: current king first, then past kings.
+            # Field names follow the schema: model_repo, king_revision (mapped from
+            # internal model_repo / king_digest), plus per-king payout fields.
+            def _chain_entry(e, hk):
+                registered = hk in self.uid_map
+                aw = equal_alpha if registered else None
+                uw = equal_usd if registered else None
+                tw = round(aw * alpha_tao, 6) if aw is not None else None
+                return {
+                    "challenge_id":  e.get("challenge_id"),
+                    "reign_number":  e.get("reign_number"),
+                    "hotkey":        hk,
+                    "uid":           self.uid_map.get(hk),
+                    "coldkey":       self.coldkey_for(hk),
+                    "model_repo":       e.get("model_repo", e.get("model_repo", "")),
+                    "king_revision": e.get("king_digest", e.get("king_revision", "")),
+                    "crowned_at":    e.get("crowned_at"),
+                    "crowned_block": e.get("crowned_block"),
+                    "weight":        equal_weight if registered else None,
+                    "alpha_per_hour": aw,
+                    "tao_per_hour":  tw,
+                    "usd_per_hour":  uw,
+                }
+            dashboard_king_chain = []
+            if self.king:
+                dashboard_king_chain.append(_chain_entry(self.king, king_hk or ""))
+            for e in self.king_chain:
+                dashboard_king_chain.append(_chain_entry(e, e.get("hotkey", "")))
+
+            king_chain_weights = [
+                {
+                    "hotkey":                   hk,
+                    "uid":                      self.uid_map.get(hk),
+                    "coldkey":                  self.coldkey_for(hk),
+                    "weight":                   equal_weight,
+                    "weight_share":             equal_weight,
+                    "emission_per_block":       round(float(self.uid_emission_per_block.get(hk, 0.0)), 9),
+                    "projected_alpha_per_block": round(sn3_alpha_per_block / n_kings, 9),
+                    "alpha_per_hour":           equal_alpha,
+                    "tao_per_hour":             round(equal_alpha * alpha_tao, 6),
+                    "usd_per_hour":             equal_usd,
+                }
+                for hk in all_king_hks
+                if hk in self.uid_map
+            ]
             payload = {
                 "updated_at": _now(),
                 "chain": {
@@ -1079,6 +1164,8 @@ class State:
                 },
                 "king": self.king,
                 "king_payout": king_payout,
+                "king_chain": dashboard_king_chain,
+                "king_chain_weights": king_chain_weights,
                 "stats": self.stats,
                 "current_eval": self.current_eval,
                 "watchdog": self.watchdog,
@@ -1647,7 +1734,8 @@ async def main():
         )
         log.info("uploaded dashboard to Hippius (build=%s)", build_id)
 
-    if should_seed_king(FORCE_SEED_KING, state.king):
+    # Was: if should_seed_king(FORCE_SEED_KING, state.king):
+    if not state.king:
         if not SEED_DIGEST:
             log.error("set TEUTONIC_SEED_DIGEST for the initial seed king")
             sys.exit(1)
