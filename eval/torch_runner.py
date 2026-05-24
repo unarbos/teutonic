@@ -398,31 +398,34 @@ def _lm_head_device(model) -> torch.device:
     return next(model.lm_head.parameters()).device
 
 
+def _chunked_ce_loss(hidden, labels, lm_head, chunk_size=LM_HEAD_CHUNK):
+    """Chunked lm_head + cross-entropy. Compilable — no Python data-dependent control flow."""
+    B = hidden.size(0)
+    n_pos = hidden.size(1)
+    total_loss = torch.zeros(B, device=hidden.device)
+    for i in range(0, n_pos, chunk_size):
+        end = min(i + chunk_size, n_pos)
+        logits = lm_head(hidden[:, i:end, :])
+        chunk_labels = labels[:, i:end]
+        total_loss += F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            chunk_labels.reshape(-1),
+            reduction="none",
+        ).view(B, -1).sum(1)
+    return total_loss * (1.0 / n_pos)
+
+
 @torch.no_grad()
-def compute_batch_losses(model, token_batches, device, chunk_size=LM_HEAD_CHUNK):
-    """Forward pass with chunked lm_head to avoid OOM on large vocabs.
+def compute_batch_losses(model, input_ids, device, chunk_size=LM_HEAD_CHUNK):
+    """Forward pass + chunked CE loss. Returns 1-D float32 tensor of per-seq losses.
 
-    Instead of model(input_ids).logits which allocates [batch, seq, vocab],
-    we get hidden states first then apply lm_head in small chunks along the
-    sequence dimension. Peak VRAM drops ~7x for vocab_size=262144.
-
-    Works for both single-GPU models (`device` is "cuda:N") and accelerate-
-    sharded models (`device` is the input-embedding device). When sharded,
-    `last_hidden_state` may surface on a different GPU than `lm_head`; we
-    relocate it once outside the chunk loop so the chunked CE doesn't bounce
-    across devices.
-
-    The `@torch.no_grad()` is critical for sharded 80B models: without it
-    PyTorch keeps every layer's activations alive for backward, blowing
-    per-GPU memory by ~6x (~30 GiB/layer × 36 layers across 4 GPUs ≈ 1 TB).
-    `compute_paired_losses` already had this decorator; sharded paired runs
-    are now routed through this function so it needed parity.
+    Accepts either a tensor [B, seq_len] or a list-of-lists (legacy callers).
+    Returns a tensor on CPU — no .tolist() in the hot path.
     """
-    input_ids = torch.tensor(token_batches, dtype=torch.long, device=device)
-    # Quasar (and any future stateful arch) carries a persistent latent memory
-    # state across forward calls. Resetting before every batch keeps paired-CE
-    # numbers exchangeable — required for the bootstrap LCB. Stock HF archs
-    # (Qwen3, Gemma) do not implement reset_state and pass through harmlessly.
+    if not isinstance(input_ids, torch.Tensor):
+        input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
+    elif input_ids.device != torch.device(device):
+        input_ids = input_ids.to(device)
     if hasattr(model, "reset_state"):
         model.reset_state()
     hidden = model.model(input_ids).last_hidden_state
@@ -430,24 +433,10 @@ def compute_batch_losses(model, token_batches, device, chunk_size=LM_HEAD_CHUNK)
     head_dev = _lm_head_device(model)
     if hidden.device != head_dev:
         hidden = hidden.to(head_dev)
-    labels = input_ids if input_ids.device == head_dev else input_ids.to(head_dev)
-
-    n_positions = labels.size(1) - 1
-    total_loss = torch.zeros(len(token_batches), device=head_dev)
-
-    for i in range(0, n_positions, chunk_size):
-        end_pos = min(i + chunk_size, n_positions)
-        chunk_logits = lm_head(hidden[:, i:end_pos, :])
-        chunk_labels = labels[:, i + 1 : end_pos + 1]
-        loss = F.cross_entropy(
-            chunk_logits.reshape(-1, chunk_logits.size(-1)),
-            chunk_labels.reshape(-1),
-            reduction="none",
-        )
-        total_loss += loss.reshape(len(token_batches), -1).sum(dim=1)
-        del chunk_logits, loss
-
-    return (total_loss / n_positions).cpu().tolist()
+    labels = input_ids[:, 1:] if input_ids.device == head_dev else input_ids.to(head_dev)[:, 1:]
+    hidden = hidden[:, :-1, :]
+    losses = _chunked_ce_loss(hidden, labels, lm_head, chunk_size)
+    return losses.cpu()
 
 
 # ---------------------------------------------------------------------------
@@ -635,8 +624,8 @@ def load_model(repo, device, label="model", force_download=False, revision=None,
     model.eval()
     if TORCH_COMPILE_ENABLED and not shard_across_gpus:
         t_compile = time.time()
-        model = torch.compile(model, mode="max-autotune-no-cudagraphs")
-        log.info("%s torch.compile applied in %.1fs (cache: %s)",
+        model.model = torch.compile(model.model, mode="max-autotune-no-cudagraphs")
+        log.info("%s backbone torch.compile applied in %.1fs (cache: %s)",
                  label, time.time() - t_compile, _COMPILE_CACHE)
     elapsed = time.time() - t0
     params = sum(p.numel() for p in model.parameters()) / 1e9
@@ -1014,10 +1003,11 @@ def trainability_probe(model) -> dict:
     inputs without exploding, on every parameter bucket, with sane
     gradients. Any failure ⇒ ok=False, status="anti_finetune".
     """
-    # Unwrap torch.compile so the probe's backward pass doesn't trigger
-    # a full Inductor retrace+autotune of the training graph (~100s).
-    # The compiled wrapper is still used for the eval forward (no_grad).
-    model = getattr(model, '_orig_mod', model)
+    # Disable torch.compile for the probe's backward pass to avoid
+    # Inductor retrace of the training graph (~100s per model).
+    _backbone_compiled = getattr(getattr(model, 'model', None), '_orig_mod', None)
+    if _backbone_compiled is not None:
+        model.model = model.model._orig_mod
     device = next(model.parameters()).device
     vocab_size = int(getattr(getattr(model, "config", None), "vocab_size", 0)) or 32000
 
@@ -1139,6 +1129,8 @@ def trainability_probe(model) -> dict:
             pass
         if not was_training:
             model.eval()
+        if _backbone_compiled is not None and TORCH_COMPILE_ENABLED:
+            model.model = torch.compile(model.model, mode="max-autotune-no-cudagraphs")
         torch.cuda.empty_cache()
 
 
@@ -1261,67 +1253,61 @@ class MultiGPUEvaluator:
             return self.models[self.SHARDED_KEY]
         return self.models[self.gpu_ids[0]]
 
-    def compute_losses(self, token_batches):
-        """Compute per-sequence CE for `token_batches`.
+    def compute_losses(self, input_ids):
+        """Compute per-sequence CE. Accepts tensor [B, seq_len] or list-of-lists.
 
-        Per-GPU mode: split across replicas, dispatch in parallel.
-        Sharded mode: run sequentially through the one replica.
+        Returns a 1-D tensor of per-sequence losses (CPU, float32).
         """
-        if not token_batches:
-            return []
+        if isinstance(input_ids, list):
+            if len(input_ids) == 0:
+                return torch.empty(0)
+            input_ids = torch.tensor(input_ids, dtype=torch.long)
+        if input_ids.numel() == 0:
+            return torch.empty(0)
 
         if self.shard_across_gpus:
             return compute_batch_losses(
-                self.models[self.SHARDED_KEY], token_batches,
+                self.models[self.SHARDED_KEY], input_ids,
                 self.devices[self.SHARDED_KEY],
             )
 
         n_gpus = len(self.gpu_ids)
-        per_gpu = [[] for _ in range(n_gpus)]
-        idx_map = [[] for _ in range(n_gpus)]
-        for i, batch in enumerate(token_batches):
-            g = i % n_gpus
-            per_gpu[g].append(batch)
-            idx_map[g].append(i)
+        chunks = input_ids.chunk(n_gpus, dim=0)
 
         futures = {}
         for g_idx, gid in enumerate(self.gpu_ids):
-            if per_gpu[g_idx]:
+            if g_idx < len(chunks) and chunks[g_idx].numel() > 0:
                 fut = self.pool.submit(
                     compute_batch_losses,
-                    self.models[gid], per_gpu[g_idx], self.devices[gid],
+                    self.models[gid], chunks[g_idx], self.devices[gid],
                 )
                 futures[fut] = g_idx
 
-        results = [None] * len(token_batches)
+        parts = [None] * len(chunks)
         for fut in as_completed(futures):
-            g_idx = futures[fut]
-            losses = fut.result()
-            for local_i, global_i in enumerate(idx_map[g_idx]):
-                results[global_i] = losses[local_i]
+            parts[futures[fut]] = fut.result()
 
-        return results
+        return torch.cat([p for p in parts if p is not None])
 
     def shutdown(self):
         if self.pool is not None:
             self.pool.shutdown(wait=False)
 
 
-def compute_paired_multi_gpu(king_eval, chall_eval, token_batches):
+def compute_paired_multi_gpu(king_eval, chall_eval, input_ids):
     """Compute paired CE for king and challenger concurrently.
 
-    King and challenger sit on disjoint GPU sets (king 0..3, chall 4..7).
-    Each evaluator's compute_losses handles internal data parallelism across
-    its own replicas. We launch both sides concurrently so king and challenger
-    GPU sets are fully utilized simultaneously.
+    Accepts tensor [B, seq_len]. Returns two CPU tensors of per-seq losses.
     """
-    if not token_batches:
-        return [], []
+    if isinstance(input_ids, torch.Tensor) and input_ids.numel() == 0:
+        return torch.empty(0), torch.empty(0)
+    if isinstance(input_ids, list) and len(input_ids) == 0:
+        return torch.empty(0), torch.empty(0)
 
     pool = ThreadPoolExecutor(max_workers=2)
     try:
-        f_k = pool.submit(king_eval.compute_losses, token_batches)
-        f_c = pool.submit(chall_eval.compute_losses, token_batches)
+        f_k = pool.submit(king_eval.compute_losses, input_ids)
+        f_c = pool.submit(chall_eval.compute_losses, input_ids)
         return f_k.result(), f_c.result()
     finally:
         pool.shutdown(wait=False)
@@ -1438,40 +1424,38 @@ def run_paired_eval(king_eval, challenger_eval,
 
     n_private = n_total - public_count
     same_evaluator = king_eval is challenger_eval
-    sequences = holdout_seqs.tolist()
-    batches = [sequences[i:i + batch_size] for i in range(0, n_total, batch_size)]
+    batches = holdout_seqs.split(batch_size, dim=0)
 
     log.info("paired eval: n_total=%d (public=%d private=%d) alpha=%s delta=%.6f B=%d",
              n_total, public_count, n_private, eval_alpha, delta_threshold, n_bootstrap)
 
-    king_losses_all: list[float] = []
-    chall_losses_all: list[float] = []
-    king_sum = chall_sum = 0.0
+    king_parts: list[torch.Tensor] = []
+    chall_parts: list[torch.Tensor] = []
     total_done = 0
     t0 = time.time()
 
-    for bi, token_batches in enumerate(batches):
+    for bi, batch_tensor in enumerate(batches):
         if same_evaluator:
-            king_losses = king_eval.compute_losses(token_batches)
-            chall_losses = king_losses
+            kl = king_eval.compute_losses(batch_tensor)
+            cl = kl
         else:
             king_losses, chall_losses = compute_paired_multi_gpu(
-                king_eval, challenger_eval, token_batches,
+                king_eval, challenger_eval, batch_tensor,
             )
-        for kl, cl in zip(king_losses, chall_losses):
-            king_losses_all.append(kl)
-            chall_losses_all.append(cl)
-            king_sum += kl
-            chall_sum += cl
-            total_done += 1
+            kl = king_losses if isinstance(king_losses, torch.Tensor) else torch.tensor(king_losses)
+            cl = chall_losses if isinstance(chall_losses, torch.Tensor) else torch.tensor(chall_losses)
+        king_parts.append(kl)
+        chall_parts.append(cl)
+        total_done += kl.numel()
 
         elapsed = time.time() - t0
         sps = total_done / elapsed if elapsed > 0 else 0
-        d_so_far = np.subtract(king_losses_all, chall_losses_all)
-        mu_so_far = float(d_so_far.mean()) if d_so_far.size else 0.0
+        mu_so_far = float((torch.cat(king_parts) - torch.cat(chall_parts)).mean()) if total_done > 0 else 0.0
         log.info("batch %d/%d | done=%d/%d | mu_hat=%.6f | %.1f seq/s",
                  bi + 1, len(batches), total_done, n_total, mu_so_far, sps)
         if on_progress:
+            king_sum = float(torch.cat(king_parts).sum())
+            chall_sum = float(torch.cat(chall_parts).sum())
             on_progress({
                 "done": total_done, "total": n_total,
                 "mu_hat": round(mu_so_far, 6),
@@ -1481,8 +1465,8 @@ def run_paired_eval(king_eval, challenger_eval,
             })
 
     elapsed = time.time() - t0
-    king_arr = np.asarray(king_losses_all)
-    chall_arr = np.asarray(chall_losses_all)
+    king_arr = torch.cat(king_parts).numpy()
+    chall_arr = torch.cat(chall_parts).numpy()
     d = king_arr - chall_arr
     mu_hat = float(d.mean())
     mu_hat_public = float(d[:public_count].mean()) if public_count else 0.0

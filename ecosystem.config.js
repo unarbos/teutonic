@@ -36,8 +36,8 @@ module.exports = {
       // First-deploy degraded mode: no private holdout pool yet, so use
       // public-only eval. Once /var/teutonic/private_pool is populated, bump
       // TEUTONIC_EVAL_N_PRIVATE to 2500 and TEUTONIC_EVAL_N_PUBLIC to 2500.
-      TEUTONIC_EVAL_N: "25600",
-      TEUTONIC_EVAL_N_PUBLIC: "25600",
+      TEUTONIC_EVAL_N: "102400",
+      TEUTONIC_EVAL_N_PUBLIC: "102400",
       TEUTONIC_EVAL_N_PRIVATE: "0",
       TEUTONIC_NETUID: "3",
       TEUTONIC_NETWORK: "finney",
