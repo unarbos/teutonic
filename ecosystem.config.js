@@ -65,7 +65,7 @@ module.exports = {
       // jenny08311 v5.13 case 2026-05-12 and ClarenceDan A5518/A5519 cases
       // 2026-05-13). Steady-state eval is ~10 min so 1800s still gives ~3x
       // headroom for legitimate slow downloads on the new B200 pod.
-      TEUTONIC_TICK_RESTART_AFTER: "1800",
+      TEUTONIC_TICK_RESTART_AFTER: "3600",
       TEUTONIC_MAX_CONSECUTIVE_TICK_ERRORS: "20",
       // Stream-idle watchdog envelope must accommodate the multi-minute
       // challenger Hippius prefetch + sharded model load. The eval_server emits SSE

@@ -80,7 +80,7 @@ os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", _COMPILE_CACHE)
 os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
 os.environ.setdefault("TORCH_COMPILE_CACHE_DIR", _COMPILE_CACHE)
 torch._dynamo.config.cache_size_limit = 64
-TORCH_COMPILE_ENABLED = os.environ.get("TEUTONIC_TORCH_COMPILE", "1") == "1"
+TORCH_COMPILE_ENABLED = os.environ.get("TEUTONIC_TORCH_COMPILE", "0") == "1"
 
 
 # ---------------------------------------------------------------------------

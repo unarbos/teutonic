@@ -23,6 +23,7 @@ dependencies = [
     "pydantic",
     "pyarrow",
     "accelerate",
+    "liger-kernel",
 ]
 
 [project.optional-dependencies]
