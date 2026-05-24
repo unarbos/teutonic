@@ -66,6 +66,16 @@ from model_store import ModelRef, materialize_model  # noqa: E402
 
 log = logging.getLogger("eval_torch")
 
+# torch.compile persistent cache — survives process restarts so the second
+# eval after a cold start skips the full Inductor pipeline (~2-3 min).
+_COMPILE_CACHE = os.environ.get("TEUTONIC_COMPILE_CACHE", "/tmp/teutonic/torch_compile_cache")
+os.makedirs(_COMPILE_CACHE, exist_ok=True)
+os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", _COMPILE_CACHE)
+os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
+os.environ.setdefault("TORCH_COMPILE_CACHE_DIR", _COMPILE_CACHE)
+torch._dynamo.config.cache_size_limit = 64
+TORCH_COMPILE_ENABLED = os.environ.get("TEUTONIC_TORCH_COMPILE", "1") == "1"
+
 
 # ---------------------------------------------------------------------------
 # R2 client
@@ -623,6 +633,11 @@ def load_model(repo, device, label="model", force_download=False, revision=None,
     else:
         raise RuntimeError("could not load model with any attention implementation")
     model.eval()
+    if TORCH_COMPILE_ENABLED and not shard_across_gpus:
+        t_compile = time.time()
+        model = torch.compile(model, mode="max-autotune-no-cudagraphs")
+        log.info("%s torch.compile applied in %.1fs (cache: %s)",
+                 label, time.time() - t_compile, _COMPILE_CACHE)
     elapsed = time.time() - t0
     params = sum(p.numel() for p in model.parameters()) / 1e9
     if shard_across_gpus and hasattr(model, "hf_device_map"):
