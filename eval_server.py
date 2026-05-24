@@ -20,7 +20,6 @@ import os
 import shutil
 import threading
 import time
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from queue import Queue, Empty
@@ -1031,11 +1030,20 @@ async def probe_endpoint(req: ProbeRequest):
 async def start_eval(req: EvalRequest):
     if _self_kill_scheduled.is_set():
         raise HTTPException(status_code=503, detail="eval server is restarting")
+    eval_id = hashlib.sha256(
+        f"{req.challenger_repo}|{req.challenger_digest}|{req.block_hash}".encode()
+    ).hexdigest()[:8]
+
+    existing = _evals.get(eval_id)
+    if existing and existing["state"] in ("pending", "running", "completed"):
+        return {"eval_id": eval_id}
+    if existing and existing["state"] == "failed":
+        del _evals[eval_id]
+
     acquired = _eval_lock.acquire(blocking=False)
     if not acquired:
         raise HTTPException(status_code=409, detail="an eval is already running")
 
-    eval_id = uuid.uuid4().hex[:8]
     _evals[eval_id] = {
         "state": "pending",
         "progress": {},
