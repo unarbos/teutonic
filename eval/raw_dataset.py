@@ -86,7 +86,7 @@ def load_raw_sequences(
     seed_str: str,
     default_tokenizer_repo: str,
 ) -> tuple[list[list[int]], dict]:
-    """Return fixed-length token sequences sampled from raw mirrored Parquet."""
+    """Sample eval_n globally-random windows from all cached tokenized shards."""
     cfg = RawDatasetConfig.from_env(default_tokenizer_repo)
     files = _load_file_list(r2, cfg)
     if not files:
@@ -95,69 +95,56 @@ def load_raw_sequences(
             f"prefix={cfg.prefix!r}"
         )
 
-    seed = int.from_bytes(hashlib.blake2b(seed_str.encode(), digest_size=8).digest(), "little")
-    rng = np.random.Generator(np.random.PCG64(seed))
-    start_idx = int(rng.integers(0, len(files)))
-    ordered = files[start_idx:] + files[:start_idx]
-
     from transformers import AutoTokenizer
-
     token = os.environ.get("HF_TOKEN") or None
     tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_repo, token=token, use_fast=True)
     eos_id = tokenizer.eos_token_id
     if eos_id is None:
         eos_id = tokenizer.sep_token_id
 
-    sequences: list[list[int]] = []
-    used_files: list[str] = []
-    docs_seen = 0
-    token_offset = 0
-    token_pool = np.empty(0, dtype=np.uint32)
+    npy_files = sorted(cfg.cache_dir.glob("*.tokens.npy"))
+    if not npy_files:
+        seed = int.from_bytes(hashlib.blake2b(seed_str.encode(), digest_size=8).digest(), "little")
+        rng_file = np.random.Generator(np.random.PCG64(seed))
+        pick = int(rng_file.integers(0, len(files)))
+        _get_tokenized_npy(r2, cfg, files[pick]["key"], tokenizer, eos_id)
+        npy_files = sorted(cfg.cache_dir.glob("*.tokens.npy"))
 
-    for item in ordered[: cfg.max_files_per_eval]:
-        key = item["key"]
-        tokens = _get_tokenized_npy(r2, cfg, key, tokenizer, eos_id)
-        used_files.append(key)
-        docs_seen += len(tokens) // 500  # rough estimate
-        token_pool = np.concatenate([token_pool[token_offset:], tokens])
-        token_offset = 0
-        n_windows = len(token_pool) // seq_len
-        if n_windows > 0:
-            usable = n_windows * seq_len
-            windows = token_pool[:usable].reshape(n_windows, seq_len)
-            for row in windows:
-                sequences.append(row.tolist())
-                if len(sequences) >= eval_n:
-                    return sequences, _meta(cfg, files, used_files, docs_seen)
-            token_offset = usable
+    mmaps = [np.load(p, mmap_mode="r") for p in npy_files]
+    window_counts = [m.shape[0] // seq_len for m in mmaps]
+    total_windows = sum(window_counts)
+    if total_windows == 0:
+        raise RuntimeError("tokenized cache has zero usable windows")
+    cumsum = np.zeros(len(mmaps) + 1, dtype=np.int64)
+    for i, wc in enumerate(window_counts):
+        cumsum[i + 1] = cumsum[i] + wc
 
-    if not sequences:
-        raise RuntimeError(
-            f"raw dataset tokenization produced no {seq_len}-token windows "
-            f"from {len(used_files)} files"
-        )
-    log.warning(
-        "raw dataset produced only %d/%d requested sequences from %d files",
-        len(sequences), eval_n, len(used_files),
-    )
-    return sequences, _meta(cfg, files, used_files, docs_seen)
+    seed_int = int.from_bytes(hashlib.blake2b(seed_str.encode(), digest_size=8).digest(), "little")
+    rng = np.random.Generator(np.random.PCG64(seed_int))
+    n = min(eval_n, total_windows)
+    indices = np.sort(rng.choice(total_windows, size=n, replace=False))
 
+    result = np.empty((n, seq_len), dtype=np.uint32)
+    fi = 0
+    for i, gi in enumerate(indices):
+        while gi >= cumsum[fi + 1]:
+            fi += 1
+        local = gi - cumsum[fi]
+        start = int(local) * seq_len
+        result[i] = mmaps[fi][start:start + seq_len]
 
-def _meta(
-    cfg: RawDatasetConfig,
-    files: list[dict],
-    used_files: list[str],
-    docs_seen: int,
-) -> dict:
-    return {
-        "mode": "raw_hippius",
-        "manifest": cfg.manifest_key,
-        "prefix": cfg.prefix,
+    log.info("global sample: %d windows from %d shards (%d total available)",
+             n, len(mmaps), total_windows)
+
+    meta = {
+        "mode": "raw_hippius_global",
         "tokenizer": cfg.tokenizer_repo,
-        "total_files": len(files),
-        "used_files": used_files,
-        "docs_seen": docs_seen,
+        "total_shards": len(npy_files),
+        "total_windows": total_windows,
+        "sampled": n,
+        "used_files": [str(p.name) for p in npy_files],
     }
+    return result.tolist(), meta
 
 
 def _load_file_list(r2, cfg: RawDatasetConfig) -> list[dict]:
