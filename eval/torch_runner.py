@@ -445,6 +445,7 @@ def compute_batch_losses(model, input_ids, device, chunk_size=LM_HEAD_CHUNK):
     B, S, H = hidden.shape
 
     if FUSED_CE_AVAILABLE:
+        torch.cuda.set_device(head_dev)
         weight = model.lm_head.weight
         bias = getattr(model.lm_head, 'bias', None)
         per_token = fused_linear_cross_entropy_forward(
