@@ -64,6 +64,12 @@ chain_config.load_arch()  # noqa: E402
 from eval.raw_dataset import load_raw_sequences, raw_dataset_enabled  # noqa: E402
 from model_store import ModelRef, materialize_model  # noqa: E402
 
+try:
+    from liger_kernel.ops.fused_linear_cross_entropy import fused_linear_cross_entropy_forward
+    FUSED_CE_AVAILABLE = True
+except ImportError:
+    FUSED_CE_AVAILABLE = False
+
 log = logging.getLogger("eval_torch")
 
 # torch.compile persistent cache — survives process restarts so the second
@@ -417,10 +423,11 @@ def _chunked_ce_loss(hidden, labels, lm_head, chunk_size=LM_HEAD_CHUNK):
 
 @torch.no_grad()
 def compute_batch_losses(model, input_ids, device, chunk_size=LM_HEAD_CHUNK):
-    """Forward pass + chunked CE loss. Returns 1-D float32 tensor of per-seq losses.
+    """Forward pass + CE loss. Returns 1-D float32 tensor of per-seq losses.
 
-    Accepts either a tensor [B, seq_len] or a list-of-lists (legacy callers).
-    Returns a tensor on CPU — no .tolist() in the hot path.
+    Uses liger-kernel's fused linear+CE when available — computes cross-entropy
+    without materializing the [batch, seq, vocab] logits tensor. Falls back to
+    the chunked path when liger is not installed.
     """
     if not isinstance(input_ids, torch.Tensor):
         input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)
@@ -429,14 +436,24 @@ def compute_batch_losses(model, input_ids, device, chunk_size=LM_HEAD_CHUNK):
     if hasattr(model, "reset_state"):
         model.reset_state()
     hidden = model.model(input_ids).last_hidden_state
-    lm_head = model.lm_head
     head_dev = _lm_head_device(model)
     if hidden.device != head_dev:
         hidden = hidden.to(head_dev)
     labels = input_ids[:, 1:] if input_ids.device == head_dev else input_ids.to(head_dev)[:, 1:]
-    hidden = hidden[:, :-1, :]
-    losses = _chunked_ce_loss(hidden, labels, lm_head, chunk_size)
-    return losses.cpu()
+    hidden = hidden[:, :-1, :].contiguous()
+    labels = labels.contiguous()
+    B, S, H = hidden.shape
+
+    if FUSED_CE_AVAILABLE:
+        weight = model.lm_head.weight
+        bias = getattr(model.lm_head, 'bias', None)
+        per_token = fused_linear_cross_entropy_forward(
+            hidden.reshape(B * S, H), weight, labels.reshape(B * S),
+            bias=bias, reduction="none", accum_dtype=torch.float32,
+        )[0]
+        return per_token.view(B, S).mean(dim=1).cpu()
+
+    return _chunked_ce_loss(hidden, labels, model.lm_head, chunk_size).cpu()
 
 
 # ---------------------------------------------------------------------------
