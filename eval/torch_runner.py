@@ -1014,6 +1014,10 @@ def trainability_probe(model) -> dict:
     inputs without exploding, on every parameter bucket, with sane
     gradients. Any failure ⇒ ok=False, status="anti_finetune".
     """
+    # Unwrap torch.compile so the probe's backward pass doesn't trigger
+    # a full Inductor retrace+autotune of the training graph (~100s).
+    # The compiled wrapper is still used for the eval forward (no_grad).
+    model = getattr(model, '_orig_mod', model)
     device = next(model.parameters()).device
     vocab_size = int(getattr(getattr(model, "config", None), "vocab_size", 0)) or 32000
 
