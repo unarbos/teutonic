@@ -259,12 +259,14 @@ def _get_tokenized_npy(
 
     log.info("tokenizing %s (cache miss)", key.rsplit("/", 1)[-1])
     local_path = _download_parquet(r2, cfg, key)
+    texts = list(_iter_parquet_texts(local_path, cfg.text_column))
+    log.info("batch-tokenizing %d documents", len(texts))
+    batch_enc = tokenizer(texts, add_special_tokens=False, return_attention_mask=False)["input_ids"]
     all_ids: list[int] = []
-    for text in _iter_parquet_texts(local_path, cfg.text_column):
-        ids = tokenizer.encode(text, add_special_tokens=False)
-        if eos_id is not None:
-            ids.append(int(eos_id))
+    eos_list = [int(eos_id)] if eos_id is not None else []
+    for ids in batch_enc:
         all_ids.extend(ids)
+        all_ids.extend(eos_list)
 
     arr = np.array(all_ids, dtype=np.uint32)
     cfg.cache_dir.mkdir(parents=True, exist_ok=True)
