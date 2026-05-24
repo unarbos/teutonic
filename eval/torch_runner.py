@@ -1289,91 +1289,24 @@ class MultiGPUEvaluator:
 
 
 def compute_paired_multi_gpu(king_eval, chall_eval, token_batches):
-    """Compute paired CE for `token_batches` across king and challenger.
+    """Compute paired CE for king and challenger concurrently.
 
-    Three modes (auto-detected from `MultiGPUEvaluator.shard_across_gpus`):
-
-    1. **Both sharded** — one batch through king's sharded replica, then the
-       same batch through challenger's sharded replica. Sequential because
-       each replica already saturates its 4-GPU shard; running them concurrent
-       would only help if king and challenger sat on disjoint GPU sets *and*
-       per-GPU compute weren't already the bottleneck. We launch both in
-       threads anyway since they DO sit on disjoint GPUs (king 0..3, chall
-       4..7) — kernels can overlap and the CPU-side cost of two independent
-       launches is negligible.
-    2. **Both per-GPU** — pair gid-by-gid as before, parallel via thread pool.
-    3. **Mixed** — error. We don't support a sharded king vs per-GPU chall
-       (or vice versa); the eval-server always builds them with the same
-       mode for the same chain.
+    King and challenger sit on disjoint GPU sets (king 0..3, chall 4..7).
+    Each evaluator's compute_losses handles internal data parallelism across
+    its own replicas. We launch both sides concurrently so king and challenger
+    GPU sets are fully utilized simultaneously.
     """
     if not token_batches:
         return [], []
 
-    king_sharded = getattr(king_eval, "shard_across_gpus", False)
-    chall_sharded = getattr(chall_eval, "shard_across_gpus", False)
+    pool = ThreadPoolExecutor(max_workers=2)
+    try:
+        f_k = pool.submit(king_eval.compute_losses, token_batches)
+        f_c = pool.submit(chall_eval.compute_losses, token_batches)
+        return f_k.result(), f_c.result()
+    finally:
+        pool.shutdown(wait=False)
 
-    if king_sharded != chall_sharded:
-        raise RuntimeError(
-            "compute_paired_multi_gpu: king and challenger must share the same "
-            f"replica mode (king_sharded={king_sharded}, chall_sharded={chall_sharded})"
-        )
-
-    if king_sharded:
-        # Sharded mode: one replica per side. Use a 2-thread pool to overlap
-        # king and challenger forwards (they sit on disjoint GPU sets).
-        # `compute_paired_losses` walks both models inside one call, so we
-        # instead split into two compute_batch_losses calls (king + chall)
-        # so they can run concurrently across the disjoint GPU sets.
-        king_model = king_eval.models[king_eval.SHARDED_KEY]
-        chall_model = chall_eval.models[chall_eval.SHARDED_KEY]
-        king_dev = king_eval.devices[king_eval.SHARDED_KEY]
-        chall_dev = chall_eval.devices[chall_eval.SHARDED_KEY]
-        pool = ThreadPoolExecutor(max_workers=2)
-        try:
-            f_k = pool.submit(compute_batch_losses,
-                              king_model, token_batches, king_dev)
-            f_c = pool.submit(compute_batch_losses,
-                              chall_model, token_batches, chall_dev)
-            king_losses = f_k.result()
-            chall_losses = f_c.result()
-        finally:
-            pool.shutdown(wait=False)
-        return king_losses, chall_losses
-
-    n_pairs = min(len(king_eval.gpu_ids), len(chall_eval.gpu_ids))
-    per_pair = [[] for _ in range(n_pairs)]
-    idx_map = [[] for _ in range(n_pairs)]
-    for i, batch in enumerate(token_batches):
-        p = i % n_pairs
-        per_pair[p].append(batch)
-        idx_map[p].append(i)
-
-    futures = {}
-    pool = ThreadPoolExecutor(max_workers=n_pairs)
-    for p_idx in range(n_pairs):
-        if not per_pair[p_idx]:
-            continue
-        k_gid = king_eval.gpu_ids[p_idx]
-        c_gid = chall_eval.gpu_ids[p_idx]
-        fut = pool.submit(
-            compute_paired_losses,
-            king_eval.models[k_gid], chall_eval.models[c_gid],
-            per_pair[p_idx],
-            king_eval.devices[k_gid], chall_eval.devices[c_gid],
-        )
-        futures[fut] = p_idx
-
-    king_results = [None] * len(token_batches)
-    chall_results = [None] * len(token_batches)
-    for fut in as_completed(futures):
-        p_idx = futures[fut]
-        k_losses, c_losses = fut.result()
-        for local_i, global_i in enumerate(idx_map[p_idx]):
-            king_results[global_i] = k_losses[local_i]
-            chall_results[global_i] = c_losses[local_i]
-
-    pool.shutdown(wait=False)
-    return king_results, chall_results
 
 
 # ---------------------------------------------------------------------------
