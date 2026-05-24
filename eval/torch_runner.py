@@ -68,7 +68,7 @@ log = logging.getLogger("eval_torch")
 
 # torch.compile persistent cache — survives process restarts so the second
 # eval after a cold start skips the full Inductor pipeline (~2-3 min).
-_COMPILE_CACHE = os.environ.get("TEUTONIC_COMPILE_CACHE", "/tmp/teutonic/torch_compile_cache")
+_COMPILE_CACHE = os.path.expanduser(os.environ.get("TEUTONIC_COMPILE_CACHE", "~/.compile_cache"))
 os.makedirs(_COMPILE_CACHE, exist_ok=True)
 os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", _COMPILE_CACHE)
 os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
