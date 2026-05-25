@@ -278,7 +278,7 @@ th:last-child, td:last-child { text-align: right; }
         <div style="font-size:11px;margin-top:4px;display:flex;flex-direction:column;align-items:center;gap:4px;text-transform:uppercase;">
             <span><span id="king-health" title="King repo status"></span> KING: <a id="king-link-top" href="#" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">--</a> <span id="king-rev" style="opacity:0.6;"></span></span>
             <span>VALIDATOR: <a href="https://github.com/unarbos/teutonic" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">GitHub</a></span>
-            <span>DATASET: <a href="https://s3.hippius.com/teutonic-sn3/" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">Hippius</a></span>
+            <span id="dataset-line">DATASET: <span id="dataset-name">FINEWEB-EDU</span> <a id="dataset-manifest-link" href="https://s3.hippius.com/teutonic-sn3/hf-mirrors/HuggingFaceFW/fineweb-edu/data/_manifest.json" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);" title="Raw Hippius manifest for the eval corpus">Manifest</a> <span id="dataset-summary" style="opacity:0.6;"></span></span>
             <span id="king-reign" style="font-size:10px;opacity:0.5;"></span>
         </div>
     </div>
@@ -369,17 +369,18 @@ th:last-child, td:last-child { text-align: right; }
 </div>
 
 <script>
-var DATA_ENDPOINTS = [
-    "https://us-east-1.hippius.com/teutonic-sn3/dashboard.json",
-    "https://eu-central-1.hippius.com/teutonic-sn3/dashboard.json",
-    "https://s3.hippius.com/teutonic-sn3/dashboard.json"
+var STORAGE_ENDPOINTS = [
+    "https://us-east-1.hippius.com/teutonic-sn3",
+    "https://eu-central-1.hippius.com/teutonic-sn3",
+    "https://s3.hippius.com/teutonic-sn3"
 ];
-var HTML_ENDPOINTS = [
-    "https://us-east-1.hippius.com/teutonic-sn3/index.html",
-    "https://eu-central-1.hippius.com/teutonic-sn3/index.html",
-    "https://s3.hippius.com/teutonic-sn3/index.html"
-];
+var DATASET_PREFIX = "hf-mirrors/HuggingFaceFW/fineweb-edu/data";
+var DATASET_MANIFEST_KEY = DATASET_PREFIX + "/_manifest.json";
+var DATA_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/dashboard.json"; });
+var HTML_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/index.html"; });
+var DATASET_MANIFEST_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/" + DATASET_MANIFEST_KEY; });
 var DATA_URL = DATA_ENDPOINTS[0];
+var DATASET_MANIFEST_URL = DATASET_MANIFEST_ENDPOINTS[0];
 var POLL_MS = 5000;
 var VERSION_CHECK_MS = 60000;
 var BUILD_ID = "__BUILD_ID__";
@@ -387,6 +388,7 @@ var ENDPOINT_CACHE_KEY = "dashboardEndpoint";
 var ENDPOINT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 var _lastData = null;
 var _chartMode = localStorage.getItem("chartMode") || "ppl";
+var _datasetManifestPromise = null;
 
 (function initTheme() {
     var saved = localStorage.getItem("theme");
@@ -395,6 +397,108 @@ var _chartMode = localStorage.getItem("chartMode") || "ppl";
 })();
 
 function short(s, n) { return s ? s.slice(0, n || 12) + "\u2026" : "--"; }
+
+function formatBytes(bytes) {
+    if (!bytes || bytes < 0) return "";
+    var units = ["B", "KB", "MB", "GB", "TB"];
+    var idx = 0;
+    var val = bytes;
+    while (val >= 1024 && idx < units.length - 1) {
+        val /= 1024;
+        idx++;
+    }
+    return (val >= 100 || idx === 0 ? val.toFixed(0) : val.toFixed(1)) + " " + units[idx];
+}
+
+function setDatasetManifestLink(url) {
+    if (!url) return;
+    DATASET_MANIFEST_URL = url;
+    var link = document.getElementById("dataset-manifest-link");
+    if (link) link.href = url;
+}
+
+function setDatasetSummary(text) {
+    var el = document.getElementById("dataset-summary");
+    if (!el) return;
+    el.textContent = text ? " " + text.toUpperCase() : "";
+}
+
+function datasetMetaFromPayload(d) {
+    if (d && d.current_eval && d.current_eval.dataset) return d.current_eval.dataset;
+    var hist = d && d.history ? d.history : [];
+    for (var i = 0; i < hist.length; i++) {
+        if (hist[i] && hist[i].dataset) return hist[i].dataset;
+    }
+    return null;
+}
+
+function setDatasetSummaryFromMeta(meta) {
+    if (!meta) return false;
+    var parts = [];
+    if (meta.mode) parts.push(meta.mode.replace(/_/g, " "));
+    if (meta.sampled != null && meta.total_windows != null) {
+        parts.push(meta.sampled + " / " + meta.total_windows + " windows");
+    } else if (meta.sampled != null) {
+        parts.push(meta.sampled + " windows");
+    }
+    if (meta.total_shards != null) parts.push(meta.total_shards + " cached shards");
+    if (meta.tokenizer) parts.push(meta.tokenizer);
+    if (!parts.length) return false;
+    setDatasetSummary(parts.join(" · "));
+    return true;
+}
+
+function setDatasetSummaryFromManifest(manifest) {
+    if (!manifest) return false;
+    var items = manifest.files || manifest.shards || [];
+    var parquetCount = 0;
+    var totalBytes = 0;
+    for (var i = 0; i < items.length; i++) {
+        var item = items[i] || {};
+        var key = item.dest_key || item.key || "";
+        if (key.slice(-8) !== ".parquet") continue;
+        parquetCount++;
+        totalBytes += Number(item.size_bytes || 0);
+    }
+    var parts = [];
+    if (parquetCount) parts.push(parquetCount + " parquet shards");
+    if (totalBytes > 0) parts.push(formatBytes(totalBytes));
+    var stamp = manifest.generated_at || manifest.updated_at || manifest.created_at || manifest.timestamp;
+    if (stamp) parts.push("updated " + timeAgo(stamp));
+    if (!parts.length) return false;
+    setDatasetSummary(parts.join(" · "));
+    return true;
+}
+
+async function loadDatasetManifest() {
+    if (_datasetManifestPromise) return _datasetManifestPromise;
+    _datasetManifestPromise = new Promise(function(resolve) {
+        var finished = false;
+        var failures = 0;
+        DATASET_MANIFEST_ENDPOINTS.forEach(function(url) {
+            fetch(url + "?t=" + Date.now())
+                .then(function(r) {
+                    if (!r.ok) throw new Error("HTTP " + r.status);
+                    return r.json().then(function(data) { return { url: url, data: data }; });
+                })
+                .then(function(result) {
+                    if (finished) return;
+                    finished = true;
+                    setDatasetManifestLink(result.url);
+                    setDatasetSummaryFromManifest(result.data);
+                    resolve(result.data);
+                })
+                .catch(function() {
+                    failures++;
+                    if (failures === DATASET_MANIFEST_ENDPOINTS.length && !finished) {
+                        finished = true;
+                        resolve(null);
+                    }
+                });
+        });
+    });
+    return _datasetManifestPromise;
+}
 
 // Render a hotkey cell that links to the *coldkey* page on TaoMarketCap.
 // Coldkey owns the wallet and aggregates emissions, so a coldkey link is
@@ -493,7 +597,7 @@ function hubUrl(repo) {
     if (!repo) return "#";
     var parts = repo.split("/");
     if (parts.length < 2) return "https://hub.hippius.com/models";
-    return "https://hub.hippius.com/models/" + parts[0] + "/" + parts.slice(1).join("/") + "/main";
+    return "https://hub.hippius.com/models/" + parts[0] + "/" + parts.slice(1).join("/");
 }
 function modelLink(repo, digest, label) {
     if (!repo) return label || "--";
@@ -501,6 +605,11 @@ function modelLink(repo, digest, label) {
 }
 
 function render(d) {
+    setDatasetManifestLink(DATASET_MANIFEST_URL);
+    if (!setDatasetSummaryFromMeta(datasetMetaFromPayload(d))) {
+        loadDatasetManifest();
+    }
+
     var mkt = d.market || {};
     if (mkt.tao_price_usd) {
         document.getElementById("tao-price").textContent = "$" + mkt.tao_price_usd.toFixed(2);
@@ -1046,6 +1155,12 @@ DATA_URL = loadCachedEndpoint();
         if (_lastData) render(_lastData);
     });
 })();
+
+setDatasetManifestLink(DATASET_MANIFEST_URL);
+setDatasetSummary("loading manifest...");
+loadDatasetManifest().then(function(manifest) {
+    if (!manifest) setDatasetSummary("manifest link");
+});
 
 poll();
 setInterval(poll, POLL_MS);

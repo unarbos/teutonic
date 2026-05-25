@@ -5,28 +5,29 @@ Holy Pretraining Incentives — Bittensor SN3 (`netuid 3`).
 Website: <https://teutonic.ai>
 
 Teutonic is a king-of-the-hill pretraining subnet. Miners train a challenger
-LLM and submit it on-chain. A validator pulls the challenger from HuggingFace,
-runs a paired-bootstrap cross-entropy duel against the reigning king on a
-held-out tokenized stream, and either accepts (challenger becomes the new king)
-or rejects. Winner takes 100% of SN3 emission until dethroned.
+LLM and submit it on-chain. A validator pulls the challenger from Hippius Hub
+by immutable digest, runs a paired-bootstrap cross-entropy duel against the
+reigning king on a held-out stream, and either accepts (challenger becomes the
+new king) or rejects. Winner takes 100% of SN3 emission until dethroned.
 
-The active king (chain name, seed HF repo, vendored architecture, config
+The active king (chain name, seed repo, vendored architecture, config
 lock keys) is declared in [`chain.toml`](chain.toml). At time of writing
-that's `unconst/Teutonic-XXIV` — a freshly-initialised SILX-AI Quasar
-hybrid MoE (~8B active, ~24B total). See [`docs/MINING.md`](docs/MINING.md)
-for the live mining recipe and [`docs/DESIGN.md`](docs/DESIGN.md) for the
-full mechanism.
+that's `Teutonic-Q3-4B`, seeded from Hippius repo
+`teutonic/teutonic-q3-4b-genesis` and using the vanilla upstream
+`Qwen/Qwen3-4B` tokenizer / model family (`Qwen3ForCausalLM`, no custom fork).
+See [`docs/MINING.md`](docs/MINING.md) for the live mining recipe and
+[`docs/DESIGN.md`](docs/DESIGN.md) for the full mechanism.
 
 ## Repo layout
 
 | Path | What it is |
 | --- | --- |
-| [`validator.py`](validator.py) | Single-file king-of-the-hill validator. Polls chain, dispatches duels to the eval server, manages king lifecycle on HF, persists state to R2. |
-| [`miner.py`](miner.py) | Reference miner: clones the king, perturbs weights, uploads to HF, commits a `v4` reveal on-chain. |
+| [`validator.py`](validator.py) | Single-file king-of-the-hill validator. Polls chain, dispatches duels to the eval server, manages king lifecycle on Hippius, persists state to R2. |
+| [`miner.py`](miner.py) | Reference miner: clones the king, perturbs weights, uploads to Hippius Hub, commits a `v4` reveal on-chain. |
 | [`eval_server.py`](eval_server.py) | Persistent FastAPI service wrapping the eval pipeline. Caches the king across duels. SSE-streams progress to the validator. |
 | [`eval/`](eval/) | Eval runners: [`torch_runner.py`](eval/torch_runner.py) (multi-GPU PyTorch paired-bootstrap CE), [`vllm_runner.py`](eval/vllm_runner.py) (vLLM evaluator), [`vllm_server.py`](eval/vllm_server.py) (vLLM-backed alternative eval server, not yet in production). |
 | [`chain.toml`](chain.toml), [`chain_config.py`](chain_config.py) | Single source of truth for the active king (name, seed repo, repo pattern, vendored arch module, arch-specific config-lock keys). All other code reads from here. |
-| [`archs/`](archs/) | Vendored architectures, one subdir per arch (currently [`archs/quasar/`](archs/quasar/)). Each self-registers with HF Auto* on import so checkpoints load without `trust_remote_code`. The active arch is selected by `chain.toml -> [arch].module`. |
+| [`archs/`](archs/) | Architecture shims and seed helpers, one subdir per arch (currently [`archs/qwen3/`](archs/qwen3/) for the active dense chain). The active arch is selected by `chain.toml -> [arch].module`. |
 | [`scripts/`](scripts/) | Operator + miner tooling: bot, dashboard, mining harness, dataset reshard, Cloudflare publish, chain-agnostic [`seed.py`](scripts/seed.py) / [`smoke_eval.py`](scripts/smoke_eval.py). |
 | [`docs/`](docs/) | Design doc, scoring plan, current-chain mining guide. |
 | [`website/`](website/) | Public dashboard assets (`index.html`, favicons). The validator uploads `index.html` to Hippius on every restart. |
@@ -66,9 +67,8 @@ On the GPU machine that the tunnel forwards to:
 uvicorn eval_server:app --host 127.0.0.1 --port 9000
 ```
 
-`eval_server.py` will lazy-load the king from HF, then sit on it across duels.
-HF cache lives under `~/.cache/huggingface/hub/` and is watermark-cleaned by
-the server itself.
+`eval_server.py` will lazy-load the king from its pinned snapshot, then sit on
+it across duels. Local cache is cleaned by the server itself.
 
 ### Mining
 
