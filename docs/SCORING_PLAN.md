@@ -1,5 +1,8 @@
 # Exponential Dethrone Scoring — Implementation Plan (simplified)
 
+> Historical proposal only. This scoring plan is not the current production path. The live chain is `Teutonic-Q3-8B`; see [`DESIGN.md`](DESIGN.md), [`MINING.md`](MINING.md), and [`../chain.toml`](../chain.toml).
+
+
 ## Overview
 
 Replace `TOPK_WEIGHTS = [0.75, 0.19, 0.06]` with `exp(k · i)` over the **last N kings**, where `i` is each king's position in the sliding window (0 = oldest, N-1 = newest). State is a list of at most N entries kept inside `State`, persisted alongside the rest of `state/validator_state.json`. New section on the website shows the resulting weight distribution.

@@ -64,10 +64,10 @@ POLL_INTERVAL = 30
 WEIGHT_INTERVAL = 300
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
 
-# Weight policy: 100% to the current king's UID. If the king is unknown or
-# its hotkey isn't on the metagraph, fall back to BURN_UID (default 0 =
-# subnet-owner burn slot) so emission still leaves the subnet rather than
-# stalling. Same-hotkey rolling-5 distribution per DESIGN.md is not wired.
+# Weight policy: equal-share across the current king plus up to four prior
+# distinct kings that are still registered. If none are available, fall back to
+# BURN_UID (default 0 = subnet-owner burn slot) so emission still leaves the
+# subnet rather than stalling.
 BURN_UID = int(os.environ.get("TEUTONIC_BURN_UID", "0"))
 
 # Watchdogs / anti-stuckness safeguards.
@@ -618,9 +618,9 @@ def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys):
 
 async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
                             reason: str = "") -> bool:
-    """Push 100% weight to the current king's UID. Falls back to BURN_UID if
-    no king is set or the king's hotkey isn't on the metagraph (e.g. fresh
-    seed king with no on-chain registration).
+    """Push equal-share weight to the current king plus recent prior kings.
+    Falls back to BURN_UID if no king is set or none of the tracked king
+    hotkeys are on the metagraph.
 
     Async — the underlying `set_weights` call blocks for inclusion +
     finalization (~25-50s) so it runs in a thread executor to keep the event

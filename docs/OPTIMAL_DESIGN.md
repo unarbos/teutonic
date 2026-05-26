@@ -1,5 +1,8 @@
 # Teutonic — Optimal Design
 
+> Proposal doc only. This describes a possible future redesign, not the live production flow. The current chain contract is `Teutonic-Q3-8B`; see [`DESIGN.md`](DESIGN.md), [`MINING.md`](MINING.md), and [`../chain.toml`](../chain.toml).
+
+
 > Companion to [`DESIGN.md`](DESIGN.md). DESIGN.md describes the mechanism *as currently shipped*. This document describes the mechanism we will ship next: the same king-of-the-hill shape with the three mechanism-level corrections that the current design gets wrong, the dead code removed, and the operationally-confused pieces collapsed. No new frameworks. No imported methods. No composition pivot. Just the correct version of what's already there.
 
 ---

@@ -5,30 +5,30 @@ Holy Pretraining Incentives — Bittensor SN3 (`netuid 3`).
 Website: <https://teutonic.ai>
 
 Teutonic is a king-of-the-hill pretraining subnet. Miners train a challenger
-LLM and submit it on-chain. A validator pulls the challenger from HuggingFace,
-runs a paired-bootstrap cross-entropy duel against the reigning king on a
-held-out tokenized stream, and either accepts (challenger becomes the new king)
-or rejects. Winner takes 100% of SN3 emission until dethroned.
+checkpoint, upload it to Hippius Hub, and submit a `v4` reveal on-chain. A
+validator pins the challenger's immutable digest, runs a paired-bootstrap
+cross-entropy duel against the reigning king on a held-out stream, and either
+accepts (challenger becomes the new king) or rejects.
 
-The active king (chain name, seed HF repo, vendored architecture, config
-lock keys) is declared in [`chain.toml`](chain.toml). At time of writing
-that's `unconst/Teutonic-XXIV` — a freshly-initialised SILX-AI Quasar
-hybrid MoE (~8B active, ~24B total). See [`docs/MINING.md`](docs/MINING.md)
-for the live mining recipe and [`docs/DESIGN.md`](docs/DESIGN.md) for the
-full mechanism.
+The active king (chain name, seed repo, vendored architecture, config lock
+keys) is declared in [`chain.toml`](chain.toml). At time of writing that is
+`Teutonic-Q3-8B` with seed repo `teutonic/teutonic-q3-8b-genesis`,
+architecture module `archs.qwen3`, and tokenizer `Qwen/Qwen3-8B`. See
+[`docs/MINING.md`](docs/MINING.md) for the live mining contract and
+[`docs/DESIGN.md`](docs/DESIGN.md) for the current end-to-end flow.
 
 ## Repo layout
 
 | Path | What it is |
 | --- | --- |
-| [`validator.py`](validator.py) | Single-file king-of-the-hill validator. Polls chain, dispatches duels to the eval server, manages king lifecycle on HF, persists state to R2. |
-| [`miner.py`](miner.py) | Reference miner: clones the king, perturbs weights, uploads to HF, commits a `v4` reveal on-chain. |
+| [`validator.py`](validator.py) | Single-file king-of-the-hill validator. Polls chain, validates challenger submissions, dispatches duels to the eval server, manages king lifecycle on Hippius, persists state to R2, and refreshes miner weights. |
+| [`miner.py`](miner.py) | Reference miner: downloads the pinned king, perturbs weights, uploads to Hippius Hub, and commits a `v4|repo|digest|author_hotkey` reveal on-chain. |
 | [`eval_server.py`](eval_server.py) | Persistent FastAPI service wrapping the eval pipeline. Caches the king across duels. SSE-streams progress to the validator. |
 | [`eval/`](eval/) | Eval runners: [`torch_runner.py`](eval/torch_runner.py) (multi-GPU PyTorch paired-bootstrap CE), [`vllm_runner.py`](eval/vllm_runner.py) (vLLM evaluator), [`vllm_server.py`](eval/vllm_server.py) (vLLM-backed alternative eval server, not yet in production). |
-| [`chain.toml`](chain.toml), [`chain_config.py`](chain_config.py) | Single source of truth for the active king (name, seed repo, repo pattern, vendored arch module, arch-specific config-lock keys). All other code reads from here. |
-| [`archs/`](archs/) | Vendored architectures, one subdir per arch (currently [`archs/quasar/`](archs/quasar/)). Each self-registers with HF Auto* on import so checkpoints load without `trust_remote_code`. The active arch is selected by `chain.toml -> [arch].module`. |
+| [`chain.toml`](chain.toml), [`chain_config.py`](chain_config.py) | Single source of truth for the active king (name, seed repo, repo pattern, active arch module, arch-specific config-lock keys). All other code reads from here. |
+| [`archs/`](archs/) | Architecture shims, one subdir per arch. The live chain uses [`archs/qwen3/`](archs/qwen3/); historical Quasar and Qwen3-MoE shims remain for archived docs and experiments. |
 | [`scripts/`](scripts/) | Operator + miner tooling: bot, dashboard, mining harness, dataset reshard, Cloudflare publish, chain-agnostic [`seed.py`](scripts/seed.py) / [`smoke_eval.py`](scripts/smoke_eval.py). |
-| [`docs/`](docs/) | Design doc, scoring plan, current-chain mining guide. |
+| [`docs/`](docs/) | Current design and mining docs for `Teutonic-Q3-8B`, plus archived Quasar/LXXX migration notes. |
 | [`website/`](website/) | Public dashboard assets (`index.html`, favicons). The validator uploads `index.html` to Hippius on every restart. |
 | [`ecosystem.config.js`](ecosystem.config.js) | PM2 process manifest for the eval-tunnel + validator. Reads secrets via Doppler. |
 | [`tunnel.sh`](tunnel.sh) | SSH port-forward to the GPU box hosting the eval server. |
@@ -66,26 +66,26 @@ On the GPU machine that the tunnel forwards to:
 uvicorn eval_server:app --host 127.0.0.1 --port 9000
 ```
 
-`eval_server.py` will lazy-load the king from HF, then sit on it across duels.
-HF cache lives under `~/.cache/huggingface/hub/` and is watermark-cleaned by
-the server itself.
+`eval_server.py` lazy-loads the king from its pinned digest (`sha256:` on
+Hippius or `hf:` if a chain is seeded from HF), then keeps it warm across
+duels. Model cache lives under `/tmp/teutonic/hippius_models` by default, and
+the underlying HF cache is used only for `hf:` digests.
 
 ### Mining
 
-Don't follow the README — it's deliberately thin so it can't go stale. Read
-the live recipe at <https://teutonic.ai/mining> (also at
-[`docs/MINING.md`](docs/MINING.md)) and use [`scripts/mining/`](scripts/mining/)
-as a working harness.
+Don't follow the README alone for mining. Read the live recipe at
+<https://teutonic.ai/mining> (also at [`docs/MINING.md`](docs/MINING.md)) and
+use [`scripts/mining/`](scripts/mining/) as a working harness.
 
 ## Docs
 
-- [`docs/DESIGN.md`](docs/DESIGN.md) — full mechanism: how the duel scoring,
-  config-lock, trainability probe, dethrone rule, and emission incentive fit
-  together.
-- [`docs/SCORING_PLAN.md`](docs/SCORING_PLAN.md) — exponential dethrone
-  scoring rollout plan.
-- [`docs/MINING.md`](docs/MINING.md) — active chain's mining contract and
-  step-by-step recipe (chain identity comes from [`chain.toml`](chain.toml)).
+- [`docs/DESIGN.md`](docs/DESIGN.md) — current live flow: reveal format,
+  Hippius pinning, config lock, eval contract, and payout behavior.
+- [`docs/MINING.md`](docs/MINING.md) — live mining contract for
+  `Teutonic-Q3-8B`.
+- [`docs/SCORING_PLAN.md`](docs/SCORING_PLAN.md) and
+  [`docs/OPTIMAL_DESIGN.md`](docs/OPTIMAL_DESIGN.md) — proposal docs, not the
+  current production path.
 
 ## License
 

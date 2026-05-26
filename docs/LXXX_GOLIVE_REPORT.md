@@ -1,5 +1,8 @@
 # Teutonic-LXXX Go-Live Readiness — 2026-05-07
 
+> Historical archive. This report covers the earlier Qwen3-MoE 80B go-live work. The live chain is now `Teutonic-Q3-8B`; use [`MINING.md`](MINING.md) and [`../chain.toml`](../chain.toml) for the current contract.
+
+
 **Result:** ✅ **GREEN — all required tests pass on the production-bound B300 box.**
 
 This supersedes [`LXXX_SANDBOX_REPORT.md`](LXXX_SANDBOX_REPORT.md) and

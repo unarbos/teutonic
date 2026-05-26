@@ -1,5 +1,8 @@
 # Teutonic-LXXX Sandbox Soak-10 — Report
 
+> Historical archive. This report covers the earlier Qwen3-MoE 80B soak work. The live chain is now `Teutonic-Q3-8B`; use [`MINING.md`](MINING.md) and [`../chain.toml`](../chain.toml) for the current contract.
+
+
 **Date:** 2026-05-07
 **Box:** `root@95.133.252.44:10310` (8× B300 SXM6 / 275 GiB HBM each)
 **Result:** ✅ **GREEN — eval-server is leak-free across 10 sequential duels**

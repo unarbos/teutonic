@@ -1,390 +1,199 @@
-# Mining the active king
+# Mining `Teutonic-Q3-8B`
 
-This guide tells you how to:
+This is the live mining contract for the current chain. The source of truth is
+[`chain.toml`](../chain.toml); if that file changes, the live contract changes
+with it.
 
-1. Set up your environment.
-2. Build / train a challenger.
-3. Submit it on-chain.
+## 1. Current chain
 
-If you only want to play with random noise, jump to **Quick start (noise
-miner)**. If you want to actually dethrone the king, see **Real training**.
+At time of writing the active chain is:
 
-> The active chain (king name, seed repo, repo-name regex, vendored
-> architecture) is declared in [`chain.toml`](../chain.toml) at the repo
-> root. Throughout this guide `<chain.name>` and `<seed_repo>` mean
-> whatever `[chain].name` and `[chain].seed_repo` are set to. At the time
-> of writing the active chain is **Teutonic-XXIV** (`unconst/Teutonic-XXIV`),
-> a freshly-initialised SILX-AI Quasar hybrid MoE: ~8B active per token,
-> ~24B total parameters, RoPE θ=1e6, vocab 262144. Arch-specific numbers
-> below assume Quasar; check `chain.toml` if it has been swapped.
+- `chain.name = "Teutonic-Q3-8B"`
+- `chain.seed_repo = "teutonic/teutonic-q3-8b-genesis"`
+- `arch.module = "archs.qwen3"`
+- `seed.tokenizer_repo = "Qwen/Qwen3-8B"`
+- `seed.repo_backend = "hippius"`
 
----
+This is a dense `Qwen3ForCausalLM` chain, not the older Quasar or Qwen3-MoE
+flow. Historical LXXX/Quasar docs remain in `docs/` as archive material only.
 
-## 0. The mechanism in one paragraph
+## 2. The live flow in one paragraph
 
-The validator pulls every reveal commitment from chain, downloads the
-challenger from HF, runs a paired cross-entropy test against the king on a
-random Hippius shard, and crowns the challenger if its bootstrap LCB on the
-per-token NLL improvement clears `delta = 0.0025` (fixed nats/token effect
-floor; see `EVAL_DELTA` in `eval/torch_runner.py`). Winner takes 100% of
-SN3 emission until dethroned. Full mechanism in [`DESIGN.md`](DESIGN.md).
+You start from the current king, train or perturb a challenger, upload that
+checkpoint to Hippius Hub, then submit a `v4` reveal on Bittensor SN3. The
+validator reads the reveal, pins the challenger's immutable digest, checks repo
+hygiene and config lock, samples a holdout stream keyed by reveal block hash +
+hotkey, and asks the GPU eval server to run a paired cross-entropy duel against
+the current king. The challenger wins only if its one-sided bootstrap lower
+confidence bound clears `delta = 0.0025` nats/token.
 
-The architecture lock is enforced by `validate_challenger_config` in
-[`validator.py`](../validator.py): your challenger's `config.json`
-must match the king on every key in the generic structural set (vocab,
-dims, RoPE, …) plus `[arch].extra_lock_keys` from `chain.toml` (for the
-current Quasar chain that includes MoE shape, looped depth, latent-memory
-shape, …) and **must not** ship any `*.py` files or set `auto_map`.
-Vendored modeling code only.
+## 3. What must match exactly
 
----
+The king's `config.json` is the source of truth. The validator enforces:
 
-## 1. Environment
+- `architectures` must match the king.
+- Generic structural keys must match:
+  `vocab_size`, `hidden_size`, `num_hidden_layers`,
+  `num_attention_heads`, `num_key_value_heads`, `head_dim`,
+  `intermediate_size`, `model_type`, `tie_word_embeddings`,
+  `rope_theta`, `max_position_embeddings`, `max_seq_len`.
+- Extra lock keys from [`chain.toml`](../chain.toml) must match:
+  `rope_theta`, `rope_scaling`, `tie_word_embeddings`,
+  `max_position_embeddings`.
+- `config.json` must not contain `auto_map`.
+- The repo must not ship any `*.py` files.
+- The repo must contain canonical `safetensors` output:
+  either `model.safetensors` or a sharded
+  `model.safetensors.index.json` + `model-00001-of-000NN.safetensors` layout.
+- Total `*.safetensors` size must stay under the validator's size cap
+  (`TEUTONIC_MAX_CHALLENGER_SAFETENSORS_GB`, default `200`).
 
-You need Python 3.12, CUDA 12.8, PyTorch 2.11 (cu128 wheel — earlier wheels
-do not have B200 / sm_100 kernels), `transformers >= 5.5`, and our
-flash-linear-attention fork that ships the Quasar/GLA layers.
+Because the live arch is `archs.qwen3`, challengers must load through plain
+`transformers` after `chain_config.load_arch()`. No `trust_remote_code`.
+
+## 4. Repo naming and anti-impersonation
+
+Your challenger repo must satisfy both of these:
+
+- It matches the chain regex. With the default auto-derived rule that means
+  `^[^/]+/Teutonic-Q3-8B-.+$`.
+- It contains the first 8 characters of your coldkey SS58 somewhere in the
+  full repo id, case-insensitive.
+
+Examples for coldkey prefix `5DhAqMpd`:
+
+- `myorg/Teutonic-Q3-8B-5DhAqMpd-v1`
+- `5DhAqMpd/Teutonic-Q3-8B-lora-03`
+- `myorg/Teutonic-Q3-8B-v1` is rejected
+
+The validator checks the prefix against the chain metagraph. If your hotkey is
+too fresh for that mapping to exist yet, the validator skips the coldkey check
+until a later tick instead of hard-failing you.
+
+## 5. Reveal format
+
+The live wire format is:
+
+```text
+v4|<challenger_repo>|<challenger_digest>|<author_hotkey>
+```
+
+Notes:
+
+- `challenger_digest` is the binding commitment. It is usually a Hippius OCI
+  digest `sha256:<64hex>`.
+- `hf:<40hex>` digests are still supported by the shared model-store code, but
+  the reference miner uploads challengers to Hippius Hub.
+- Legacy `v3|king_digest|...` reveals are rejected at intake.
+- The reference miner submits with `blocks_until_reveal=3`.
+
+## 6. Quick start
+
+Set up a local environment:
 
 ```bash
-python3.12 -m venv .venv
+uv venv
 . .venv/bin/activate
-
-pip install --index-url https://download.pytorch.org/whl/cu128 torch
-pip install transformers accelerate safetensors huggingface_hub bittensor numpy
-
-# The Quasar attention layers + GLA cache live in this fork pinned by SILX:
-pip install "flash-linear-attention @ git+https://github.com/SILX-LABS/quasar-flash-linear-attention.git@84ad1cc5a7428609d7e0e56d4041a775cd19b7bb"
+uv pip install -e .
 ```
 
-Clone the validator/miner code so you have the vendored arch package
-locally:
+For a simple pipeline test, run the reference miner:
 
 ```bash
-git clone https://github.com/unarbos/teutonic
-cd teutonic
-```
-
-Sanity-check the model loads without `trust_remote_code`:
-
-```bash
-python -c "
-import sys; sys.path.insert(0, '.')
-import chain_config
-chain_config.load_arch()  # registers the active arch with HF Auto*
-from transformers import AutoModelForCausalLM
-m = AutoModelForCausalLM.from_pretrained(chain_config.SEED_REPO, torch_dtype='bfloat16', device_map={'': 'cuda:0'})
-print('loaded', sum(p.numel() for p in m.parameters())/1e9, 'B params')
-"
-```
-
-`attn_implementation` will fall back to `eager` for Quasar layers — that's
-expected (FA2 / SDPA upstream do not yet support QuasarForCausalLM).
-
----
-
-## 2. Architecture you must match exactly
-
-The king's `config.json` is the source of truth; the lock keys are the
-union of the generic structural set in `validator.py` plus
-`[arch].extra_lock_keys` in `chain.toml`. For the current Quasar king the
-locked values are:
-
-| field | value |
-|---|---|
-| `model_type` | `quasar` |
-| `architectures` | `["QuasarForCausalLM"]` |
-| `vocab_size` | `262144` (Teutonic-I tokenizer) |
-| `d_model` / `hidden_size` | `4096` |
-| `n_layers` / `num_hidden_layers` | `32` |
-| `n_heads` / `num_attention_heads` | `32` |
-| `head_dim` | `128` |
-| `d_ff` / `intermediate_size` | `11008` |
-| `quasar_layers` / `gated_layers` | `4` / `2` (cycle of 6) |
-| `dense_input_layers` | `4` |
-| `moe_type` | `bigmac` |
-| `num_routed_experts` / `top_k` | `56` / `8` |
-| `routed_expert_size` (effective) | `1024` |
-| `shared_expert_size` | `2048` |
-| `bigmac_r` | `0.25` (DCCA bottleneck) |
-| `memory_slots` / `memory_dim` | `128` / `128` |
-| `num_loops` | `1` |
-| `tie_word_embeddings` | `true` |
-| `rope_theta` | `1_000_000` |
-| `max_seq_len` / `max_position_embeddings` | `16384` |
-
-If any of these drift, the validator rejects with `"<key> mismatch"`.
-
-If your repo contains `*.py` or your config has `auto_map`, the validator
-rejects with `"repo ships *.py files"` or `"auto_map present in
-config.json"`. The vendored `archs/<chain.toml [arch].module>` package in
-this repo is the only path the network accepts — your weights must load
-via plain `AutoModelForCausalLM.from_pretrained(...)` after
-`chain_config.load_arch()`.
-
----
-
-## 3. Repo naming and anti-impersonation
-
-Your HF repo MUST match the chain's `repo_pattern`, which defaults to
-`^[^/]+/<chain.name>-.+$` (today: `^[^/]+/Teutonic-XXIV-.+$`). It must
-also embed the first 8 ss58 chars of your coldkey somewhere in the full
-repo id (case insensitive, in either the namespace or the model
-basename). Examples for coldkey `5DhAqMpdABCDEFG…` against the current
-chain:
-
-- ✅ `myaccount/Teutonic-XXIV-5DhAqMpd-v3`
-- ✅ `5DhAqMpd/Teutonic-XXIV-noise01`
-- ❌ `myaccount/Teutonic-XXIV-v3` (no coldkey prefix)
-
-This is the anti-impersonation gate added 2026-04-29.
-
----
-
-## 4. Quick start — noise miner
-
-For testing only; will almost never dethrone but verifies your end-to-end
-pipeline works.
-
-```bash
-. .venv/bin/activate
-export HF_TOKEN=hf_...                 # write access to your HF org
-export BT_WALLET_NAME=mywallet         # registered on SN3
-export BT_WALLET_HOTKEY=default
+export HIPPIUS_HUB_TOKEN=...
+export BT_WALLET_NAME=mywallet
 
 python miner.py \
-    --hotkey default \
-    --suffix 5DhAqMpd-noise-01 \
-    --noise 1e-4
+  --hotkey default \
+  --suffix 5DhAqMpd-noise-01 \
+  --noise 1e-4
 ```
 
-Under the hood `miner.py`:
+`miner.py` will:
 
-1. Pulls the king at its pinned commit SHA.
-2. Adds Gaussian noise of stdev `--noise` to every learnable tensor — but
-   skips SMEBU global bias / momentum / max_vio buffers and the latent
-   memory state (perturbing those collapses routing or destroys memory).
-3. Runs the same `validate_local_config` checks the validator runs.
-4. Uploads to `<seed_namespace>/<chain.name>-<suffix>` (today:
-   `unconst/Teutonic-XXIV-5DhAqMpd-noise-01`).
-5. Submits the on-chain reveal commitment.
+1. Read the current king repo + digest from the live dashboard.
+2. Materialize the king at its immutable digest.
+3. Create a challenger by perturbing every floating-point tensor.
+4. Run a local config sanity check.
+5. Upload to Hippius Hub.
+6. Submit a `v4` reveal.
 
-You can watch the validator pick it up at
-[`https://teutonic.ai/dashboard.json`](https://teutonic.ai/dashboard.json).
-The dashboard payload's `chain.name` field tells you which king is active.
+This is only a pipeline test. Noise almost never beats a mature king.
 
----
+## 7. Real training
 
-## 5. Real training
+The network does not prescribe a training recipe. The important part is that
+you train against the current king and end with a standalone checkpoint that
+passes the submission gates above.
 
-You need to lower the king's per-token NLL by more than `delta` nats on a
-random unseen Hippius shard, with a one-sided 99.9% bootstrap LCB > delta.
-At chain genesis the king is uniform over its vocabulary (for the current
-Quasar king, ln(262144) ≈ 12.48), so the first real training run will
-dethrone.
+Useful starting points in this repo:
 
-A reasonable starting point uses
-[`scripts/mining/train_challenger.py`](../scripts/mining/train_challenger.py)
-which:
+- [`scripts/mining/train_challenger.py`](../scripts/mining/train_challenger.py)
+  for an end-to-end training/eval loop.
+- [`scripts/training_bundle/README.md`](../scripts/training_bundle/README.md)
+  for a token-id / LoRA-oriented starter path.
 
-1. Reads the king repo + revision from the live dashboard.
-2. Pulls the king and a few Hippius shards (already tokenized to vocab
-   262144).
-3. Trains a LoRA adapter (default targets cover Quasar's `q/k/v/o_proj`,
-   `ffn.gate/up/down`, `w_down_proj/w_up_proj`).
-4. Merges LoRA into the base weights → standalone candidate.
-5. Runs an offline paired-CE test against the king to estimate mu_hat
-   before burning a HF push and chain reveal.
+For the live Qwen3 dense chain, common LoRA target modules are the standard
+Qwen blocks such as `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`,
+`up_proj`, and `down_proj`.
 
-```bash
-torchrun --nproc-per-node=8 scripts/mining/train_challenger.py \
-    --upload-repo myaccount/Teutonic-XXIV-5DhAqMpd-v1 \
-    --noise-only false \
-    --max-iters 3
-```
+## 8. How evaluation works
 
-Notes specific to Quasar:
+The current validator/eval-server contract is:
 
-- `nn.Parameter` blocks like `experts_w12` and `experts_w3` are NOT Linear
-  layers, so PEFT/LoRA cannot target them. Train them with full SGD if you
-  want to move the routed experts.
-- The SMEBU bias buffer (`model.all_moe_bias`) is updated by the model
-  itself only when `model.training=True`. Don't manually overwrite it
-  unless you understand what the routing-stability path is doing.
-- Latent memory state is reinitialized every forward call when
-  `memory_states` is None (default), so you don't have to manage it during
-  training — but DO call `model.eval()` before paired evaluation so SMEBU
-  doesn't shift bias mid-test.
-- `attn_implementation="eager"` is currently the only supported path for
-  QuasarForCausalLM under transformers ≤ 5.7. SDPA / FA2 will be wired up
-  later.
+- `TEUTONIC_EVAL_N` defaults to `5000`.
+- Public/private split defaults to `2500 / 2500` on the validator unless
+  operators override it.
+- `SEQ_LEN = 2048`.
+- `alpha = 0.001`.
+- `delta_threshold = 0.0025`.
+- Production eval commonly runs in `raw_hippius` mode, meaning the public
+  corpus is the FineWeb-Edu Hippius mirror tokenized at eval time with the
+  configured tokenizer.
+- The shard/seed comes from `blake2b(block_hash_at_reveal || hotkey)`.
 
-After training, run the offline paired test the harness emits — if your
-estimated `mu_hat` is at least 2-3x the offline `delta`, push and submit.
-Otherwise re-run with more steps / different seed / different data
-weighting.
+Acceptance is `lcb > delta`, where `lcb` is the one-sided bootstrap lower
+confidence bound of the paired loss difference.
 
----
+## 9. How rewards are routed
 
-## 6. What the validator will tell you
+The live validator does not pay only the current king. It distributes weight
+equally across the current king plus up to four previous distinct kings still
+registered in the metagraph. If some prior kings are no longer registered, the
+survivors are renormalized. If no king hotkey is usable, weights fall back to
+the configured burn UID.
 
-Verdicts you might see in `dashboard.json` under `history[*]`:
+## 10. What the validator will reject
 
-- `accepted: true, verdict: "challenger"` — you are king.
-- `verdict: "king"` — you didn't beat the king (LCB ≤ delta).
-- `verdict: "error"` with `error_code: "config_mismatch"` —
-  `validate_challenger_config` rejected your repo (read `error_detail`).
-- `verdict: "error"` with `error_code: "eval_error"` and
-  `"could not load model with any attention implementation"` — your
-  safetensors didn't load on the eval server. Most common cause: you
-  perturbed SMEBU buffers or shipped a config with `auto_map`.
-- `rejection_reason: "untrainable:seed0(...):loss_non_finite:nan"` — the
-  trainability probe took one SGD step on your model and got NaN. Means
-  your weights are pathological (often: noise too large, or projections
-  collapsed). Lower `--noise` or check the reparam-trick guard.
+Common failure modes:
 
----
+- `architecture mismatch` or `<key> mismatch`: your config drifted.
+- `auto_map present in config.json`: custom modeling code is not allowed.
+- `repo ships *.py files`: upload weights/config/tokenizer only.
+- `missing model.safetensors.index.json`: your sharded save is incomplete.
+- `oversized: ... > 200 GB cap`: you uploaded extra state or wrong precision.
+- `coldkey_required`: your repo name does not embed the required coldkey prefix.
+- `digest_not_found` or `digest_malformed`: the reveal did not bind a real
+  immutable snapshot.
 
-## 7. Useful links
+## 11. Useful links
 
-- King model: see [`chain.toml`](../chain.toml) `[chain].seed_repo` (today:
-  <https://huggingface.co/unconst/Teutonic-XXIV>).
 - Live dashboard: <https://teutonic.ai>
-- Live JSON: <https://teutonic.ai/dashboard.json> (the active chain name
-  is published in the top-level `chain` field).
+- Live JSON: <https://us-east-1.hippius.com/teutonic-sn3/dashboard.json>
+- Active seed config: [`chain.toml`](../chain.toml)
+- Current mechanism: [`DESIGN.md`](DESIGN.md)
 - Source: <https://github.com/unarbos/teutonic>
-- Discord: `γ・τeuτonic・3` (ARbos answers technical questions there)
-- SILX Quasar docs: <https://huggingface.co/silx-ai/Quasar-3B-A1B-Preview>
 
----
+## 12. FAQ
 
-## 8. FAQ
+**Can I submit a different architecture?**
+No. The validator locks the active model family and structural config.
 
-**Q: Can I just upload my own MoE / dense / Mamba checkpoint?**
-A: No. The validator pins `model_type` and the active arch's full dim
-set. Cross-architecture submissions are rejected at config-match.
+**Can I submit quantized weights?**
+Evaluation loads in bf16. If your export dequantizes cleanly into the same
+effective weights and passes the file-layout gates it can work, but plain
+bf16 `safetensors` is the least surprising path.
 
-**Q: Why isn't FlashAttention-2 used?**
-A: `QuasarForCausalLM` doesn't yet have an FA2 path in upstream
-transformers. The eval server falls back to `eager`. This roughly doubles
-forward wall vs FA2 but is otherwise correct.
-
-**Q: Can I train and submit a quantized challenger?**
-A: Eval loads in bf16. Quantized weights would dequant on load — usually
-fine for storage savings, but be careful about bias drift. `safetensors`
-only, no pickle.
-
-**Q: How do I reset my submission if I made a mistake?**
-A: You can't dethrone yourself. Wait for the next reign and submit again.
-The validator de-dupes per-hotkey within a reign.
-
----
-
-## Appendix A — Teutonic-LXXX (LIVE since 2026-05-07)
-
-> This appendix is the live mining contract for `Teutonic-LXXX` (vanilla
-> Qwen3-MoE 80 B total / 7.6 B active). The chain is **live** as of
-> 2026-05-07 18:30 UTC, block 8133379. Genesis seed is
-> [`unconst/Teutonic-LXXX-mock-king`](https://huggingface.co/unconst/Teutonic-LXXX-mock-king),
-> a freshly random-init checkpoint at loss ≈ 13.3 nats/token on real
-> CulturaX data — first competent training run dethrones easily.
->
-> Active config lives in [`chain.toml`](../chain.toml). The chain switched
-> from `Teutonic-XXIV` (Quasar 24 B); the previous Quasar config is
-> archived at `chain.xxiv.toml.bak` (gitignored, operator-local).
-
-### A.1 Architecture you must match exactly (LXXX)
-
-`config.json` lock = generic structural keys + the LXXX `extra_lock_keys`
-in [`chain.toml`](../chain.toml):
-
-| field | value |
-|---|---|
-| `model_type` | `qwen3_moe` |
-| `architectures` | `["Qwen3MoeForCausalLM"]` |
-| `vocab_size` | `262144` (Teutonic-I / Gemma3-derived tokenizer — same as Quasar) |
-| `hidden_size` | `4096` |
-| `num_hidden_layers` | `36` |
-| `num_attention_heads` / `num_key_value_heads` | `32` / `8` (GQA 4:1) |
-| `head_dim` | `128` |
-| `intermediate_size` | `11008` (used by any future dense layers; current king is fully MoE) |
-| `num_experts` / `num_experts_per_tok` | `128` / `8` |
-| `moe_intermediate_size` | `1408` |
-| `decoder_sparse_step` | `1` (every layer is MoE) |
-| `norm_topk_prob` | `true` |
-| `router_aux_loss_coef` | `0.001` |
-| `mlp_only_layers` | `[]` |
-| `tie_word_embeddings` | `true` |
-| `rope_parameters` | `{"rope_theta": 1000000.0, "rope_type": "default"}` |
-| `max_position_embeddings` | `16384` |
-
-Total: 82.328 B params / 7.586 B active per token / 153 GiB bf16 on disk.
-
-Vanilla `Qwen3MoeForCausalLM` ships in `transformers ≥ 4.51`; no
-`trust_remote_code`, no `auto_map`, no `*.py` files in the repo. Same
-defenses as the Quasar chain.
-
-### A.2 Minimum miner spec (LXXX)
-
-The base king is ~153 GiB bf16 on disk. Per-iteration compute:
-
-- ≥ 4× B200 (180 GiB) or ≥ 2× B300 (275 GiB) just to load the base in bf16
-- ≥ 256 GiB host RAM for safetensors I/O during perturbation / save
-- ≥ 1 TB free local SSD for king + challenger + a few HF cache copies
-- HF account with write quota for ~165 GiB challenger pushes (each)
-- Patience: a single push to HF takes 20-60 min at typical 50-150 MB/s
-
-Reference noise-perturb script (mirrors [`miner.py:187-204`](../miner.py#L187-L204)
-but standalone, no on-chain reveal): [`scripts/sandbox_perturb.py`](../scripts/sandbox_perturb.py).
-For real training, build your own LoRA / full-finetune around
-`Qwen3MoeForCausalLM` — note the experts are stored as
-`model.layers.{l}.mlp.experts.{e}.{gate_proj,up_proj,down_proj}`
-(`nn.Linear`, LoRA-targetable), not a single fused parameter like
-Quasar's BigMac.
-
-### A.3 What dies, what stays the same
-
-Stays the same vs Quasar chain:
-- Bootstrap LCB acceptance rule with fixed `delta = 0.0025` nats/token
-- Per-submission shard randomization via `blake2b(block_hash || hotkey)`
-- Coldkey-prefix repo gate (8-char ss58 prefix in repo namespace OR basename)
-- 5-king rolling payout
-- **Tokenizer + dataset unchanged**: `unconst/Teutonic-I` (Gemma3-derived,
-  vocab 262144). Live `dataset/v2/shards/...` on Hippius are still the
-  eval source — no v3 dataset rebuild was needed.
-
-Changes from Quasar:
-- Repo regex switches from `^[^/]+/Teutonic-XXIV-.+$` to `^[^/]+/Teutonic-LXXX-.+$`
-- Quasar-specific notes are obsolete: no SMEBU buffers, no latent memory,
-  no `attn_implementation='eager'` requirement (FA2 / SDPA work natively
-  for `Qwen3MoeForCausalLM`). LoRA target modules are
-  `q_proj/k_proj/v_proj/o_proj` + `gate_proj/up_proj/down_proj` (per-expert).
-- Per-eval wall grows from ~5 min to ~10 min steady (~14 min cold-page-cache),
-  network throughput drops from ~11.5 evals/hour to ~5–6 evals/hour.
-  Validator's `TEUTONIC_TICK_RESTART_AFTER` grew from 1800 s to 3600 s to match.
-
-### A.4 On-chain reveal commitment (REVISED 2026-05-22)
-
-**Wire format** (`|`-delimited, ~160 chars total):
-
-```
-v4|{challenger_repo}|{challenger_digest}|{author_hotkey}
-```
-
-| field | length | meaning |
-|---|---|---|
-| `v4` | 2 | Format version. |
-| `challenger_repo` | ~30–80 | your Hippius repo, must match `chain.toml::repo_pattern` and contain your 8-char coldkey prefix anywhere (substring, case-insensitive). |
-| `challenger_digest` | 71 or 43 chars | **binding commitment**. Immutable snapshot digest returned by Hippius upload: `sha256:<64hex>` or `hf:<40hex>`. |
-| `author_hotkey` | 47–48 chars | submitter hotkey ss58, cross-checked against the chain reveal key. |
-
-**What changed and why**:
-
-The protocol no longer accepts a king-bound submission payload. Miners submit
-the challenger they want evaluated, full stop. The validator already scores
-that challenger against the current king at evaluation time, so forcing the
-miner to also pin a `king_digest` in the on-chain payload only added racey,
-failure-prone complexity.
-
-**Legacy reveals that still include `king_digest` are dropped** at
-`scan_reveals`. They are not enqueued, and any old queued entry that still
-has the legacy field is failed as `legacy_reveal_version`.
+**Can I replace a bad submission immediately?**
+Usually no. The validator de-dupes by hotkey within a reign. Wait for the next
+king or use a different registered miner key.

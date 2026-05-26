@@ -7,9 +7,9 @@ edit `chain.toml` (and add `archs/<new>/` if the architecture changes);
 no code edits should be necessary.
 
 Override knob: `TEUTONIC_CHAIN_OVERRIDE` env var, when set, points at
-an alternate TOML (relative to repo root or absolute path). Used by the
-sandbox soak for `Teutonic-LXXX` so live `chain.toml` (Teutonic-XXIV)
-stays untouched until cutover.
+an alternate TOML (relative to repo root or absolute path). Used by local
+testing and archived alternate chain configs so the default `chain.toml`
+can stay pointed at the live chain.
 """
 from __future__ import annotations
 

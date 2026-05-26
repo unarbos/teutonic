@@ -1,5 +1,8 @@
 # Teutonic-LXXX Operator Runbook
 
+> Historical archive. This runbook documents the earlier Qwen3-MoE 80B cutover plan. The live chain is now `Teutonic-Q3-8B`; follow [`MINING.md`](MINING.md) and [`../chain.toml`](../chain.toml) for the current flow.
+
+
 Companion to [`/home/const/.cursor/plans/teutonic-lxxx-80b-qwen3moe_90e4f74e.plan.md`](../../.cursor/plans/teutonic-lxxx-80b-qwen3moe_90e4f74e.plan.md).
 This file is the **gate-by-gate operator script** for cutting Bittensor SN3 from the live Quasar 24B chain (`Teutonic-XXIV`) to a vanilla Qwen3-MoE 80B chain (`Teutonic-LXXX`).
 

@@ -88,7 +88,8 @@ python teutonic/scripts/training_bundle/merge_lora.py \
   --output-dir outputs/teutonic-merged
 ```
 
-6. Upload merged model to HuggingFace and submit with the existing miner/reveal flow.
+6. Upload the merged model to Hippius Hub and submit it with the existing
+   miner/reveal flow.
 
 ## Notes
 
