@@ -284,7 +284,7 @@ class R2:
         _s3_cfg = dict(
             connect_timeout=15,
             read_timeout=45,
-            retries={"max_attempts": 3, "mode": "adaptive"},
+            retries={"max_attempts": 10, "mode": "adaptive"},
         )
         self.client = boto3.client(
             "s3", endpoint_url=R2_ENDPOINT,
@@ -1551,7 +1551,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "seq_len": SEQ_LEN,
         }
 
-        max_busy_retries = 20
+        max_busy_retries = 30
         for attempt in range(max_busy_retries):
             state.set_phase("eval_dispatch_wait", challenge_id=cid,
                             notes=f"dispatch attempt {attempt + 1}/{max_busy_retries}")

@@ -31,13 +31,13 @@ module.exports = {
       TEUTONIC_EVAL_DATASET_MODE: "raw_hippius",
       TEUTONIC_RAW_DATASET_PREFIX: "hf-mirrors/HuggingFaceFW/fineweb-edu/data",
       TEUTONIC_RAW_DATASET_MANIFEST: "hf-mirrors/HuggingFaceFW/fineweb-edu/data/_manifest.json",
-      TEUTONIC_RAW_TOKENIZER_REPO: "Qwen/Qwen3-4B",
+      TEUTONIC_RAW_TOKENIZER_REPO: "Qwen/Qwen3-8B",
       ///TEUTONIC_FORCE_SEED_KING: "1", 22.05.2026 16:07 override
       // First-deploy degraded mode: no private holdout pool yet, so use
       // public-only eval. Once /var/teutonic/private_pool is populated, bump
       // TEUTONIC_EVAL_N_PRIVATE to 2500 and TEUTONIC_EVAL_N_PUBLIC to 2500.
-      TEUTONIC_EVAL_N: "5000",
-      TEUTONIC_EVAL_N_PUBLIC: "5000",
+      TEUTONIC_EVAL_N: "10000",
+      TEUTONIC_EVAL_N_PUBLIC: "10000",
       TEUTONIC_EVAL_N_PRIVATE: "0",
       TEUTONIC_NETUID: "3",
       TEUTONIC_NETWORK: "finney",
@@ -75,7 +75,7 @@ module.exports = {
       TEUTONIC_STREAM_IDLE_TIMEOUT: "1800",
       // Qwen3-4B is ~8 GB bf16; Hippius prefetch should complete in 1-2 min.
       // 600s (10 min) is generous; bump if you swap to a larger king.
-      TEUTONIC_KING_HASH_TIMEOUT_S: "600",
+      TEUTONIC_KING_HASH_TIMEOUT_S: "1200",
     },
     max_restarts: 10,
     restart_delay: 5000,

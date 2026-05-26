@@ -1,14 +1,14 @@
-# Teutonic-Q3-4B — Qwen3-4B dense as genesis king (vanilla HF Qwen3ForCausalLM, no fork).
-# vocab 151936, 36 layers x hidden 2560, GQA 32/8 heads, RoPE theta=1e6, ~8 GB bf16.
+# Teutonic-Q3-8B — Qwen3-8B dense as genesis king (vanilla HF Qwen3ForCausalLM, no fork).
+# Qwen3 dense family, same tokenizer/arch line as 4B, just a larger baseline.
 # Public eval corpus: FineWeb-Edu Hippius mirror tokenized at eval time with Qwen3 tokenizer.
 #
 # Genesis now lives on Hippius Hub. model_store dispatches by digest prefix:
 # `sha256:` for Hippius OCI, `hf:` for HF revisions. Challenger uploads still
 # go through Hippius as normal.
 [chain]
-name = "Teutonic-Q3-4B"
-seed_repo = "teutonic/teutonic-q3-4b-genesis"
-# repo_pattern auto-derives to "^[^/]+/Teutonic-Q3-4B-.+$" if omitted.
+name = "Teutonic-Q3-8B"
+seed_repo = "teutonic/teutonic-q3-8b-genesis"
+# repo_pattern auto-derives to "^[^/]+/Teutonic-Q3-8B-.+$" if omitted.
 
 [arch]
 module = "archs.qwen3"
@@ -23,6 +23,6 @@ extra_lock_keys = [
 ]
 
 [seed]
-tokenizer_repo = "Qwen/Qwen3-4B"
+tokenizer_repo = "Qwen/Qwen3-8B"
 repo_backend = "hippius"
-seed_digest = "sha256:815a11518d36bbd9ad9c56c6cd01f44451fae872a14ada9dc5248fce0fb4626b"
+seed_digest = "sha256:97d3f4ac49ae94ccb9bb1a73ff68de6199150cb0346bcf16c16138387a19e7a4"
