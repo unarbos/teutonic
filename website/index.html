@@ -87,6 +87,86 @@ body {
     margin-top: 4px;
 }
 
+.bench-panel {
+    border: var(--border);
+    padding: 10px;
+    position: relative;
+}
+.bench-panel::before {
+    content: "";
+    position: absolute;
+    inset: 3px;
+    border: var(--border-faint);
+    pointer-events: none;
+}
+.bench-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    position: relative;
+    z-index: 1;
+}
+#bench-meta {
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+.bench-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 8px;
+    position: relative;
+    z-index: 1;
+}
+.bench-card {
+    border: var(--border);
+    padding: 8px;
+    min-height: 76px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    background: var(--paper);
+}
+.bench-card[data-status="completed"] {
+    background:
+        linear-gradient(135deg, rgba(0,0,0,0.05) 0 25%, transparent 25% 50%, rgba(0,0,0,0.05) 50% 75%, transparent 75% 100%);
+    background-size: 8px 8px;
+}
+[data-theme="dark"] .bench-card[data-status="completed"] {
+    background:
+        linear-gradient(135deg, rgba(255,255,255,0.05) 0 25%, transparent 25% 50%, rgba(255,255,255,0.05) 50% 75%, transparent 75% 100%);
+    background-size: 8px 8px;
+}
+.bench-name {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.bench-score {
+    font-family: "Space Mono", monospace;
+    font-size: clamp(18px, 2.6vw, 30px);
+    line-height: 1.1;
+    margin: 6px 0;
+}
+.bench-status {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+}
+.bench-card[data-status="pending"] .bench-score,
+.bench-card[data-status="running"] .bench-score {
+    color: var(--ink-muted);
+}
+.bench-error {
+    color: #c22;
+}
+
 .duel-bar-wrap {
     border: 1px solid var(--ink);
     height: 14px;
@@ -236,6 +316,8 @@ th:last-child, td:last-child { text-align: right; }
     #smooth-slider { width: 60px; }
 
     .chart-wrap { aspect-ratio: 3 / 2; }
+    .bench-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .bench-head { flex-direction: column; gap: 2px; }
 
     .scroll-box { overflow-x: auto; }
     .scroll-hist table,
@@ -296,6 +378,24 @@ th:last-child, td:last-child { text-align: right; }
         </div>
         <div class="chart-meta" id="chart-meta">
             <span>--</span>
+        </div>
+    </div>
+
+    <div class="bench-panel" id="bench-panel">
+        <div class="bench-head">
+            <span>Benchmark Panel</span>
+            <span id="bench-meta">Loading benchmark scores...</span>
+        </div>
+        <div class="bench-head" style="margin-top:-6px;opacity:0.72;">
+            <span>Next King Benchmark</span>
+            <span id="bench-next">calculating...</span>
+        </div>
+        <div class="bench-grid" id="bench-grid">
+            <div class="bench-card" data-status="pending">
+                <div class="bench-name">--</div>
+                <div class="bench-score">--</div>
+                <div class="bench-status"><span>loading</span><span>--</span></div>
+            </div>
         </div>
     </div>
 
@@ -379,6 +479,7 @@ var DATASET_MANIFEST_KEY = DATASET_PREFIX + "/_manifest.json";
 var DATA_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/dashboard.json"; });
 var HTML_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/index.html"; });
 var DATASET_MANIFEST_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/" + DATASET_MANIFEST_KEY; });
+var BENCH_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/king-benchmark-daily/latest.json"; });
 var DATA_URL = DATA_ENDPOINTS[0];
 var DATASET_MANIFEST_URL = DATASET_MANIFEST_ENDPOINTS[0];
 var POLL_MS = 5000;
@@ -387,6 +488,7 @@ var BUILD_ID = "__BUILD_ID__";
 var ENDPOINT_CACHE_KEY = "dashboardEndpoint";
 var ENDPOINT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 var _lastData = null;
+var _lastBenchData = null;
 var _chartMode = localStorage.getItem("chartMode") || "ppl";
 var _datasetManifestPromise = null;
 
@@ -602,6 +704,111 @@ function hubUrl(repo) {
 function modelLink(repo, digest, label) {
     if (!repo) return label || "--";
     return '<a href="' + hubUrl(repo) + '" target="_blank" style="color:var(--ink)">' + (label || repo) + '</a>';
+}
+
+function esc(s) {
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function formatBenchScore(score) {
+    if (score == null || !isFinite(score)) return "--";
+    return (score * 100).toFixed(1) + "%";
+}
+
+
+function parseIsoTime(value) {
+    if (!value) return null;
+    var t = new Date(value).getTime();
+    return isNaN(t) ? null : t;
+}
+
+function formatCountdown(ms) {
+    if (ms <= 0) return "starting soon";
+    var total = Math.floor(ms / 1000);
+    var hr = Math.floor(total / 3600);
+    var min = Math.floor((total % 3600) / 60);
+    if (hr >= 24) {
+        var day = Math.floor(hr / 24);
+        return day + "d " + (hr % 24) + "h";
+    }
+    if (hr > 0) return hr + "h " + min + "m";
+    return min + "m";
+}
+
+function nextBenchmarkStart(payload) {
+    var schedule = payload && payload.schedule ? payload.schedule : {};
+    var explicit = parseIsoTime(schedule.next_run_at || payload.next_run_at);
+    if (explicit) return explicit;
+    var intervalHours = Number(schedule.interval_hours || payload.interval_hours || 24);
+    var last = parseIsoTime(payload.finished_at || payload.started_at || payload.generated_at);
+    if (!last) return null;
+    return last + intervalHours * 60 * 60 * 1000;
+}
+
+function renderBenchmarkTimer(payload) {
+    var el = document.getElementById("bench-next");
+    if (!el) return;
+    var next = nextBenchmarkStart(payload);
+    if (!next) {
+        el.textContent = "waiting for schedule";
+        return;
+    }
+    var d = new Date(next);
+    el.textContent = formatCountdown(next - Date.now()) + " · " + d.toISOString().slice(0, 16).replace("T", " ") + "Z";
+}
+
+function renderBenchmarks(payload) {
+    var grid = document.getElementById("bench-grid");
+    var meta = document.getElementById("bench-meta");
+    if (!grid || !meta) return;
+    if (!payload || !Array.isArray(payload.benchmarks)) {
+        meta.textContent = "No benchmark data";
+        renderBenchmarkTimer(null);
+        grid.innerHTML = '<div class="bench-card bench-error" data-status="failed"><div class="bench-name">Unavailable</div><div class="bench-score">--</div><div class="bench-status"><span>missing</span><span>--</span></div></div>';
+        return;
+    }
+    var totals = payload.totals || {};
+    var model = payload.model || {};
+    var modelLabel = model.model_repo || "--";
+    meta.textContent = (payload.status || "--") + " · " + (totals.completed || 0) + "/" + (totals.requested || payload.benchmarks.length) + " complete · " + modelLabel;
+    renderBenchmarkTimer(payload);
+    grid.innerHTML = payload.benchmarks.map(function(b) {
+        var status = b.status || "pending";
+        var metricName = b.metric && b.metric.name ? b.metric.name.replace(/,none$/, "") : "--";
+        var fs = b.fewshot == null ? "--" : b.fewshot + "-shot";
+        var score = formatBenchScore(b.score);
+        var subtitle = status === "completed" ? metricName : status;
+        return '<div class="bench-card" data-status="' + esc(status) + '">' +
+            '<div class="bench-name">' + esc(b.name || "--") + '</div>' +
+            '<div class="bench-score">' + esc(score) + '</div>' +
+            '<div class="bench-status"><span>' + esc(subtitle) + '</span><span>' + esc(fs) + '</span></div>' +
+            '</div>';
+    }).join("");
+}
+
+async function pollBenchmarks() {
+    var failures = 0;
+    var buster = Date.now();
+    BENCH_ENDPOINTS.forEach(function(url) {
+        fetch(url + "?t=" + buster)
+            .then(function(r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(function(data) {
+                if (_lastBenchData) return;
+                _lastBenchData = data;
+                renderBenchmarks(data);
+            })
+            .catch(function() {
+                failures++;
+                if (failures === BENCH_ENDPOINTS.length && !_lastBenchData) renderBenchmarks(null);
+            });
+    });
 }
 
 function render(d) {
@@ -1163,7 +1370,10 @@ loadDatasetManifest().then(function(manifest) {
 });
 
 poll();
+pollBenchmarks();
 setInterval(poll, POLL_MS);
+setInterval(function() { _lastBenchData = null; pollBenchmarks(); }, POLL_MS * 6);
+setInterval(function() { if (_lastBenchData) renderBenchmarkTimer(_lastBenchData); }, 30000);
 
 // Self-heal: long-lived tabs (especially mobile Safari bfcache) can keep an
 // old DOM forever. Periodically fetch the live index.html and reload if its
