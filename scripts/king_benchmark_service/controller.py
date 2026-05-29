@@ -117,6 +117,57 @@ class ControllerState:
                 queued.append({"king": king, "missing_benchmarks": missing})
         return queued
 
+    def current_dashboard_king(self) -> dict[str, Any] | None:
+        try:
+            _, dashboard = fetch_dashboard(self.args.dashboard_url, self.args.dashboard_timeout_s)
+            kings = kings_from_dashboard(dashboard)
+            return kings[0] if kings else None
+        except Exception:
+            return None
+
+    def result_for_king(self, king_id: str | None) -> dict[str, Any] | None:
+        if not king_id:
+            return None
+        result = read_json(self.args.results_root / "kings" / king_id / "results.json", None)
+        if result is not None:
+            return result
+        index = self.store.load_index()
+        record = (index.get("kings") or {}).get(king_id, {})
+        latest = record.get("latest_result")
+        return latest if isinstance(latest, dict) else None
+
+    def latest_payload(
+        self,
+        *,
+        status: str,
+        current_job: dict[str, Any] | None = None,
+        worker_event: dict[str, Any] | None = None,
+        result_payload: dict[str, Any] | None = None,
+        queue_size: int | None = None,
+    ) -> dict[str, Any]:
+        current_king = self.current_dashboard_king()
+        current_king_id = (current_king or {}).get("king_id")
+        result_king_id = ((result_payload or {}).get("model") or {}).get("king_id")
+        display_result = result_payload if result_king_id == current_king_id else self.result_for_king(current_king_id)
+        payload: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "status": status, "generated_at": utcnow_iso()}
+        if current_king:
+            payload["current_king"] = current_king
+        if display_result:
+            payload["latest_result"] = display_result
+        if queue_size is not None:
+            payload["queue_size"] = queue_size
+        if current_job:
+            payload["active_job"] = current_job
+            if ((current_job.get("model") or {}).get("king_id") == current_king_id):
+                payload["current_job"] = current_job
+        if worker_event:
+            event_king_id = ((worker_event.get("model") or {}).get("king_id"))
+            if event_king_id == current_king_id:
+                payload["worker_event"] = worker_event
+            else:
+                payload["active_worker_event"] = worker_event
+        return payload
+
     def dispatch_next(self) -> dict[str, Any]:
         queue = self.build_queue()
         if not queue:
@@ -139,13 +190,13 @@ class ControllerState:
         resp = http_json(f"{self.args.worker_url.rstrip('/')}/jobs", method="POST", payload=job, token=self.args.worker_token, timeout_s=30)
         self.state.update({"status": "dispatched", "current_job": job, "worker_response": resp, "last_queue_size": len(queue)})
         self.save()
-        self.store.write_latest({"schema_version": SCHEMA_VERSION, "status": "running", "generated_at": utcnow_iso(), "current_job": job, "queue_size": len(queue)})
+        self.store.write_latest(self.latest_payload(status="running", current_job=job, queue_size=len(queue)))
         return {"dispatched": True, "job": job, "worker_response": resp}
 
     def handle_event(self, payload: dict[str, Any]) -> None:
         self.state.update({"status": payload.get("status", "running"), "last_event": payload})
         self.save()
-        self.store.write_latest({"schema_version": SCHEMA_VERSION, "status": payload.get("status", "running"), "generated_at": utcnow_iso(), "current_job": self.state.get("current_job"), "worker_event": payload})
+        self.store.write_latest(self.latest_payload(status=payload.get("status", "running"), current_job=self.state.get("current_job"), worker_event=payload))
 
     def handle_result(self, payload: dict[str, Any]) -> None:
         model = payload.get("model") or {}
@@ -166,7 +217,7 @@ class ControllerState:
         index = self.store.load_index()
         index.setdefault("kings", {})[king_id] = {"model": model, "status": payload.get("status"), "updated_at": utcnow_iso(), "result_s3": f"s3://{self.store.bucket}/{self.store.result_key(king_id)}", "latest_result": result_payload}
         self.store.write_index(index)
-        self.store.write_latest({"schema_version": SCHEMA_VERSION, "status": payload.get("status"), "generated_at": utcnow_iso(), "latest_result": result_payload})
+        self.store.write_latest(self.latest_payload(status=payload.get("status"), current_job=self.state.get("current_job"), result_payload=result_payload))
         self.store.append_history(result_payload)
         self.state.update({"status": "idle", "last_result": result_payload, "current_job": None})
         self.save()

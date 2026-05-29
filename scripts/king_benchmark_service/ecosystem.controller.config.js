@@ -11,9 +11,10 @@ function envOr(key, fallback) {
 }
 
 function requiredEnv(key) {
-  var value = process.env[key];
-  if (value != null && value !== "") return value;
-  throw new Error(key + " is required; keep worker endpoints out of git");
+  if (process.env[key] == null || process.env[key] === "") {
+    throw new Error(`${key} is required`);
+  }
+  return process.env[key];
 }
 
 module.exports = {

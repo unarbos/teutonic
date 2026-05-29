@@ -253,6 +253,37 @@ body {
     height: 32px;
     margin-top: 3px;
 }
+.bench-history-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 8px 0 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+}
+.bench-history-pager button,
+.bench-history-pager select {
+    background: none;
+    border: var(--border);
+    color: var(--ink);
+    font: 600 10px/1 var(--font);
+    text-transform: uppercase;
+    padding: 3px 7px;
+}
+.bench-history-pager button {
+    cursor: pointer;
+}
+.bench-history-pager button:disabled {
+    cursor: not-allowed;
+    opacity: 0.35;
+}
+.bench-history-pager-left,
+.bench-history-pager-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
 
 .duel-bar-wrap {
     border: 1px solid var(--ink);
@@ -405,6 +436,7 @@ th:last-child, td:last-child { text-align: right; }
     .chart-wrap { aspect-ratio: 3 / 2; }
     .bench-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .bench-spark-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .bench-history-pager { align-items: flex-start; flex-direction: column; }
     .bench-head { flex-direction: column; gap: 2px; }
     .bench-tools { justify-content: space-between; }
 
@@ -590,6 +622,9 @@ var _lastData = null;
 var _lastBenchData = null;
 var _benchHistoryData = null;
 var _benchHistoryOpen = localStorage.getItem("benchHistoryOpen") === "1";
+var _benchHistoryPage = Number(localStorage.getItem("benchHistoryPage") || 0);
+var _benchHistoryPageSize = Number(localStorage.getItem("benchHistoryPageSize") || 5);
+if ([5, 10, 25, 50].indexOf(_benchHistoryPageSize) === -1) _benchHistoryPageSize = 5;
 var _chartMode = localStorage.getItem("chartMode") || "ppl";
 var _smoothMode = localStorage.getItem("smoothMode") || "lowess";
 var _chartScaleFocus = localStorage.getItem("chartScaleFocus") || "king";
@@ -900,6 +935,21 @@ function statusLabel(status) {
     return status || "in progress";
 }
 
+function activeJobRows(payload) {
+    var names = payload && payload.active_job && Array.isArray(payload.active_job.benchmarks) ? payload.active_job.benchmarks : BENCHMARK_ORDER.map(function(spec) { return spec.name; });
+    var allowed = {};
+    names.forEach(function(name) { allowed[benchmarkKey(name)] = true; });
+    return BENCHMARK_ORDER.filter(function(spec) { return allowed[benchmarkKey(spec.name)] || allowed[benchmarkKey(spec.task)]; }).map(function(spec) {
+        return {
+            name: spec.name,
+            task: spec.task,
+            fewshot: spec.fewshot,
+            status: "running",
+            metric: { name: null, value: null }
+        };
+    });
+}
+
 function completeBenchmarkRows(payload) {
     var rows = payload && Array.isArray(payload.benchmarks) ? payload.benchmarks : [];
     var byKey = {};
@@ -965,6 +1015,27 @@ function normalizeBenchmarkPayload(payload) {
     if (payload.latest_result && Array.isArray(payload.latest_result.benchmarks)) {
         return payload.latest_result;
     }
+    var activePartial = payload.active_worker_event && payload.active_worker_event.partial_results;
+    if (activePartial && Array.isArray(activePartial.benchmarks)) {
+        return {
+            status: payload.active_worker_event.status || payload.status || "running",
+            generated_at: payload.generated_at || payload.active_worker_event.updated_at || activePartial.generated_at,
+            started_at: activePartial.started_at,
+            finished_at: activePartial.finished_at,
+            model: payload.active_worker_event.model || activePartial.model || (payload.active_job && payload.active_job.model),
+            totals: activePartial.totals,
+            benchmarks: activePartial.benchmarks
+        };
+    }
+    if (payload.active_job && payload.active_job.model) {
+        return {
+            status: payload.status || "running",
+            generated_at: payload.generated_at,
+            model: payload.active_job.model,
+            totals: { requested: (payload.active_job.benchmarks || []).length || BENCHMARK_ORDER.length, completed: 0, completed_no_metric: 0, failed: 0 },
+            benchmarks: activeJobRows(payload)
+        };
+    }
     var partial = payload.worker_event && payload.worker_event.partial_results;
     if (partial && Array.isArray(partial.benchmarks)) {
         return {
@@ -1025,12 +1096,13 @@ function benchmarkHistoryRows() {
         rows.push(result);
     }
     addResult(normalizeBenchmarkPayload(_lastBenchData));
+    addResult(normalizeBenchmarkPayload({ active_job: _lastBenchData && _lastBenchData.active_job, active_worker_event: _lastBenchData && _lastBenchData.active_worker_event, status: _lastBenchData && _lastBenchData.status, generated_at: _lastBenchData && _lastBenchData.generated_at }));
     var kings = _benchHistoryData && _benchHistoryData.kings ? _benchHistoryData.kings : {};
     Object.keys(kings).forEach(function(key) { addResult(kings[key].latest_result); });
     rows.sort(function(a, b) {
         return compareBenchmarkKings(a, b, true);
     });
-    return rows.slice(0, 16);
+    return rows;
 }
 
 function benchmarkHistoryChronological(rows) {
@@ -1103,8 +1175,20 @@ function renderBenchmarkHistory() {
         panel.innerHTML = renderBenchmarkSparks([]) + '<div class="bench-history-empty">No benchmark history yet</div>';
         return;
     }
+    var pageSize = _benchHistoryPageSize || 5;
+    var pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+    if (_benchHistoryPage < 0) _benchHistoryPage = 0;
+    if (_benchHistoryPage >= pageCount) _benchHistoryPage = pageCount - 1;
+    var start = _benchHistoryPage * pageSize;
+    var visibleRows = rows.slice(start, start + pageSize);
+    var pager = '<div class="bench-history-pager">' +
+        '<div class="bench-history-pager-left"><button type="button" data-bench-page="prev"' + (_benchHistoryPage <= 0 ? ' disabled' : '') + '>Prev</button>' +
+        '<span>Page ' + esc(_benchHistoryPage + 1) + ' / ' + esc(pageCount) + ' · ' + esc(rows.length) + ' kings</span>' +
+        '<button type="button" data-bench-page="next"' + (_benchHistoryPage >= pageCount - 1 ? ' disabled' : '') + '>Next</button></div>' +
+        '<label class="bench-history-pager-right">Rows <select data-bench-page-size>' + [5, 10, 25, 50].map(function(n) { return '<option value="' + n + '"' + (n === pageSize ? ' selected' : '') + '>' + n + '</option>'; }).join("") + '</select></label>' +
+        '</div>';
     var head = '<thead><tr><th>King</th><th>Model</th>' + BENCHMARK_ORDER.map(function(b) { return '<th>' + esc(b.name) + '</th>'; }).join("") + '</tr></thead>';
-    var body = rows.map(function(result) {
+    var body = visibleRows.map(function(result) {
         var model = result.model || {};
         var modelLabel = benchmarkModelLabel(model);
         var modelDisplayLabel = benchmarkModelDisplayLabel(model);
@@ -1122,7 +1206,7 @@ function renderBenchmarkHistory() {
         if (kingStamp) kingLabel += " · " + new Date(kingStamp).toISOString().slice(0, 10);
         return '<tr><td>' + esc(kingLabel) + '</td><td title="' + esc(modelLabel) + '">' + esc(modelDisplayLabel) + '</td>' + cells + '</tr>';
     }).join("");
-    panel.innerHTML = renderBenchmarkSparks(rows) + '<table>' + head + '<tbody>' + body + '</tbody></table>';
+    panel.innerHTML = renderBenchmarkSparks(rows) + pager + '<table>' + head + '<tbody>' + body + '</tbody></table>';
 }
 
 function pollBenchmarkHistory() {
@@ -1770,6 +1854,27 @@ if (benchHistoryToggle) {
         localStorage.setItem("benchHistoryOpen", _benchHistoryOpen ? "1" : "0");
         renderBenchmarkHistory();
         if (_benchHistoryOpen && !_benchHistoryData) pollBenchmarkHistory();
+    });
+}
+
+var benchHistoryPanel = document.getElementById("bench-history");
+if (benchHistoryPanel) {
+    benchHistoryPanel.addEventListener("click", function(ev) {
+        var btn = ev.target && ev.target.closest ? ev.target.closest("[data-bench-page]") : null;
+        if (!btn || btn.disabled) return;
+        var direction = btn.getAttribute("data-bench-page");
+        _benchHistoryPage += direction === "next" ? 1 : -1;
+        localStorage.setItem("benchHistoryPage", String(_benchHistoryPage));
+        renderBenchmarkHistory();
+    });
+    benchHistoryPanel.addEventListener("change", function(ev) {
+        var select = ev.target && ev.target.matches && ev.target.matches("[data-bench-page-size]") ? ev.target : null;
+        if (!select) return;
+        _benchHistoryPageSize = Number(select.value) || 5;
+        _benchHistoryPage = 0;
+        localStorage.setItem("benchHistoryPageSize", String(_benchHistoryPageSize));
+        localStorage.setItem("benchHistoryPage", "0");
+        renderBenchmarkHistory();
     });
 }
 

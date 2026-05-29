@@ -5,7 +5,7 @@ Authenticated two-process flow for evaluating every Teutonic king without puttin
 ## Shape
 
 - Controller runs locally under PM2, fetches `dashboard.json`, chooses the newest king first, then older unevaluated kings sequentially.
-- Worker runs on your remote benchmark host (`$TEUTONIC_KING_BENCH_WORKER_SSH`, HTTP worker port from `$TEUTONIC_KING_BENCH_WORKER_URL`) and only receives `Authorization: Bearer <token>` jobs.
+- Worker runs on the configured remote benchmark host (`$TEUTONIC_KING_BENCH_WORKER_SSH`, HTTP worker URL from `$TEUTONIC_KING_BENCH_WORKER_URL`) and only receives `Authorization: Bearer <token>` jobs.
 - Worker posts progress/results back to the controller. Controller writes local JSON and uploads S3 JSON.
 - Default benchmarks are `MMLU,MMLU-Pro,BBH,ARC-C,TruthfulQA,WinoGrande`.
 
@@ -46,9 +46,9 @@ PY
 Controller, on this machine:
 
 ```bash
-export TEUTONIC_KING_BENCH_WORKER_SSH='root@YOUR_WORKER_HOST'
 export TEUTONIC_KING_BENCH_WORKER_TOKEN='...'
 export TEUTONIC_KING_BENCH_CONTROLLER_TOKEN="$TEUTONIC_KING_BENCH_WORKER_TOKEN"
+export TEUTONIC_KING_BENCH_WORKER_SSH='root@YOUR_WORKER_HOST'
 export TEUTONIC_KING_BENCH_WORKER_URL='http://YOUR_WORKER_HOST:32000'
 pm2 start scripts/king_benchmark_service/ecosystem.controller.config.js
 ```
