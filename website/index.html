@@ -109,6 +109,23 @@ body {
     position: relative;
     z-index: 1;
 }
+.bench-tools {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    min-width: 0;
+}
+.bench-history-toggle {
+    background: none;
+    border: var(--border);
+    color: var(--ink);
+    font: 600 10px/1 var(--font);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 3px 8px;
+    cursor: pointer;
+}
 #bench-meta {
     text-align: right;
     overflow-wrap: anywhere;
@@ -165,6 +182,76 @@ body {
 }
 .bench-error {
     color: #c22;
+}
+.bench-history {
+    border-top: var(--border-faint);
+    margin-top: 10px;
+    padding-top: 10px;
+    position: relative;
+    z-index: 1;
+    overflow-x: auto;
+}
+.bench-history[hidden] {
+    display: none;
+}
+.bench-history table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+    text-transform: uppercase;
+    table-layout: auto;
+}
+.bench-history th,
+.bench-history td {
+    border-bottom: var(--border-faint);
+    padding: 5px 6px;
+    text-align: right;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+}
+.bench-history th:first-child,
+.bench-history td:first-child,
+.bench-history th:nth-child(2),
+.bench-history td:nth-child(2) {
+    text-align: left;
+}
+.bench-history-empty {
+    color: var(--ink-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+}
+.bench-spark-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(96px, 1fr));
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.bench-spark {
+    border: var(--border-faint);
+    padding: 5px;
+    background: rgba(0,0,0,0.015);
+}
+[data-theme="dark"] .bench-spark {
+    background: rgba(255,255,255,0.025);
+}
+.bench-spark-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+    font-size: 9px;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+}
+.bench-spark-head strong {
+    color: var(--ink);
+    font-weight: 700;
+}
+.bench-spark svg {
+    display: block;
+    width: 100%;
+    height: 32px;
+    margin-top: 3px;
 }
 
 .duel-bar-wrap {
@@ -245,7 +332,7 @@ th:last-child, td:last-child { text-align: right; }
     cursor: pointer;
     letter-spacing: 0.05em;
 }
-#theme-toggle:hover, #chart-mode-toggle:hover {
+#theme-toggle:hover, #chart-mode-toggle:hover, #smooth-mode-toggle:hover, #scale-focus-toggle:hover {
     background: var(--ink);
     color: var(--ink-inv);
 }
@@ -317,7 +404,9 @@ th:last-child, td:last-child { text-align: right; }
 
     .chart-wrap { aspect-ratio: 3 / 2; }
     .bench-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .bench-spark-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .bench-head { flex-direction: column; gap: 2px; }
+    .bench-tools { justify-content: space-between; }
 
     .scroll-box { overflow-x: auto; }
     .scroll-hist table,
@@ -369,7 +458,9 @@ th:last-child, td:last-child { text-align: right; }
         <div class="section-label" style="display:flex;justify-content:space-between;align-items:center;">
             <span id="chart-label">Perplexity</span>
             <span class="chart-controls" style="display:flex;align-items:center;gap:8px;">
-                <label style="font-weight:normal;font-size:11px;display:flex;align-items:center;cursor:default;">SMOOTH<input type="range" id="smooth-slider" min="0" max="1" step="0.05" value="0"><span id="smooth-val" style="min-width:1.8em;text-align:right;">0</span></label>
+                <label style="font-weight:normal;font-size:11px;display:flex;align-items:center;cursor:default;">SMOOTH<input type="range" id="smooth-slider" min="0" max="1" step="0.05" value="0.35"><span id="smooth-val" style="min-width:1.8em;text-align:right;">0.35</span></label>
+                <button id="smooth-mode-toggle" style="background:none;border:var(--border);color:var(--ink);font:600 11px/1 var(--font);text-transform:uppercase;padding:3px 8px;cursor:pointer;letter-spacing:0.05em;">LOWESS</button>
+                <button id="scale-focus-toggle" style="background:none;border:var(--border);color:var(--ink);font:600 11px/1 var(--font);text-transform:uppercase;padding:3px 8px;cursor:pointer;letter-spacing:0.05em;">KING SCALE</button>
                 <button id="chart-mode-toggle" style="background:none;border:var(--border);color:var(--ink);font:600 11px/1 var(--font);text-transform:uppercase;padding:3px 8px;cursor:pointer;letter-spacing:0.05em;">Loss</button>
             </span>
         </div>
@@ -384,11 +475,7 @@ th:last-child, td:last-child { text-align: right; }
     <div class="bench-panel" id="bench-panel">
         <div class="bench-head">
             <span>Benchmark Panel</span>
-            <span id="bench-meta">Loading benchmark scores...</span>
-        </div>
-        <div class="bench-head" style="margin-top:-6px;opacity:0.72;">
-            <span>Next King Benchmark</span>
-            <span id="bench-next">calculating...</span>
+            <span class="bench-tools"><button id="bench-history-toggle" class="bench-history-toggle" type="button">History</button><span id="bench-meta">Loading benchmark scores...</span></span>
         </div>
         <div class="bench-grid" id="bench-grid">
             <div class="bench-card" data-status="pending">
@@ -396,6 +483,9 @@ th:last-child, td:last-child { text-align: right; }
                 <div class="bench-score">--</div>
                 <div class="bench-status"><span>loading</span><span>--</span></div>
             </div>
+        </div>
+        <div class="bench-history" id="bench-history" hidden>
+            <div class="bench-history-empty">Loading benchmark history...</div>
         </div>
     </div>
 
@@ -479,7 +569,16 @@ var DATASET_MANIFEST_KEY = DATASET_PREFIX + "/_manifest.json";
 var DATA_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/dashboard.json"; });
 var HTML_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/index.html"; });
 var DATASET_MANIFEST_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/" + DATASET_MANIFEST_KEY; });
-var BENCH_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/king-benchmark-daily/latest.json"; });
+var BENCH_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/king-benchmark-daily/all-kings/latest.json"; });
+var BENCH_INDEX_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/king-benchmark-daily/all-kings/index.json"; });
+var BENCHMARK_ORDER = [
+    { name: "MMLU", task: "mmlu", fewshot: 5 },
+    { name: "MMLU-Pro", task: "mmlu_pro", fewshot: 5 },
+    { name: "BBH", task: "leaderboard_bbh", fewshot: 3 },
+    { name: "ARC-C", task: "arc_challenge", fewshot: 25 },
+    { name: "TruthfulQA", task: "truthfulqa_mc2", fewshot: 0 },
+    { name: "WinoGrande", task: "winogrande", fewshot: 5 }
+];
 var DATA_URL = DATA_ENDPOINTS[0];
 var DATASET_MANIFEST_URL = DATASET_MANIFEST_ENDPOINTS[0];
 var POLL_MS = 5000;
@@ -489,7 +588,11 @@ var ENDPOINT_CACHE_KEY = "dashboardEndpoint";
 var ENDPOINT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 var _lastData = null;
 var _lastBenchData = null;
+var _benchHistoryData = null;
+var _benchHistoryOpen = localStorage.getItem("benchHistoryOpen") === "1";
 var _chartMode = localStorage.getItem("chartMode") || "ppl";
+var _smoothMode = localStorage.getItem("smoothMode") || "lowess";
+var _chartScaleFocus = localStorage.getItem("chartScaleFocus") || "king";
 var _datasetManifestPromise = null;
 
 (function initTheme() {
@@ -638,6 +741,50 @@ function ema(arr, alpha) {
     return out;
 }
 
+function lowess(arr, strength) {
+    var n = arr.length;
+    if (n < 3 || strength <= 0) return arr.slice();
+    var span = Math.max(3, Math.ceil(n * (0.12 + strength * 0.58)));
+    if (span > n) span = n;
+    var out = [];
+    for (var i = 0; i < n; i++) {
+        var distances = [];
+        for (var j = 0; j < n; j++) distances.push({ idx: j, dist: Math.abs(j - i) });
+        distances.sort(function(a, b) { return a.dist - b.dist; });
+        var bandwidth = distances[span - 1].dist || 1;
+        var sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0;
+        for (var k = 0; k < span; k++) {
+            var idx = distances[k].idx;
+            var u = distances[k].dist / bandwidth;
+            var w = Math.pow(1 - Math.pow(u, 3), 3);
+            var x = idx;
+            var y = arr[idx];
+            sw += w;
+            swx += w * x;
+            swy += w * y;
+            swxx += w * x * x;
+            swxy += w * x * y;
+        }
+        var denom = sw * swxx - swx * swx;
+        if (Math.abs(denom) < 1e-12 || sw === 0) {
+            out.push(sw ? swy / sw : arr[i]);
+        } else {
+            var slope = (sw * swxy - swx * swy) / denom;
+            var intercept = (swy - slope * swx) / sw;
+            out.push(intercept + slope * i);
+        }
+    }
+    return out;
+}
+
+function smoothSeries(arr, amount) {
+    if (amount <= 0) return arr.slice();
+    if (_smoothMode === "normal") {
+        return ema(arr, 1 / (1 + amount * 20));
+    }
+    return lowess(arr, amount);
+}
+
 var ERROR_MESSAGES = {
     hf_metadata_error: {
         title: "Model Not Found",
@@ -720,74 +867,283 @@ function formatBenchScore(score) {
 }
 
 
-function parseIsoTime(value) {
-    if (!value) return null;
-    var t = new Date(value).getTime();
-    return isNaN(t) ? null : t;
+
+function benchmarkKey(value) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function formatCountdown(ms) {
-    if (ms <= 0) return "starting soon";
-    var total = Math.floor(ms / 1000);
-    var hr = Math.floor(total / 3600);
-    var min = Math.floor((total % 3600) / 60);
-    if (hr >= 24) {
-        var day = Math.floor(hr / 24);
-        return day + "d " + (hr % 24) + "h";
-    }
-    if (hr > 0) return hr + "h " + min + "m";
-    return min + "m";
+function benchmarkScoreValue(row) {
+    if (!row) return null;
+    if (row.score != null) return row.score;
+    if (row.metric && row.metric.value != null) return row.metric.value;
+    return null;
 }
 
-function nextBenchmarkStart(payload) {
-    var schedule = payload && payload.schedule ? payload.schedule : {};
-    var explicit = parseIsoTime(schedule.next_run_at || payload.next_run_at);
-    if (explicit) return explicit;
-    var intervalHours = Number(schedule.interval_hours || payload.interval_hours || 24);
-    var last = parseIsoTime(payload.finished_at || payload.started_at || payload.generated_at);
-    if (!last) return null;
-    return last + intervalHours * 60 * 60 * 1000;
+function benchmarkModelLabel(model) {
+    model = model || {};
+    if (model.model_input) return model.model_input;
+    if (model.source && model.source.indexOf("/") >= 0) return model.source;
+    var repo = model.model_repo || model.repo_id || "--";
+    var digest = model.king_digest || model.model_digest || model.digest || model.revision;
+    return digest && repo !== "--" ? repo + "@" + digest : repo;
 }
 
-function renderBenchmarkTimer(payload) {
-    var el = document.getElementById("bench-next");
-    if (!el) return;
-    var next = nextBenchmarkStart(payload);
-    if (!next) {
-        el.textContent = "waiting for schedule";
-        return;
-    }
-    var d = new Date(next);
-    el.textContent = formatCountdown(next - Date.now()) + " · " + d.toISOString().slice(0, 16).replace("T", " ") + "Z";
+function benchmarkModelDisplayLabel(model) {
+    return benchmarkModelLabel(model)
+        .replace(/@(sha256:)([0-9a-f]{10})[0-9a-f]{44,}/i, "@$1$2...")
+        .replace(/@(hf:)([0-9a-f]{10})[0-9a-f]{20,}/i, "@$1$2...");
+}
+
+function statusLabel(status) {
+    if (status === "running" || status === "pending") return "in progress";
+    if (status === "completed_no_metric") return "no metric";
+    return status || "in progress";
+}
+
+function completeBenchmarkRows(payload) {
+    var rows = payload && Array.isArray(payload.benchmarks) ? payload.benchmarks : [];
+    var byKey = {};
+    rows.forEach(function(row) {
+        byKey[benchmarkKey(row.name)] = row;
+        byKey[benchmarkKey(row.task)] = row;
+    });
+    return BENCHMARK_ORDER.map(function(spec) {
+        var row = byKey[benchmarkKey(spec.name)] || byKey[benchmarkKey(spec.task)];
+        if (!row) {
+            return {
+                name: spec.name,
+                task: spec.task,
+                fewshot: spec.fewshot,
+                status: "running",
+                metric: { name: null, value: null }
+            };
+        }
+        var merged = Object.assign({}, spec, row);
+        merged.name = spec.name;
+        merged.task = row.task || spec.task;
+        merged.fewshot = row.fewshot == null ? spec.fewshot : row.fewshot;
+        return merged;
+    });
 }
 
 function renderBenchmarks(payload) {
     var grid = document.getElementById("bench-grid");
     var meta = document.getElementById("bench-meta");
     if (!grid || !meta) return;
+    payload = normalizeBenchmarkPayload(payload);
     if (!payload || !Array.isArray(payload.benchmarks)) {
         meta.textContent = "No benchmark data";
-        renderBenchmarkTimer(null);
-        grid.innerHTML = '<div class="bench-card bench-error" data-status="failed"><div class="bench-name">Unavailable</div><div class="bench-score">--</div><div class="bench-status"><span>missing</span><span>--</span></div></div>';
+        grid.innerHTML = completeBenchmarkRows(null).map(function(b) {
+            return '<div class="bench-card" data-status="running"><div class="bench-name">' + esc(b.name) + '</div><div class="bench-score">--</div><div class="bench-status"><span>in progress</span><span>' + esc(b.fewshot + "-shot") + '</span></div></div>';
+        }).join("");
+        renderBenchmarkHistory();
         return;
     }
+    var rows = completeBenchmarkRows(payload);
     var totals = payload.totals || {};
     var model = payload.model || {};
-    var modelLabel = model.model_repo || "--";
-    meta.textContent = (payload.status || "--") + " · " + (totals.completed || 0) + "/" + (totals.requested || payload.benchmarks.length) + " complete · " + modelLabel;
-    renderBenchmarkTimer(payload);
-    grid.innerHTML = payload.benchmarks.map(function(b) {
-        var status = b.status || "pending";
+    var modelLabel = benchmarkModelDisplayLabel(model);
+    meta.textContent = (payload.status || "--") + " · " + (totals.completed || 0) + "/" + BENCHMARK_ORDER.length + " complete · " + modelLabel;
+    grid.innerHTML = rows.map(function(b) {
+        var status = b.status || "running";
         var metricName = b.metric && b.metric.name ? b.metric.name.replace(/,none$/, "") : "--";
         var fs = b.fewshot == null ? "--" : b.fewshot + "-shot";
-        var score = formatBenchScore(b.score);
-        var subtitle = status === "completed" ? metricName : status;
+        var score = formatBenchScore(benchmarkScoreValue(b));
+        var subtitle = status === "completed" ? metricName : statusLabel(status);
         return '<div class="bench-card" data-status="' + esc(status) + '">' +
             '<div class="bench-name">' + esc(b.name || "--") + '</div>' +
             '<div class="bench-score">' + esc(score) + '</div>' +
             '<div class="bench-status"><span>' + esc(subtitle) + '</span><span>' + esc(fs) + '</span></div>' +
             '</div>';
     }).join("");
+    renderBenchmarkHistory();
+}
+
+function normalizeBenchmarkPayload(payload) {
+    if (!payload) return null;
+    if (Array.isArray(payload.benchmarks)) return payload;
+    if (payload.latest_result && Array.isArray(payload.latest_result.benchmarks)) {
+        return payload.latest_result;
+    }
+    var partial = payload.worker_event && payload.worker_event.partial_results;
+    if (partial && Array.isArray(partial.benchmarks)) {
+        return {
+            status: payload.status || payload.worker_event.status || "running",
+            generated_at: payload.generated_at || payload.worker_event.updated_at || partial.generated_at,
+            started_at: partial.started_at,
+            finished_at: partial.finished_at,
+            model: payload.worker_event.model || partial.model,
+            totals: partial.totals,
+            benchmarks: partial.benchmarks
+        };
+    }
+    return null;
+}
+
+function parseBenchmarkTime(value) {
+    if (!value) return null;
+    var t = new Date(value).getTime();
+    return isNaN(t) ? null : t;
+}
+
+function benchmarkKingTime(result) {
+    result = result || {};
+    var model = result.model || {};
+    return parseBenchmarkTime(
+        model.crowned_at ||
+        model.uploaded_at ||
+        model.created_at ||
+        model.timestamp ||
+        result.king_uploaded_at ||
+        result.king_created_at
+    );
+}
+
+function compareBenchmarkKings(a, b, newestFirst) {
+    var at = benchmarkKingTime(a);
+    var bt = benchmarkKingTime(b);
+    if (at != null && bt != null && at !== bt) return newestFirst ? bt - at : at - bt;
+    if (at != null && bt == null) return newestFirst ? -1 : 1;
+    if (at == null && bt != null) return newestFirst ? 1 : -1;
+    var ma = (a && a.model) || {}, mb = (b && b.model) || {};
+    var ra = Number(ma.reign_number || 0), rb = Number(mb.reign_number || 0);
+    if (ra !== rb) return newestFirst ? rb - ra : ra - rb;
+    var af = parseBenchmarkTime(a && (a.generated_at || a.finished_at)) || 0;
+    var bf = parseBenchmarkTime(b && (b.generated_at || b.finished_at)) || 0;
+    return newestFirst ? bf - af : af - bf;
+}
+
+function benchmarkHistoryRows() {
+    var rows = [];
+    var seen = {};
+    function addResult(result) {
+        if (!result || !Array.isArray(result.benchmarks)) return;
+        var model = result.model || {};
+        var key = model.king_id || result.job_id || model.model_repo || String(rows.length);
+        if (seen[key]) return;
+        seen[key] = true;
+        rows.push(result);
+    }
+    addResult(normalizeBenchmarkPayload(_lastBenchData));
+    var kings = _benchHistoryData && _benchHistoryData.kings ? _benchHistoryData.kings : {};
+    Object.keys(kings).forEach(function(key) { addResult(kings[key].latest_result); });
+    rows.sort(function(a, b) {
+        return compareBenchmarkKings(a, b, true);
+    });
+    return rows.slice(0, 16);
+}
+
+function benchmarkHistoryChronological(rows) {
+    return rows.slice().sort(function(a, b) {
+        return compareBenchmarkKings(a, b, false);
+    });
+}
+
+function renderBenchmarkSparks(rows) {
+    var ordered = benchmarkHistoryChronological(rows || []);
+    var cards = BENCHMARK_ORDER.map(function(spec) {
+        var points = [];
+        ordered.forEach(function(result) {
+            var benchRows = completeBenchmarkRows(result);
+            var row = null;
+            benchRows.forEach(function(b) {
+                if (benchmarkKey(b.name) === benchmarkKey(spec.name)) row = b;
+            });
+            var value = benchmarkScoreValue(row);
+            if (value != null && isFinite(value)) {
+                points.push({
+                    value: Number(value),
+                    model: benchmarkModelDisplayLabel(result.model),
+                    reign: result.model && result.model.reign_number != null ? "#" + result.model.reign_number : "--"
+                });
+            }
+        });
+        var latest = points.length ? formatBenchScore(points[points.length - 1].value) : "waiting";
+        var svg = "";
+        if (!points.length) {
+            svg = '<line x1="6" y1="26" x2="114" y2="26" stroke="currentColor" stroke-width="1" opacity="0.18"/>' +
+                '<text x="60" y="20" text-anchor="middle" fill="currentColor" opacity="0.45" font-size="8">no score</text>';
+        } else {
+            var values = points.map(function(p) { return p.value; });
+            var min = Math.min.apply(null, values);
+            var max = Math.max.apply(null, values);
+            if (min === max) { min = Math.max(0, min - 0.005); max = Math.min(1, max + 0.005); }
+            var span = max - min || 1;
+            var coords = points.map(function(p, i) {
+                var x = points.length === 1 ? 60 : 6 + (i / (points.length - 1)) * 108;
+                var y = 26 - ((p.value - min) / span) * 20;
+                return { x: x, y: y, point: p };
+            });
+            svg += '<line x1="6" y1="26" x2="114" y2="26" stroke="currentColor" stroke-width="1" opacity="0.15"/>';
+            if (coords.length > 1) {
+                svg += '<polyline points="' + coords.map(function(c) { return c.x.toFixed(1) + ',' + c.y.toFixed(1); }).join(' ') + '" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+            }
+            coords.forEach(function(c, i) {
+                var opacity = i === coords.length - 1 ? '1' : '0.45';
+                svg += '<circle cx="' + c.x.toFixed(1) + '" cy="' + c.y.toFixed(1) + '" r="2.4" fill="currentColor" opacity="' + opacity + '"><title>' + esc(c.point.reign + ' · ' + c.point.model + ' · ' + formatBenchScore(c.point.value)) + '</title></circle>';
+            });
+        }
+        return '<div class="bench-spark" title="' + esc(spec.name + ' history') + '">' +
+            '<div class="bench-spark-head"><strong>' + esc(spec.name) + '</strong><span>' + esc(latest) + '</span></div>' +
+            '<svg viewBox="0 0 120 34" role="img" aria-label="' + esc(spec.name + ' history chart') + '">' + svg + '</svg>' +
+            '</div>';
+    });
+    return '<div class="bench-spark-grid">' + cards.join("") + '</div>';
+}
+
+function renderBenchmarkHistory() {
+    var panel = document.getElementById("bench-history");
+    var toggle = document.getElementById("bench-history-toggle");
+    if (!panel) return;
+    panel.hidden = !_benchHistoryOpen;
+    if (toggle) toggle.textContent = _benchHistoryOpen ? "Hide History" : "History";
+    if (!_benchHistoryOpen) return;
+    var rows = benchmarkHistoryRows();
+    if (!rows.length) {
+        panel.innerHTML = renderBenchmarkSparks([]) + '<div class="bench-history-empty">No benchmark history yet</div>';
+        return;
+    }
+    var head = '<thead><tr><th>King</th><th>Model</th>' + BENCHMARK_ORDER.map(function(b) { return '<th>' + esc(b.name) + '</th>'; }).join("") + '</tr></thead>';
+    var body = rows.map(function(result) {
+        var model = result.model || {};
+        var modelLabel = benchmarkModelLabel(model);
+        var modelDisplayLabel = benchmarkModelDisplayLabel(model);
+        var benchRows = completeBenchmarkRows(result);
+        var byName = {};
+        benchRows.forEach(function(b) { byName[benchmarkKey(b.name)] = b; });
+        var cells = BENCHMARK_ORDER.map(function(spec) {
+            var b = byName[benchmarkKey(spec.name)];
+            var score = formatBenchScore(benchmarkScoreValue(b));
+            if (score === "--" && b && b.status && b.status !== "completed") score = statusLabel(b.status);
+            return '<td>' + esc(score) + '</td>';
+        }).join("");
+        var kingStamp = benchmarkKingTime(result);
+        var kingLabel = model.reign_number == null ? "--" : "#" + model.reign_number;
+        if (kingStamp) kingLabel += " · " + new Date(kingStamp).toISOString().slice(0, 10);
+        return '<tr><td>' + esc(kingLabel) + '</td><td title="' + esc(modelLabel) + '">' + esc(modelDisplayLabel) + '</td>' + cells + '</tr>';
+    }).join("");
+    panel.innerHTML = renderBenchmarkSparks(rows) + '<table>' + head + '<tbody>' + body + '</tbody></table>';
+}
+
+function pollBenchmarkHistory() {
+    var failures = 0;
+    var buster = Date.now();
+    BENCH_INDEX_ENDPOINTS.forEach(function(url) {
+        fetch(url + "?t=" + buster)
+            .then(function(r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(function(data) {
+                if (_benchHistoryData) return;
+                _benchHistoryData = data;
+                renderBenchmarkHistory();
+            })
+            .catch(function() {
+                failures++;
+                if (failures === BENCH_INDEX_ENDPOINTS.length) renderBenchmarkHistory();
+            });
+    });
 }
 
 async function pollBenchmarks() {
@@ -896,12 +1252,11 @@ function render(d) {
     var nPts = kingVals.length;
 
     var smoothVal = parseFloat(document.getElementById("smooth-slider").value);
-    var alpha = 1 / (1 + smoothVal * 20);
     var rawKing = kingVals.slice();
     var rawChall = challVals.slice();
     if (smoothVal > 0) {
-        kingVals = ema(kingVals, alpha);
-        challVals = ema(challVals, alpha);
+        kingVals = smoothSeries(kingVals, smoothVal);
+        challVals = smoothSeries(challVals, smoothVal);
     }
 
     var SVG = document.getElementById("chart");
@@ -928,8 +1283,9 @@ function render(d) {
         document.getElementById("chart-meta").innerHTML = "<span>--</span>";
     } else {
 
-    var allVals = kingVals.concat(challVals).concat(rawKing).concat(rawChall);
-    var sorted = allVals.slice().sort(function(a, b) { return a - b; });
+    // Focus controls the Y-axis authority; the other series remains context.
+    var scaleVals = _chartScaleFocus === "challenger" ? challVals.concat(rawChall) : kingVals.concat(rawKing);
+    var sorted = scaleVals.slice().sort(function(a, b) { return a - b; });
     var minL = sorted[0];
     var maxL = sorted[sorted.length - 1];
     if (sorted.length >= 4) {
@@ -944,7 +1300,8 @@ function render(d) {
     function toX(i) { return ML + (nPts > 1 ? (i / (nPts - 1)) * pw : pw / 2); }
     function toY(v) { return MT + ph - ((v - minL) / (maxL - minL)) * ph; }
 
-    var svg = '';
+    var clipId = "chart-clip-" + Math.round(Date.now() + Math.random() * 1000);
+    var svg = '<defs><clipPath id="' + clipId + '"><rect x="' + ML + '" y="' + MT + '" width="' + pw + '" height="' + ph + '"/></clipPath></defs>';
     var fs = Math.round(11 * dpr);
     var font = 'font-family="Space Mono,monospace" font-size="' + fs + '" fill="' + inkC + '"';
 
@@ -975,17 +1332,17 @@ function render(d) {
         for (var i = 0; i < nPts; i++) {
             rawCpts.push(toX(i).toFixed(1) + "," + toY(rawChall[i]).toFixed(1));
         }
-        svg += '<polyline points="' + rawCpts.join(" ") + '" fill="none" stroke="' + mutedC + '" stroke-width="' + (0.5*dpr) + '" stroke-dasharray="' + (2*dpr) + ' ' + (4*dpr) + '" stroke-linejoin="round" opacity="0.3"/>';
+        svg += '<polyline points="' + rawCpts.join(" ") + '" fill="none" stroke="' + mutedC + '" stroke-width="' + (0.5*dpr) + '" stroke-dasharray="' + (2*dpr) + ' ' + (4*dpr) + '" stroke-linejoin="round" opacity="0.3" clip-path="url(#' + clipId + ')"/>';
 
         var rawKpts = [];
         for (var i = 0; i < nPts; i++) {
             rawKpts.push(toX(i).toFixed(1) + "," + toY(rawKing[i]).toFixed(1));
         }
-        svg += '<polyline points="' + rawKpts.join(" ") + '" fill="none" stroke="' + inkC + '" stroke-width="' + (0.5*dpr) + '" stroke-dasharray="' + (2*dpr) + ' ' + (4*dpr) + '" stroke-linejoin="round" opacity="0.25"/>';
+        svg += '<polyline points="' + rawKpts.join(" ") + '" fill="none" stroke="' + inkC + '" stroke-width="' + (0.5*dpr) + '" stroke-dasharray="' + (2*dpr) + ' ' + (4*dpr) + '" stroke-linejoin="round" opacity="0.25" clip-path="url(#' + clipId + ')"/>';
 
         for (var i = 0; i < nPts; i++) {
-            svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(rawKing[i]).toFixed(1) + '" r="' + (1.5*dpr) + '" fill="' + inkC + '" opacity="0.2"/>';
-            svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(rawChall[i]).toFixed(1) + '" r="' + (1.5*dpr) + '" fill="' + mutedC + '" opacity="0.2"/>';
+            svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(rawKing[i]).toFixed(1) + '" r="' + (1.5*dpr) + '" fill="' + inkC + '" opacity="0.2" clip-path="url(#' + clipId + ')"/>';
+            svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(rawChall[i]).toFixed(1) + '" r="' + (1.5*dpr) + '" fill="' + mutedC + '" opacity="0.2" clip-path="url(#' + clipId + ')"/>';
         }
     }
 
@@ -994,9 +1351,9 @@ function render(d) {
     for (var i = 0; i < nPts; i++) {
         cpts.push(toX(i).toFixed(1) + "," + toY(challVals[i]).toFixed(1));
     }
-    svg += '<polyline points="' + cpts.join(" ") + '" fill="none" stroke="' + mutedC + '" stroke-width="' + (1*dpr) + '" stroke-dasharray="' + (4*dpr) + ' ' + (3*dpr) + '" stroke-linejoin="round"/>';
+    svg += '<polyline points="' + cpts.join(" ") + '" fill="none" stroke="' + mutedC + '" stroke-width="' + (1*dpr) + '" stroke-dasharray="' + (4*dpr) + ' ' + (3*dpr) + '" stroke-linejoin="round" clip-path="url(#' + clipId + ')"/>';
     for (var i = 0; i < nPts; i++) {
-        svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(challVals[i]).toFixed(1) + '" r="' + (2*dpr) + '" fill="' + mutedC + '"/>';
+        svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(challVals[i]).toFixed(1) + '" r="' + (2*dpr) + '" fill="' + mutedC + '" clip-path="url(#' + clipId + ')"/>';
     }
 
     // King line (solid black)
@@ -1004,9 +1361,9 @@ function render(d) {
     for (var i = 0; i < nPts; i++) {
         kpts.push(toX(i).toFixed(1) + "," + toY(kingVals[i]).toFixed(1));
     }
-    svg += '<polyline points="' + kpts.join(" ") + '" fill="none" stroke="' + inkC + '" stroke-width="' + (1.5*dpr) + '" stroke-linejoin="round"/>';
+    svg += '<polyline points="' + kpts.join(" ") + '" fill="none" stroke="' + inkC + '" stroke-width="' + (1.5*dpr) + '" stroke-linejoin="round" clip-path="url(#' + clipId + ')"/>';
     for (var i = 0; i < nPts; i++) {
-        svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(kingVals[i]).toFixed(1) + '" r="' + (3*dpr) + '" fill="' + inkC + '"/>';
+        svg += '<circle cx="' + toX(i).toFixed(1) + '" cy="' + toY(kingVals[i]).toFixed(1) + '" r="' + (3*dpr) + '" fill="' + inkC + '" clip-path="url(#' + clipId + ')"/>';
     }
 
     // Legend
@@ -1021,8 +1378,10 @@ function render(d) {
 
     var latestK = kingVals[nPts - 1];
     var metaLabel = isPpl ? "KING PPL" : "KING LOSS";
+    var smoothLabel = smoothVal > 0 ? (_smoothMode === "normal" ? "NORMAL" : "LOWESS") + " " + smoothVal.toFixed(2) : "OFF";
+    var scaleLabel = _chartScaleFocus === "challenger" ? "CHALLENGER" : "KING";
     document.getElementById("chart-meta").innerHTML =
-        "<span>" + metaLabel + ": " + dispVal(latestK).toFixed(4) + "</span><span>EVALS: " + nPts + "</span>";
+        "<span>" + metaLabel + ": " + dispVal(latestK).toFixed(4) + "</span><span>SCALE: " + scaleLabel + "</span><span>SMOOTH: " + smoothLabel + "</span><span>EVALS: " + nPts + "</span>";
 
     } // end chart data block
 
@@ -1348,16 +1707,51 @@ DATA_URL = loadCachedEndpoint();
         localStorage.setItem("chartMode", _chartMode);
         if (_lastData) render(_lastData);
     });
+
+    var scaleFocusToggle = document.getElementById("scale-focus-toggle");
+    function updateScaleFocusToggle() {
+        if (!scaleFocusToggle) return;
+        scaleFocusToggle.textContent = _chartScaleFocus === "challenger" ? "CHALLENGER SCALE" : "KING SCALE";
+        scaleFocusToggle.title = _chartScaleFocus === "challenger" ? "Y-axis is scaled to challenger; click for king scale" : "Y-axis is scaled to king; click for challenger scale";
+    }
+    if (scaleFocusToggle) {
+        updateScaleFocusToggle();
+        scaleFocusToggle.addEventListener("click", function() {
+            _chartScaleFocus = _chartScaleFocus === "king" ? "challenger" : "king";
+            localStorage.setItem("chartScaleFocus", _chartScaleFocus);
+            updateScaleFocusToggle();
+            if (_lastData) render(_lastData);
+        });
+    }
 })();
 
 (function initSmoothSlider() {
+    var smoothModeToggle = document.getElementById("smooth-mode-toggle");
+    function updateSmoothModeToggle() {
+        if (!smoothModeToggle) return;
+        smoothModeToggle.textContent = _smoothMode === "normal" ? "NORMAL" : "LOWESS";
+        smoothModeToggle.title = _smoothMode === "normal" ? "Normal EMA smoothing; click for LOWESS" : "LOWESS smoothing; click for normal EMA";
+    }
+    if (smoothModeToggle) {
+        updateSmoothModeToggle();
+        smoothModeToggle.addEventListener("click", function() {
+            _smoothMode = _smoothMode === "lowess" ? "normal" : "lowess";
+            localStorage.setItem("smoothMode", _smoothMode);
+            updateSmoothModeToggle();
+            if (_lastData) render(_lastData);
+        });
+    }
+
     var slider = document.getElementById("smooth-slider");
     var label = document.getElementById("smooth-val");
     var saved = localStorage.getItem("smoothing");
     if (saved != null) { slider.value = saved; }
-    label.textContent = slider.value;
+    function updateSmoothLabel() {
+        label.textContent = Number(slider.value).toFixed(2).replace(/0$/, "").replace(/\.$/, "");
+    }
+    updateSmoothLabel();
     slider.addEventListener("input", function() {
-        label.textContent = slider.value;
+        updateSmoothLabel();
         localStorage.setItem("smoothing", slider.value);
         if (_lastData) render(_lastData);
     });
@@ -1369,11 +1763,22 @@ loadDatasetManifest().then(function(manifest) {
     if (!manifest) setDatasetSummary("manifest link");
 });
 
+var benchHistoryToggle = document.getElementById("bench-history-toggle");
+if (benchHistoryToggle) {
+    benchHistoryToggle.addEventListener("click", function() {
+        _benchHistoryOpen = !_benchHistoryOpen;
+        localStorage.setItem("benchHistoryOpen", _benchHistoryOpen ? "1" : "0");
+        renderBenchmarkHistory();
+        if (_benchHistoryOpen && !_benchHistoryData) pollBenchmarkHistory();
+    });
+}
+
 poll();
 pollBenchmarks();
+pollBenchmarkHistory();
 setInterval(poll, POLL_MS);
 setInterval(function() { _lastBenchData = null; pollBenchmarks(); }, POLL_MS * 6);
-setInterval(function() { if (_lastBenchData) renderBenchmarkTimer(_lastBenchData); }, 30000);
+setInterval(function() { _benchHistoryData = null; pollBenchmarkHistory(); }, POLL_MS * 12);
 
 // Self-heal: long-lived tabs (especially mobile Safari bfcache) can keep an
 // old DOM forever. Periodically fetch the live index.html and reload if its
