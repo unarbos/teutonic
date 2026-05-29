@@ -950,7 +950,8 @@ function activeJobRows(payload) {
     });
 }
 
-function completeBenchmarkRows(payload) {
+function completeBenchmarkRows(payload, opts) {
+    opts = opts || {};
     var rows = payload && Array.isArray(payload.benchmarks) ? payload.benchmarks : [];
     var byKey = {};
     rows.forEach(function(row) {
@@ -964,7 +965,7 @@ function completeBenchmarkRows(payload) {
                 name: spec.name,
                 task: spec.task,
                 fewshot: spec.fewshot,
-                status: "running",
+                status: opts.missingStatus || "running",
                 metric: { name: null, value: null }
             };
         }
@@ -1009,35 +1010,15 @@ function renderBenchmarks(payload) {
     renderBenchmarkHistory();
 }
 
-function normalizeBenchmarkPayload(payload) {
+function normalizeBenchmarkPayload(payload, opts) {
+    opts = opts || {};
     if (!payload) return null;
     if (Array.isArray(payload.benchmarks)) return payload;
-    if (payload.latest_result && Array.isArray(payload.latest_result.benchmarks)) {
+    if (!opts.activeOnly && payload.latest_result && Array.isArray(payload.latest_result.benchmarks)) {
         return payload.latest_result;
     }
-    var activePartial = payload.active_worker_event && payload.active_worker_event.partial_results;
-    if (activePartial && Array.isArray(activePartial.benchmarks)) {
-        return {
-            status: payload.active_worker_event.status || payload.status || "running",
-            generated_at: payload.generated_at || payload.active_worker_event.updated_at || activePartial.generated_at,
-            started_at: activePartial.started_at,
-            finished_at: activePartial.finished_at,
-            model: payload.active_worker_event.model || activePartial.model || (payload.active_job && payload.active_job.model),
-            totals: activePartial.totals,
-            benchmarks: activePartial.benchmarks
-        };
-    }
-    if (payload.active_job && payload.active_job.model) {
-        return {
-            status: payload.status || "running",
-            generated_at: payload.generated_at,
-            model: payload.active_job.model,
-            totals: { requested: (payload.active_job.benchmarks || []).length || BENCHMARK_ORDER.length, completed: 0, completed_no_metric: 0, failed: 0 },
-            benchmarks: activeJobRows(payload)
-        };
-    }
     var partial = payload.worker_event && payload.worker_event.partial_results;
-    if (partial && Array.isArray(partial.benchmarks)) {
+    if (!opts.activeOnly && partial && Array.isArray(partial.benchmarks)) {
         return {
             status: payload.status || payload.worker_event.status || "running",
             generated_at: payload.generated_at || payload.worker_event.updated_at || partial.generated_at,
@@ -1047,6 +1028,31 @@ function normalizeBenchmarkPayload(payload) {
             totals: partial.totals,
             benchmarks: partial.benchmarks
         };
+    }
+    if (opts.includeActive) {
+        var activePartial = payload.active_worker_event && payload.active_worker_event.partial_results;
+        if (activePartial && Array.isArray(activePartial.benchmarks)) {
+            return {
+                status: payload.active_worker_event.status || payload.status || "running",
+                generated_at: payload.generated_at || payload.active_worker_event.updated_at || activePartial.generated_at,
+                started_at: activePartial.started_at,
+                finished_at: activePartial.finished_at,
+                model: payload.active_worker_event.model || activePartial.model || (payload.active_job && payload.active_job.model),
+                totals: activePartial.totals,
+                benchmarks: activePartial.benchmarks,
+                is_active: true
+            };
+        }
+        if (payload.active_job && payload.active_job.model) {
+            return {
+                status: payload.status || "running",
+                generated_at: payload.generated_at,
+                model: payload.active_job.model,
+                totals: { requested: (payload.active_job.benchmarks || []).length || BENCHMARK_ORDER.length, completed: 0, completed_no_metric: 0, failed: 0 },
+                benchmarks: activeJobRows(payload),
+                is_active: true
+            };
+        }
     }
     return null;
 }
@@ -1096,7 +1102,7 @@ function benchmarkHistoryRows() {
         rows.push(result);
     }
     addResult(normalizeBenchmarkPayload(_lastBenchData));
-    addResult(normalizeBenchmarkPayload({ active_job: _lastBenchData && _lastBenchData.active_job, active_worker_event: _lastBenchData && _lastBenchData.active_worker_event, status: _lastBenchData && _lastBenchData.status, generated_at: _lastBenchData && _lastBenchData.generated_at }));
+    addResult(normalizeBenchmarkPayload(_lastBenchData, { activeOnly: true, includeActive: true }));
     var kings = _benchHistoryData && _benchHistoryData.kings ? _benchHistoryData.kings : {};
     Object.keys(kings).forEach(function(key) { addResult(kings[key].latest_result); });
     rows.sort(function(a, b) {
@@ -1116,7 +1122,7 @@ function renderBenchmarkSparks(rows) {
     var cards = BENCHMARK_ORDER.map(function(spec) {
         var points = [];
         ordered.forEach(function(result) {
-            var benchRows = completeBenchmarkRows(result);
+            var benchRows = completeBenchmarkRows(result, { missingStatus: result.is_active ? "running" : "missing" });
             var row = null;
             benchRows.forEach(function(b) {
                 if (benchmarkKey(b.name) === benchmarkKey(spec.name)) row = b;
@@ -1192,13 +1198,13 @@ function renderBenchmarkHistory() {
         var model = result.model || {};
         var modelLabel = benchmarkModelLabel(model);
         var modelDisplayLabel = benchmarkModelDisplayLabel(model);
-        var benchRows = completeBenchmarkRows(result);
+        var benchRows = completeBenchmarkRows(result, { missingStatus: result.is_active ? "running" : "missing" });
         var byName = {};
         benchRows.forEach(function(b) { byName[benchmarkKey(b.name)] = b; });
         var cells = BENCHMARK_ORDER.map(function(spec) {
             var b = byName[benchmarkKey(spec.name)];
             var score = formatBenchScore(benchmarkScoreValue(b));
-            if (score === "--" && b && b.status && b.status !== "completed") score = statusLabel(b.status);
+            if (score === "--" && b && b.status && b.status !== "completed" && b.status !== "missing") score = statusLabel(b.status);
             return '<td>' + esc(score) + '</td>';
         }).join("");
         var kingStamp = benchmarkKingTime(result);
