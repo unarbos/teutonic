@@ -105,8 +105,8 @@ DS_SECRET_KEY = os.environ.get("TEUTONIC_DS_SECRET_KEY", "")
 
 TMC_API_KEY = os.environ.get("TMC_API_KEY", "")
 
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
-DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
+DISCORD_BOT_TOKEN = ""#os.environ.get("DISCORD_BOT_TOKEN", "")
+DISCORD_CHANNEL_ID = ""#os.environ.get("DISCORD_CHANNEL_ID", "")
 
 # Anti-impersonation: miners must include the first N ss58 chars of their
 # coldkey somewhere in their Hippius repo name. Two miners trying to claim the

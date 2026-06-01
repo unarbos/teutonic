@@ -929,6 +929,32 @@ function benchmarkModelDisplayLabel(model) {
         .replace(/@(hf:)([0-9a-f]{10})[0-9a-f]{20,}/i, "@$1$2...");
 }
 
+function benchmarkResultKey(result) {
+    result = result || {};
+    var model = result.model || {};
+    return model.king_id || result.job_id || model.model_repo || model.repo_id || "";
+}
+
+function mergeBenchmarkResults(existing, incoming) {
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+    var merged = Object.assign({}, existing, incoming);
+    merged.model = Object.assign({}, existing.model || {}, incoming.model || {});
+    var byKey = {};
+    function put(row) {
+        if (!row) return;
+        var copy = Object.assign({}, row);
+        byKey[benchmarkKey(copy.name)] = copy;
+        byKey[benchmarkKey(copy.task)] = copy;
+    }
+    (existing.benchmarks || []).forEach(put);
+    (incoming.benchmarks || []).forEach(put);
+    merged.benchmarks = BENCHMARK_ORDER.map(function(spec) {
+        return byKey[benchmarkKey(spec.name)] || byKey[benchmarkKey(spec.task)];
+    }).filter(Boolean);
+    return merged;
+}
+
 function statusLabel(status) {
     if (status === "running" || status === "pending") return "in progress";
     if (status === "completed_no_metric") return "no metric";
@@ -1032,14 +1058,18 @@ function normalizeBenchmarkPayload(payload, opts) {
     if (opts.includeActive) {
         var activePartial = payload.active_worker_event && payload.active_worker_event.partial_results;
         if (activePartial && Array.isArray(activePartial.benchmarks)) {
+            var activeRows = activePartial.benchmarks;
+            if (!activeRows.length && payload.active_job && payload.active_job.model) {
+                activeRows = activeJobRows(payload);
+            }
             return {
                 status: payload.active_worker_event.status || payload.status || "running",
                 generated_at: payload.generated_at || payload.active_worker_event.updated_at || activePartial.generated_at,
                 started_at: activePartial.started_at,
                 finished_at: activePartial.finished_at,
                 model: payload.active_worker_event.model || activePartial.model || (payload.active_job && payload.active_job.model),
-                totals: activePartial.totals,
-                benchmarks: activePartial.benchmarks,
+                totals: activePartial.totals || { requested: activeRows.length, completed: 0, completed_no_metric: 0, failed: 0 },
+                benchmarks: activeRows,
                 is_active: true
             };
         }
@@ -1095,10 +1125,12 @@ function benchmarkHistoryRows() {
     var seen = {};
     function addResult(result) {
         if (!result || !Array.isArray(result.benchmarks)) return;
-        var model = result.model || {};
-        var key = model.king_id || result.job_id || model.model_repo || String(rows.length);
-        if (seen[key]) return;
-        seen[key] = true;
+        var key = benchmarkResultKey(result) || String(rows.length);
+        if (seen[key] != null) {
+            rows[seen[key]] = mergeBenchmarkResults(rows[seen[key]], result);
+            return;
+        }
+        seen[key] = rows.length;
         rows.push(result);
     }
     addResult(normalizeBenchmarkPayload(_lastBenchData));
@@ -1122,7 +1154,7 @@ function renderBenchmarkSparks(rows) {
     var cards = BENCHMARK_ORDER.map(function(spec) {
         var points = [];
         ordered.forEach(function(result) {
-            var benchRows = completeBenchmarkRows(result, { missingStatus: result.is_active ? "running" : "missing" });
+            var benchRows = completeBenchmarkRows(result, { missingStatus: "not_run" });
             var row = null;
             benchRows.forEach(function(b) {
                 if (benchmarkKey(b.name) === benchmarkKey(spec.name)) row = b;
@@ -1198,13 +1230,13 @@ function renderBenchmarkHistory() {
         var model = result.model || {};
         var modelLabel = benchmarkModelLabel(model);
         var modelDisplayLabel = benchmarkModelDisplayLabel(model);
-        var benchRows = completeBenchmarkRows(result, { missingStatus: result.is_active ? "running" : "missing" });
+        var benchRows = completeBenchmarkRows(result, { missingStatus: "not_run" });
         var byName = {};
         benchRows.forEach(function(b) { byName[benchmarkKey(b.name)] = b; });
         var cells = BENCHMARK_ORDER.map(function(spec) {
             var b = byName[benchmarkKey(spec.name)];
             var score = formatBenchScore(benchmarkScoreValue(b));
-            if (score === "--" && b && b.status && b.status !== "completed" && b.status !== "missing") score = statusLabel(b.status);
+            if (score === "--" && b && b.status && b.status !== "completed" && b.status !== "not_run") score = statusLabel(b.status);
             return '<td>' + esc(score) + '</td>';
         }).join("");
         var kingStamp = benchmarkKingTime(result);

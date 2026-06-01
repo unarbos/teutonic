@@ -198,26 +198,84 @@ class ControllerState:
         self.save()
         self.store.write_latest(self.latest_payload(status=payload.get("status", "running"), current_job=self.state.get("current_job"), worker_event=payload))
 
+    def result_totals(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        return {
+            "requested": len(rows),
+            "completed": sum(1 for row in rows if row.get("status") == "completed"),
+            "completed_no_metric": sum(1 for row in rows if row.get("status") == "completed_no_metric"),
+            "failed": sum(1 for row in rows if row.get("status") == "failed"),
+            "missing": sum(1 for row in rows if row.get("status") == "missing"),
+            "running": sum(1 for row in rows if row.get("status") == "running"),
+            "pending": sum(1 for row in rows if row.get("status") == "pending"),
+        }
+
+    def overall_status(self, current_status: str | None, rows: list[dict[str, Any]]) -> str | None:
+        by_name = {row.get("name"): row.get("status") for row in rows if row.get("name")}
+        desired = list(self.args.benchmarks)
+        if any(by_name.get(name) == "failed" for name in desired):
+            return "failed"
+        if desired and all(by_name.get(name) in {"completed", "missing"} for name in desired):
+            return "missing" if any(by_name.get(name) == "missing" for name in desired) else "completed"
+        return current_status
+
+    def merge_result_rows(self, king_id: str | None, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        existing = self.result_for_king(king_id)
+        merged: dict[str, dict[str, Any]] = {}
+        if isinstance(existing, dict):
+            for row in existing.get("benchmarks") or []:
+                if isinstance(row, dict) and row.get("name"):
+                    merged[row["name"]] = dict(row)
+        for row in rows:
+            if row.get("name"):
+                merged[row["name"]] = dict(row)
+        order = list(self.args.benchmarks)
+        ordered = [merged.pop(name) for name in order if name in merged]
+        ordered.extend(merged.values())
+        return ordered
+
+    def normalize_finished_result(self, payload: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]], dict[str, int] | None]:
+        results = payload.get("results") or {}
+        rows = [dict(row) for row in (results.get("benchmarks") or []) if isinstance(row, dict)]
+        status = payload.get("status")
+        artifacts = payload.get("artifacts") or {}
+        remote_log = str(artifacts.get("remote_log") or "").lower()
+        is_download_failure = (status == "failed" and "download" in remote_log and rows and all((row.get("status") or "failed") == "failed" for row in rows))
+        if status == "missing" or is_download_failure:
+            status = "missing"
+            for row in rows:
+                row["status"] = "missing"
+                row.setdefault("metric", {"name": None, "value": None})
+                row.setdefault("error_type", "model_missing")
+                row.setdefault("message", "model snapshot/download unavailable")
+        if not rows:
+            return status, rows, results.get("totals")
+        model = payload.get("model") or {}
+        rows = self.merge_result_rows(model.get("king_id") or payload.get("job_id"), rows)
+        totals = self.result_totals(rows)
+        status = self.overall_status(status, rows)
+        return status, rows, totals
+
     def handle_result(self, payload: dict[str, Any]) -> None:
         model = payload.get("model") or {}
         king_id = model.get("king_id") or payload.get("job_id")
+        status, rows, totals = self.normalize_finished_result(payload)
         result_payload = {
             "schema_version": "teutonic-king-benchmark-result.v1",
             "generated_at": utcnow_iso(),
             "job_id": payload.get("job_id"),
-            "status": payload.get("status"),
+            "status": status,
             "model": model,
-            "benchmarks": (payload.get("results") or {}).get("benchmarks", []),
-            "totals": (payload.get("results") or {}).get("totals"),
+            "benchmarks": rows,
+            "totals": totals,
             "started_at": payload.get("started_at"),
             "finished_at": payload.get("finished_at"),
             "worker_artifacts": payload.get("artifacts"),
         }
         self.store.write_result(king_id, result_payload)
         index = self.store.load_index()
-        index.setdefault("kings", {})[king_id] = {"model": model, "status": payload.get("status"), "updated_at": utcnow_iso(), "result_s3": f"s3://{self.store.bucket}/{self.store.result_key(king_id)}", "latest_result": result_payload}
+        index.setdefault("kings", {})[king_id] = {"model": model, "status": status, "updated_at": utcnow_iso(), "result_s3": f"s3://{self.store.bucket}/{self.store.result_key(king_id)}", "latest_result": result_payload}
         self.store.write_index(index)
-        self.store.write_latest(self.latest_payload(status=payload.get("status"), current_job=self.state.get("current_job"), result_payload=result_payload))
+        self.store.write_latest(self.latest_payload(status=status, current_job=self.state.get("current_job"), result_payload=result_payload))
         self.store.append_history(result_payload)
         self.state.update({"status": "idle", "last_result": result_payload, "current_job": None})
         self.save()

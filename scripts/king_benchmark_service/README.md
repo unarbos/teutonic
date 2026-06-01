@@ -22,6 +22,17 @@ The all-kings service intentionally writes under a separate prefix so it does no
 
 The fixed H100 worker defaults to `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`, `TEUTONIC_KING_BENCH_DEVICE=auto`, and `TEUTONIC_KING_BENCH_MODEL_ARGS_EXTRA=device_map=auto`. This avoids forcing `lm-eval` onto `cuda:0` and lets the HuggingFace backend shard the model across all visible GPUs.
 
+## Model Resolution
+
+Before a king is labeled `missing`, the evaluator tries multiple sources in order:
+
+- Hippius model-index API metadata.
+- Hippius registry by pinned digest, even if the API detail endpoint is missing.
+- Docker/OCI extraction from `registry.hippius.com/<repo>@sha256:...` when the Python Hippius downloader cannot fetch the artifact.
+- Hugging Face fallback by exact model-name search, plus optional `TEUTONIC_KING_BENCH_HF_FALLBACK_REPOS` / `TEUTONIC_KING_BENCH_HF_FALLBACK_ORGS` overrides.
+
+The HF owner is not hardcoded; for example, `shallowtensr/...` is discovered by exact model-name search when it exists.
+
 ## Caching
 
 The worker keeps reusable caches under `/root/teutonic/cache` by default:
@@ -57,6 +68,8 @@ Worker, on the remote benchmark host:
 
 ```bash
 cd /root/teutonic/king-benchmark-worker
+# Optional local-only secrets file, chmod 600, never committed:
+# printf 'HF_TOKEN=...\n' > .worker.secrets.env
 export TEUTONIC_KING_BENCH_WORKER_TOKEN='...'
 export TEUTONIC_KING_BENCH_CONTROLLER_TOKEN="$TEUTONIC_KING_BENCH_WORKER_TOKEN"
 export TEUTONIC_KING_BENCH_CONTROLLER_URL='http://YOUR_CONTROLLER_HOST_OR_TUNNEL:32100'

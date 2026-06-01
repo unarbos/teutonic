@@ -1,6 +1,7 @@
 // PM2 worker for the fixed GPU host. This host only receives a scoped API token.
 // It does not need Hippius S3 or Doppler credentials.
 
+const fs = require("fs");
 const path = require("path");
 const workerRoot = process.env.TEUTONIC_WORKER_ROOT || "/root/teutonic/king-benchmark-worker";
 const cacheRoot = process.env.TEUTONIC_KING_BENCH_CACHE_ROOT || "/root/teutonic/cache";
@@ -12,6 +13,27 @@ function envOr(key, fallback) {
     ? process.env[key]
     : fallback;
 }
+
+function loadLocalSecrets(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const idx = trimmed.indexOf("=");
+      if (idx <= 0) continue;
+      const key = trimmed.slice(0, idx).trim();
+      const value = trimmed.slice(idx + 1).trim();
+      if (process.env[key] == null || process.env[key] === "") {
+        process.env[key] = value;
+      }
+    }
+  } catch (_) {
+    // Optional local-only secrets file. Do not commit it.
+  }
+}
+
+loadLocalSecrets(path.join(workerRoot, ".worker.secrets.env"));
 
 module.exports = {
   apps: [{
@@ -30,6 +52,8 @@ module.exports = {
       TOKENIZERS_PARALLELISM: "false",
       CUDA_VISIBLE_DEVICES: envOr("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7"),
       HF_HUB_ENABLE_HF_TRANSFER: "1",
+      HF_TOKEN: envOr("HF_TOKEN", ""),
+      HUGGING_FACE_HUB_TOKEN: envOr("HUGGING_FACE_HUB_TOKEN", envOr("HF_TOKEN", "")),
       HF_XET_HIGH_PERFORMANCE: envOr("HF_XET_HIGH_PERFORMANCE", "1"),
       XDG_CACHE_HOME: envOr("XDG_CACHE_HOME", path.join(cacheRoot, "xdg")),
       HF_HOME: envOr("HF_HOME", path.join(cacheRoot, "huggingface")),

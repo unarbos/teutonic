@@ -157,4 +157,5 @@ def benchmark_statuses(payload: dict[str, Any] | None) -> dict[str, str]:
 
 def missing_benchmarks(result_payload: dict[str, Any] | None, desired: list[str]) -> list[str]:
     statuses = benchmark_statuses(result_payload)
-    return [name for name in desired if statuses.get(name) != "completed"]
+    terminal = {"completed", "missing"}
+    return [name for name in desired if statuses.get(name) not in terminal]

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import select
+import signal
 import shlex
 import subprocess
 import sys
@@ -131,6 +132,50 @@ def compact_gpu_snapshot(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return default
+
+
+def gpu_snapshot_is_idle(snapshot: dict[str, Any], util_threshold: int) -> bool:
+    gpus = snapshot.get("gpus") or []
+    if not gpus:
+        return False
+    for gpu in gpus:
+        try:
+            util = int(float(str(gpu.get("utilization_gpu_pct") or "0")))
+        except ValueError:
+            return False
+        if util > util_threshold:
+            return False
+    return True
+
+
+def terminate_process_group(proc: subprocess.Popen[Any], *, grace_s: int = 20) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception:
+        proc.terminate()
+    try:
+        proc.wait(timeout=max(1, grace_s))
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except Exception:
+        proc.kill()
+
+
 def pm2_event(event: str, payload: dict[str, Any]) -> None:
     print(json.dumps({"at": utcnow_iso(), "event": event, **payload}, sort_keys=False), flush=True)
 
@@ -236,6 +281,36 @@ def read_child_benchmark(bench: str, child_std: Path, returncode: int, wall_time
     return row
 
 
+def missing_model_rows(benchmarks: list[str], log_path: Path, returncode: int) -> dict[str, dict[str, Any]]:
+    return {
+        bench: {
+            "name": bench,
+            "status": "missing",
+            "metric": {"name": None, "value": None},
+            "worker_log": str(log_path),
+            "returncode": returncode,
+            "error_type": "model_missing",
+            "message": "model snapshot/download unavailable",
+        }
+        for bench in benchmarks
+    }
+
+
+def log_indicates_missing_model(log_path: Path) -> bool:
+    try:
+        text = log_path.read_text(errors="replace")[-50000:].lower()
+    except Exception:
+        return False
+    needles = (
+        "404 not found",
+        "model not found",
+        "repository not found",
+        "no indexed artifacts found",
+        "failed and hugging face fallbacks also failed",
+    )
+    return any(needle in text for needle in needles)
+
+
 def write_combined_results(
     *,
     path: Path,
@@ -265,6 +340,7 @@ def write_combined_results(
         "completed": sum(1 for row in rows if row.get("status") == "completed"),
         "completed_no_metric": sum(1 for row in rows if row.get("status") == "completed_no_metric"),
         "failed": sum(1 for row in rows if row.get("status") == "failed"),
+        "missing": sum(1 for row in rows if row.get("status") == "missing"),
         "running": sum(1 for row in rows if row.get("status") == "running"),
         "pending": sum(1 for row in rows if row.get("status") == "pending"),
     }
@@ -361,13 +437,13 @@ def run_hybrid_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
             started_at=started_at,
             finished_at=utcnow_iso(),
             benchmarks=benchmarks,
-            completed_rows={bench: {"name": bench, "status": "failed", "worker_log": str(download_log), "returncode": proc.returncode} for bench in benchmarks},
+            completed_rows=missing_model_rows(benchmarks, download_log, proc.returncode),
             active={},
             pending=[],
             mode="hybrid-per-gpu-then-mmlu-pro-accelerate",
             gpu_ids=gpu_ids,
         )
-        return {"returncode": proc.returncode, "results": results, "artifacts": {"remote_run_dir": str(run_dir), "remote_log": str(download_log)}}
+        return {"returncode": 0, "status": "missing", "results": results, "artifacts": {"remote_run_dir": str(run_dir), "remote_log": str(download_log)}}
 
     download_payload = read_json(download_std, {}) or {}
     model_payload = download_payload.get("model") if isinstance(download_payload, dict) else None
@@ -585,13 +661,13 @@ def run_parallel_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
             started_at=started_at,
             finished_at=utcnow_iso(),
             benchmarks=benchmarks,
-            completed_rows={bench: {"name": bench, "status": "failed", "worker_log": str(download_log), "returncode": proc.returncode} for bench in benchmarks},
+            completed_rows=missing_model_rows(benchmarks, download_log, proc.returncode),
             active={},
             pending=[],
             mode="parallel-per-gpu",
             gpu_ids=gpu_ids,
         )
-        return {"returncode": proc.returncode, "results": results, "artifacts": {"remote_run_dir": str(run_dir), "remote_log": str(download_log)}}
+        return {"returncode": 0, "status": "missing", "results": results, "artifacts": {"remote_run_dir": str(run_dir), "remote_log": str(download_log)}}
 
     download_payload = read_json(download_std, {}) or {}
     model_payload = download_payload.get("model") if isinstance(download_payload, dict) else None
@@ -733,6 +809,8 @@ def run_sequential_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any
     log_event(job_root, "job_subprocess_starting", {"mode": mode, "cmd": quote_cmd(cmd), "log": str(log_path), "gpu": compact_gpu_snapshot(start_snapshot)})
     returncode = 1
     progress_interval = int(job.get("progress_interval_s") or os.environ.get("TEUTONIC_WORKER_PROGRESS_INTERVAL_S", "60"))
+    stall_timeout_s = env_int("TEUTONIC_KING_BENCH_STALL_TIMEOUT_S", 1800)
+    stall_gpu_util_threshold = env_int("TEUTONIC_KING_BENCH_STALL_GPU_UTIL_THRESHOLD", 0)
     with log_path.open("a") as log:
         log.write("# mode=" + mode + "\n")
         log.write("# gpu_snapshot_start=" + json.dumps(start_snapshot, sort_keys=False) + "\n")
@@ -750,8 +828,12 @@ def run_sequential_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any
             cwd=str(state.root),
             env=env,
             bufsize=1,
+            start_new_session=True,
         )
         last_progress = 0.0
+        last_output = time.time()
+        stalled = False
+        stall_reason = None
         stdout = proc.stdout
         while proc.poll() is None:
             if stdout is not None:
@@ -759,6 +841,7 @@ def run_sequential_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any
                 if ready:
                     line = stdout.readline()
                     if line:
+                        last_output = time.time()
                         log.write(line)
                         log.flush()
                         print(f"[eval:{job_id}] {line.rstrip()}", flush=True)
@@ -790,16 +873,45 @@ def run_sequential_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any
                     "totals": payload.get("totals") if isinstance(payload, dict) else None,
                     "gpu": compact_gpu_snapshot(snapshot),
                     "remote_log": str(log_path),
+                    "idle_s": round(now - last_output, 1),
                 })
+                if stall_timeout_s > 0 and now - last_output >= stall_timeout_s and gpu_snapshot_is_idle(snapshot, stall_gpu_util_threshold):
+                    stalled = True
+                    stall_reason = f"no subprocess output for {int(now - last_output)}s and all GPUs <= {stall_gpu_util_threshold}% util"
+                    log.write(f"# stall_watchdog={stall_reason}\n")
+                    log.flush()
+                    log_event(job_root, "job_stall_watchdog", {"mode": mode, "pid": proc.pid, "idle_s": round(now - last_output, 1), "gpu": compact_gpu_snapshot(snapshot), "reason": stall_reason})
+                    terminate_process_group(proc)
+                    break
         if stdout is not None:
             for line in stdout:
                 log.write(line)
                 log.flush()
                 print(f"[eval:{job_id}] {line.rstrip()}", flush=True)
-        returncode = proc.returncode or 0
+        returncode = 124 if stalled else (proc.returncode or 0)
         finish_snapshot = gpu_snapshot()
+        if stalled:
+            log.write("# stalled=" + json.dumps({"reason": stall_reason, "returncode": returncode}, sort_keys=False) + "\n")
         log.write("# gpu_snapshot_finish=" + json.dumps(finish_snapshot, sort_keys=False) + "\n")
     results = read_json(run_dir / "standardized_results.json", {}) or {}
+    if returncode != 0 and not (results.get("benchmarks") if isinstance(results, dict) else None) and log_indicates_missing_model(log_path):
+        results = write_combined_results(
+            path=run_dir / "standardized_results.json",
+            job_id=job_id,
+            model=model,
+            model_payload=model,
+            run_dir=run_dir,
+            started_at=utcnow_iso(),
+            finished_at=utcnow_iso(),
+            benchmarks=benchmarks,
+            completed_rows=missing_model_rows(benchmarks, log_path, returncode),
+            active={},
+            pending=[],
+            mode=mode,
+            gpu_ids=split_csv(os.environ.get("CUDA_VISIBLE_DEVICES"), [str(i) for i in range(8)]),
+        )
+        log_event(job_root, "job_missing_model", {"mode": mode, "returncode": returncode, "log": str(log_path), "totals": results.get("totals")})
+        return {"returncode": 0, "status": "missing", "results": results, "artifacts": {"remote_run_dir": str(run_dir), "remote_log": str(log_path), "gpu_snapshots": str(job_root / "gpu_snapshots.jsonl"), "worker_events": str(job_root / "worker_events.jsonl")}}
     log_event(job_root, "job_subprocess_finished", {"mode": mode, "returncode": returncode, "log": str(log_path), "totals": results.get("totals"), "gpu": compact_gpu_snapshot(gpu_snapshot())})
     return {"returncode": returncode, "results": results, "artifacts": {"remote_run_dir": str(run_dir), "remote_log": str(log_path), "gpu_snapshots": str(job_root / "gpu_snapshots.jsonl"), "worker_events": str(job_root / "worker_events.jsonl")}}
 
@@ -829,9 +941,10 @@ def run_job(state: WorkerState, job: dict[str, Any]) -> None:
         log_event(job_root, "job_exception", {"error": repr(exc)})
 
     finished_at = utcnow_iso()
+    result_status = result.get("status") or ("completed" if returncode == 0 else "failed")
     final = {
         "event": "job_finished",
-        "status": "completed" if returncode == 0 else "failed",
+        "status": result_status,
         "job_id": job_id,
         "model": model,
         "benchmarks": benchmarks,
