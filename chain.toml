@@ -21,7 +21,6 @@ extra_lock_keys = [
   "attention_bias",
   "attention_dropout",
   "attn_output_gate",
-  "bos_token_id",
   "eos_token_id",
   "full_attention_interval",
   "linear_conv_kernel_dim",
