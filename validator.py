@@ -11,9 +11,11 @@ import json
 import logging
 import os
 import signal
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import bittensor as bt
 import boto3
@@ -29,10 +31,10 @@ if _repo_root not in sys.path:
 
 # Register the active vendored arch with AutoConfig / AutoModelForCausalLM so
 # downstream transformers dispatch (config inspection, model loading) resolves the
-# king checkpoint without trust_remote_code. The seed checkpoint strips
-# auto_map and we deny *.py uploads in validate_challenger_config; loading the
-# arch here is what makes that policy actually workable. The arch module is
-# selected by chain.toml -> [arch].module.
+# king checkpoint without trust_remote_code. Most chains still reject auto_map
+# and *.py uploads; the Quasar competition has a narrow hash-checked exception
+# in validate_challenger_config for the two required local code files. The arch
+# module is selected by chain.toml -> [arch].module.
 import chain_config  # noqa: E402
 from model_store import (  # noqa: E402
     DIGEST_RE,
@@ -43,6 +45,7 @@ from model_store import (  # noqa: E402
     parse_reveal_v4,
     parse_reveal_v3,
     snapshot_size,
+    _resolve_hub_token,
 )
 from startup_policy import should_seed_king  # noqa: E402
 
@@ -92,6 +95,8 @@ R2_ENDPOINT = os.environ.get("TEUTONIC_R2_ENDPOINT", "")
 R2_BUCKET = os.environ.get("TEUTONIC_R2_BUCKET", "")
 R2_ACCESS_KEY = os.environ.get("TEUTONIC_R2_ACCESS_KEY", "")
 R2_SECRET_KEY = os.environ.get("TEUTONIC_R2_SECRET_KEY", "")
+R2_DRY_RUN = os.environ.get("TEUTONIC_R2_DRY_RUN", "").lower() in ("1", "true", "yes", "on")
+SIDE_EFFECT_DRY_RUN = os.environ.get("TEUTONIC_SIDE_EFFECT_DRY_RUN", "").lower() in ("1", "true", "yes", "on")
 
 HIPPIUS_ENDPOINT = os.environ.get("TEUTONIC_HIPPIUS_ENDPOINT", "https://s3.hippius.com")
 HIPPIUS_BUCKET = os.environ.get("TEUTONIC_HIPPIUS_BUCKET", "teutonic-sn3")
@@ -105,8 +110,8 @@ DS_SECRET_KEY = os.environ.get("TEUTONIC_DS_SECRET_KEY", "")
 
 TMC_API_KEY = os.environ.get("TMC_API_KEY", "")
 
-DISCORD_BOT_TOKEN = ""#os.environ.get("DISCORD_BOT_TOKEN", "")
-DISCORD_CHANNEL_ID = ""#os.environ.get("DISCORD_CHANNEL_ID", "")
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
 # Anti-impersonation: miners must include the first N ss58 chars of their
 # coldkey somewhere in their Hippius repo name. Two miners trying to claim the
@@ -116,6 +121,27 @@ DISCORD_CHANNEL_ID = ""#os.environ.get("DISCORD_CHANNEL_ID", "")
 # namespace must contain the prefix; case-insensitive substring check.)
 # 8 chars of ss58 ≈ 40 bits of entropy after the universal "5" prefix.
 COLDKEY_PREFIX_LEN = int(os.environ.get("TEUTONIC_COLDKEY_PREFIX_LEN", "8"))
+
+# Production-safe exception for the Quasar competition. Most chains keep the
+# old policy: no auto_map and no Python files in challenger repos. Quasar
+# Qwen3.5 snapshots are self-contained, so they need two local code files.
+# They are accepted only when they are byte-for-byte identical to the current
+# king's code files and auto_map points exactly at those local classes.
+CUSTOM_CODE_POLICY = os.environ.get("TEUTONIC_CUSTOM_CODE_POLICY", "").strip().lower()
+QUASAR_CODE_POLICY_ENV = os.environ.get("TEUTONIC_ALLOW_QUASAR_CUSTOM_CODE", "").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+QUASAR_ALLOWED_CODE_FILES = {
+    "configuration_qwen3_5.py",
+    "modeling_qwen3_5.py",
+}
+QUASAR_EXPECTED_AUTO_MAP = {
+    "AutoConfig": "configuration_qwen3_5.QuasarConfig",
+    "AutoModelForCausalLM": "modeling_qwen3_5.QuasarForCausalLM",
+}
 
 # Trainability and reparam-symmetry defenses run on the eval server's /eval
 # (validate_challenger_sanity + the on-GPU trainability_probe); see DESIGN.md
@@ -227,6 +253,9 @@ async def fetch_tmc_data() -> dict | None:
 
 async def notify_new_king(king_info: dict, verdict: dict | None = None):
     """Post a message to Discord when a new king is crowned."""
+    if SIDE_EFFECT_DRY_RUN:
+        log.info("side-effect dry-run: skipping Discord new-king notification")
+        return
     if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
         return
     repo = king_info.get("model_repo", "?")
@@ -341,6 +370,9 @@ class R2:
         )
 
     def _put_dashboard_bytes(self, key, body, content_type, cache_control=None):
+        if R2_DRY_RUN:
+            log.info("R2 dry-run: skip dashboard put %s (%d bytes)", key, len(body))
+            return
         extra = {"CacheControl": cache_control} if cache_control else {}
         if self._hippius_available():
             try:
@@ -374,6 +406,13 @@ class R2:
         self._put_dashboard_bytes(key, body, content_type, cache_control=cache_control)
 
     def put(self, key, data):
+        if R2_DRY_RUN:
+            try:
+                size = len(json.dumps(data, default=str).encode())
+            except Exception:
+                size = -1
+            log.info("R2 dry-run: skip put %s (%d bytes)", key, size)
+            return
         try:
             self.client.put_object(
                 Bucket=R2_BUCKET, Key=key,
@@ -410,6 +449,7 @@ class R2:
 
 _king_config: dict | None = None
 _king_config_key: str | None = None
+_code_hash_cache: dict[tuple[str, str, tuple[str, ...]], dict[str, str]] = {}
 
 
 def get_king_config(king_repo: str, king_digest: str = ""):
@@ -430,6 +470,159 @@ def get_king_config(king_repo: str, king_digest: str = ""):
         _king_config = {}
         _king_config_key = cache_key
     return _king_config
+
+
+def _quasar_custom_code_allowed(king_cfg: dict, challenger_cfg: dict) -> bool:
+    if QUASAR_CODE_POLICY_ENV or CUSTOM_CODE_POLICY in {"quasar", "quasar_qwen3_5"}:
+        return True
+    if chain_config.ARCH_MODULE.endswith(".quasar"):
+        return True
+    return (
+        king_cfg.get("model_type") == "quasar_text"
+        or challenger_cfg.get("model_type") == "quasar_text"
+    )
+
+
+def _validate_quasar_auto_map(auto_map: dict | None) -> str | None:
+    if not isinstance(auto_map, dict):
+        return "quasar config must provide auto_map"
+    if set(auto_map) != set(QUASAR_EXPECTED_AUTO_MAP):
+        return (
+            "quasar auto_map keys mismatch: "
+            f"expected={sorted(QUASAR_EXPECTED_AUTO_MAP)} got={sorted(auto_map)}"
+        )
+    for key, expected in QUASAR_EXPECTED_AUTO_MAP.items():
+        value = auto_map.get(key)
+        if value != expected:
+            return f"quasar auto_map[{key!r}] mismatch: expected={expected!r} got={value!r}"
+        module = expected.rsplit(".", 1)[0]
+        if "--" in module or "/" in module:
+            return f"quasar auto_map[{key!r}] must be local, got {value!r}"
+    return None
+
+
+def _code_cache_dir(ref: ModelRef, files: set[str]) -> Path:
+    digest = (ref.digest or "latest").replace(":", "-")
+    material = f"{ref.repo}@{digest}|{','.join(sorted(files))}".encode()
+    suffix = hashlib.sha256(material).hexdigest()[:16]
+    return Path(os.environ.get("TEUTONIC_CODE_CACHE_DIR", "/tmp/teutonic/validator_code")) / (
+        ref.repo.replace("/", "--") + "--" + digest + "--" + suffix
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _download_code_files(ref: ModelRef, files: set[str]) -> Path:
+    target = _code_cache_dir(ref, files)
+    if all((target / name).exists() for name in files):
+        return target
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+
+    allow_patterns = sorted(files)
+    if ref.digest.startswith("hf:"):
+        from huggingface_hub import snapshot_download as hf_snapshot_download
+
+        hf_snapshot_download(
+            repo_id=ref.repo,
+            revision=ref.digest[3:],
+            local_dir=str(target),
+            allow_patterns=allow_patterns,
+            max_workers=4,
+            token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
+        )
+    else:
+        from hippius_hub import snapshot_download
+
+        snapshot_download(
+            repo_id=ref.repo,
+            revision=ref.digest,
+            local_dir=str(target),
+            allow_patterns=allow_patterns,
+            max_workers=4,
+            token=_resolve_hub_token(f"Downloading code files for {ref.immutable_ref}"),
+        )
+    return target
+
+
+def _remote_code_hashes(ref: ModelRef, files: set[str]) -> dict[str, str]:
+    key = (ref.repo, ref.digest or "", tuple(sorted(files)))
+    if key in _code_hash_cache:
+        return dict(_code_hash_cache[key])
+    root = _download_code_files(ref, files)
+    missing = sorted(name for name in files if not (root / name).exists())
+    if missing:
+        raise FileNotFoundError(f"{ref.immutable_ref} missing code files: {missing}")
+    hashes = {name: _sha256_file(root / name) for name in sorted(files)}
+    _code_hash_cache[key] = hashes
+    return dict(hashes)
+
+
+def validate_custom_code_policy(
+    *,
+    model_ref: ModelRef,
+    challenger_cfg: dict,
+    repo_files: list[str],
+    king_repo: str,
+    king_digest: str,
+    king_cfg: dict,
+) -> str | None:
+    auto_map = challenger_cfg.get("auto_map")
+    py_files = sorted(f for f in repo_files if f.endswith(".py"))
+
+    if not _quasar_custom_code_allowed(king_cfg, challenger_cfg):
+        if auto_map:
+            return "auto_map present in config.json (custom modeling code is not allowed)"
+        if py_files:
+            return f"repo ships *.py files (not allowed): {py_files[:3]}"
+        return None
+
+    unexpected_py = sorted(set(py_files) - QUASAR_ALLOWED_CODE_FILES)
+    if unexpected_py:
+        return f"repo ships non-Quasar *.py files (not allowed): {unexpected_py[:3]}"
+
+    if auto_map:
+        rejection = _validate_quasar_auto_map(auto_map)
+        if rejection:
+            return rejection
+        required = set(QUASAR_ALLOWED_CODE_FILES)
+        missing_py = sorted(required - set(py_files))
+        if missing_py:
+            return f"quasar auto_map requires missing code files: {missing_py}"
+
+        try:
+            king_ref = ModelRef(king_repo or SEED_REPO, king_digest or SEED_DIGEST)
+            king_hashes = _remote_code_hashes(king_ref, required)
+            challenger_hashes = _remote_code_hashes(model_ref, required)
+        except Exception as exc:
+            return f"could not verify Quasar custom code hashes: {exc}"
+
+        mismatches = [
+            name
+            for name in sorted(required)
+            if challenger_hashes.get(name) != king_hashes.get(name)
+        ]
+        if mismatches:
+            details = {
+                name: {
+                    "king": king_hashes.get(name, "")[:16],
+                    "challenger": challenger_hashes.get(name, "")[:16],
+                }
+                for name in mismatches
+            }
+            return f"quasar custom code hash mismatch: {details}"
+        return None
+
+    if py_files:
+        return "quasar *.py files are allowed only with the exact approved auto_map"
+    return None
 
 
 def validate_challenger_config(model_repo: str, challenger_digest: str,
@@ -487,12 +680,16 @@ def validate_challenger_config(model_repo: str, challenger_digest: str,
         if king_val != chall_val:
             return f"{key} mismatch: king={king_val if king_val is not _SENTINEL else '<absent>'} challenger={chall_val if chall_val is not _SENTINEL else '<absent>'}"
 
-    if "auto_map" in challenger_cfg:
-        return "auto_map present in config.json (custom modeling code is not allowed)"
-
-    py_files = [f for f in repo_files if f.endswith(".py")]
-    if py_files:
-        return f"repo ships *.py files (not allowed): {py_files[:3]}"
+    custom_code_rejection = validate_custom_code_policy(
+        model_ref=ref,
+        challenger_cfg=challenger_cfg,
+        repo_files=repo_files,
+        king_repo=king_repo,
+        king_digest=king_digest,
+        king_cfg=king_cfg,
+    )
+    if custom_code_rejection:
+        return custom_code_rejection
 
     st_files = [f for f in repo_files if f.endswith(".safetensors")]
     if not st_files:
@@ -627,6 +824,9 @@ async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
     loop responsive. Routes through commit-reveal v4 when SN3 has CR enabled
     (asserted at startup). Rate-limited per `WEIGHT_INTERVAL`.
     """
+    if SIDE_EFFECT_DRY_RUN:
+        log.info("side-effect dry-run: skipping set_weights (%s)", reason or "no reason")
+        return False
     try:
         current_block = subtensor.block
     except Exception:
