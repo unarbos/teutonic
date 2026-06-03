@@ -480,8 +480,9 @@ th:last-child, td:last-child { text-align: right; }
         <div id="chain-name" class="header-title" style="font-size:20px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;">Teutonic</div>
         <div style="font-size:11px;margin-top:4px;display:flex;flex-direction:column;align-items:center;gap:4px;text-transform:uppercase;">
             <span><span id="king-health" title="King repo status"></span> KING: <a id="king-link-top" href="#" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">--</a> <span id="king-rev" style="opacity:0.6;"></span></span>
+            <span>GENESIS: <a id="genesis-link" href="#" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">--</a> <span id="genesis-rev" style="opacity:0.6;"></span></span>
             <span>VALIDATOR: <a href="https://github.com/unarbos/teutonic" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">GitHub</a></span>
-            <span id="dataset-line">DATASET: <span id="dataset-name">FINEWEB-EDU</span> <a id="dataset-manifest-link" href="https://s3.hippius.com/teutonic-sn3/hf-mirrors/HuggingFaceFW/fineweb-edu/data/_manifest.json" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);" title="Raw Hippius manifest for the eval corpus">Manifest</a> <span id="dataset-summary" style="opacity:0.6;"></span></span>
+            <span id="dataset-line">DATASET: <span id="dataset-name">FINEWEBEDU</span> <a id="dataset-manifest-link" href="https://s3.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);" title="Dataset manifest for the eval corpus">Manifest</a> <span id="dataset-summary" style="opacity:0.6;"></span></span>
             <span id="king-reign" style="font-size:10px;opacity:0.5;"></span>
         </div>
     </div>
@@ -596,8 +597,7 @@ var STORAGE_ENDPOINTS = [
     "https://eu-central-1.hippius.com/teutonic-sn3",
     "https://s3.hippius.com/teutonic-sn3"
 ];
-var DATASET_PREFIX = "hf-mirrors/HuggingFaceFW/fineweb-edu/data";
-var DATASET_MANIFEST_KEY = DATASET_PREFIX + "/_manifest.json";
+var DATASET_MANIFEST_KEY = "dataset/finewebedu/manifest.json";
 var DATA_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/dashboard.json"; });
 var HTML_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/index.html"; });
 var DATASET_MANIFEST_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/" + DATASET_MANIFEST_KEY; });
@@ -1315,6 +1315,21 @@ function render(d) {
         var chainNameEl = document.getElementById("chain-name");
         if (chainNameEl) chainNameEl.textContent = chain.name;
         document.title = chain.name;
+    }
+    var genesisRepo = chain.seed_repo || "--";
+    var genesisDigest = chain.seed_digest || "";
+    var genesisLink = document.getElementById("genesis-link");
+    if (genesisLink) {
+        genesisLink.href = hubUrl(genesisRepo);
+        genesisLink.textContent = genesisRepo;
+    }
+    var genesisRevEl = document.getElementById("genesis-rev");
+    if (genesisRevEl) {
+        if (genesisDigest) {
+            genesisRevEl.innerHTML = '@ <a href="' + hubUrl(genesisRepo) + '" target="_blank" style="color:var(--ink);opacity:0.6">' + shortDigest(genesisDigest) + '</a>';
+        } else {
+            genesisRevEl.textContent = "";
+        }
     }
 
     var king = d.king || {};

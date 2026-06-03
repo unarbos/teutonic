@@ -1,28 +1,44 @@
-# Teutonic-Q3-8B — Qwen3-8B dense as genesis king (vanilla HF Qwen3ForCausalLM, no fork).
-# Qwen3 dense family, same tokenizer/arch line as 4B, just a larger baseline.
-# Public eval corpus: FineWeb-Edu Hippius mirror tokenized at eval time with Qwen3 tokenizer.
+# Teutonic Quasar — self-contained Quasar/Qwen3.5 snapshots.
 #
-# Genesis now lives on Hippius Hub. model_store dispatches by digest prefix:
-# `sha256:` for Hippius OCI, `hf:` for HF revisions. Challenger uploads still
-# go through Hippius as normal.
+# This chain uses Quasar checkpoints that carry their own config/custom code:
+#   configuration_qwen3_5.py
+#   modeling_qwen3_5.py
+#
+# The validator allows those files only through the Quasar custom-code policy:
+# auto_map must point to the exact local classes and the code files must match
+# the current king byte-for-byte.
 [chain]
-name = "Teutonic-Q3-8B"
-seed_repo = "teutonic/teutonic-q3-8b-genesis"
-# repo_pattern auto-derives to "^[^/]+/Teutonic-Q3-8B-.+$" if omitted.
+name = "teutonic"
+seed_repo = "dendrite/teutonic-x-genesis"
+repo_pattern = "^[^/]+/teutonic-.+$"
 
 [arch]
-module = "archs.qwen3"
-# Generic structural keys (vocab/hidden/heads/etc.) are enforced by
-# validate_challenger_config automatically. Anything Qwen3-specific that we
-# require challengers to preserve goes here.
+module = "archs.quasar"
+# Generic structural keys are enforced by validator.py automatically. These
+# extra keys pin the Quasar/Qwen3.5-specific architecture surface visible in
+# model/teutonic-x/config.json
 extra_lock_keys = [
-  "rope_theta",
-  "rope_scaling",
-  "tie_word_embeddings",
-  "max_position_embeddings",
+  "attention_bias",
+  "attention_dropout",
+  "attn_output_gate",
+  "eos_token_id",
+  "full_attention_interval",
+  "linear_conv_kernel_dim",
+  "linear_key_head_dim",
+  "linear_num_key_heads",
+  "linear_num_value_heads",
+  "linear_value_head_dim",
+  "mamba_ssm_dtype",
+  "mlp_only_layers",
+  "mtp_num_hidden_layers",
+  "mtp_use_dedicated_embeddings",
+  "partial_rotary_factor",
+  "rms_norm_eps",
+  "rope_parameters",
+  "use_gla",
+  "use_nope",
 ]
-
 [seed]
-tokenizer_repo = "Qwen/Qwen3-8B"
+tokenizer_repo = "silx-ai/Quasar-10B"
 repo_backend = "hippius"
-seed_digest = "sha256:97d3f4ac49ae94ccb9bb1a73ff68de6199150cb0346bcf16c16138387a19e7a4"
+seed_digest = "sha256:51556b3b2d0b6ba211f192c9fd7eaa05d51b441bf3eac98c0fdc9489634fb9a5"

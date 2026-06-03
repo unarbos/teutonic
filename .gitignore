@@ -55,3 +55,4 @@ scripts/experiments/hippius_poc/runs/*/remote.env
 scripts/experiments/services/
 runs/
 models/
+tunnel.sh
