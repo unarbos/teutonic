@@ -55,6 +55,15 @@ module.exports = {
       HF_TOKEN: envOr("HF_TOKEN", ""),
       HUGGING_FACE_HUB_TOKEN: envOr("HUGGING_FACE_HUB_TOKEN", envOr("HF_TOKEN", "")),
       HF_XET_HIGH_PERFORMANCE: envOr("HF_XET_HIGH_PERFORMANCE", "1"),
+      LD_LIBRARY_PATH: envOr(
+        "LD_LIBRARY_PATH",
+        [
+          path.join(workerRoot, ".venv", "lib", "python3.12", "site-packages", "nvidia", "cuda_runtime", "lib"),
+          path.join(workerRoot, ".venv", "lib", "python3.12", "site-packages", "nvidia", "cublas", "lib"),
+          path.join(workerRoot, ".venv", "lib", "python3.12", "site-packages", "nvidia", "cudnn", "lib"),
+          path.join(workerRoot, ".venv", "lib", "python3.12", "site-packages", "nvidia", "cu13", "lib"),
+        ].join(":"),
+      ),
       XDG_CACHE_HOME: envOr("XDG_CACHE_HOME", path.join(cacheRoot, "xdg")),
       HF_HOME: envOr("HF_HOME", path.join(cacheRoot, "huggingface")),
       HF_DATASETS_CACHE: envOr("HF_DATASETS_CACHE", path.join(cacheRoot, "huggingface", "datasets")),
@@ -70,6 +79,7 @@ module.exports = {
       TEUTONIC_KING_BENCH_CONTROLLER_TOKEN: envOr("TEUTONIC_KING_BENCH_CONTROLLER_TOKEN", envOr("TEUTONIC_KING_BENCH_WORKER_TOKEN", "")),
       TEUTONIC_KING_BENCH_WORKER_MODE: envOr("TEUTONIC_KING_BENCH_WORKER_MODE", "accelerate-data-parallel"),
       TEUTONIC_KING_BENCH_BATCH_SIZE: envOr("TEUTONIC_KING_BENCH_BATCH_SIZE", "auto"),
+      TEUTONIC_KING_BENCH_BATCH_SIZE_OVERRIDES: envOr("TEUTONIC_KING_BENCH_BATCH_SIZE_OVERRIDES", "MMLU-Pro=8,mmlu_pro=8"),
       TEUTONIC_KING_BENCH_DEVICE: envOr("TEUTONIC_KING_BENCH_DEVICE", "auto"),
       TEUTONIC_KING_BENCH_MODEL_FAMILY: envOr("TEUTONIC_KING_BENCH_MODEL_FAMILY", "quasar"),
       TEUTONIC_KING_BENCH_TRUST_REMOTE_CODE: envOr("TEUTONIC_KING_BENCH_TRUST_REMOTE_CODE", "true"),
