@@ -136,6 +136,51 @@ class ControllerState:
         latest = record.get("latest_result")
         return latest if isinstance(latest, dict) else None
 
+    def overlay_active_result(
+        self,
+        display_result: dict[str, Any] | None,
+        current_job: dict[str, Any] | None,
+        worker_event: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not display_result or not current_job:
+            return display_result
+        result_model = display_result.get("model") or {}
+        job_model = current_job.get("model") or {}
+        if result_model.get("king_id") != job_model.get("king_id"):
+            return display_result
+
+        active_names = [name for name in current_job.get("benchmarks") or [] if name]
+        if not active_names:
+            return display_result
+
+        active_rows: dict[str, dict[str, Any]] = {}
+        event_rows = (((worker_event or {}).get("partial_results") or {}).get("benchmarks") or [])
+        for row in event_rows:
+            if isinstance(row, dict) and row.get("name") in active_names:
+                active_rows[row["name"]] = dict(row)
+
+        patched = dict(display_result)
+        rows_by_name: dict[str, dict[str, Any]] = {}
+        for row in display_result.get("benchmarks") or []:
+            if isinstance(row, dict) and row.get("name"):
+                rows_by_name[row["name"]] = dict(row)
+
+        for name in active_names:
+            row = dict(rows_by_name.get(name) or {"name": name, "metric": {"name": None, "value": None}})
+            row.update(active_rows.get(name) or {})
+            if row.get("status") not in {"completed", "completed_no_metric"}:
+                row["status"] = "running"
+                row.setdefault("metric", {"name": None, "value": None})
+            rows_by_name[name] = row
+
+        order = list(self.args.benchmarks)
+        rows = [rows_by_name.pop(name) for name in order if name in rows_by_name]
+        rows.extend(rows_by_name.values())
+        patched["benchmarks"] = rows
+        patched["totals"] = self.result_totals(rows)
+        patched["status"] = "running"
+        return patched
+
     def latest_payload(
         self,
         *,
@@ -149,6 +194,7 @@ class ControllerState:
         current_king_id = (current_king or {}).get("king_id")
         result_king_id = ((result_payload or {}).get("model") or {}).get("king_id")
         display_result = result_payload if result_king_id == current_king_id else self.result_for_king(current_king_id)
+        display_result = self.overlay_active_result(display_result, current_job, worker_event)
         payload: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "status": status, "generated_at": utcnow_iso()}
         if current_king:
             payload["current_king"] = current_king

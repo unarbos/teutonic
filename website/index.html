@@ -935,6 +935,28 @@ function benchmarkResultKey(result) {
     return model.king_id || result.job_id || model.model_repo || model.repo_id || "";
 }
 
+function benchmarkStatusRank(status) {
+    if (status === "completed") return 5;
+    if (status === "completed_no_metric" || status === "failed") return 4;
+    if (status === "running" || status === "pending") return 2;
+    if (status === "not_run") return 1;
+    return status ? 3 : 0;
+}
+
+function mergeBenchmarkRow(existing, incoming) {
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+    var existingValue = benchmarkScoreValue(existing);
+    var incomingValue = benchmarkScoreValue(incoming);
+    if (existingValue != null && incomingValue == null && benchmarkStatusRank(incoming.status) <= benchmarkStatusRank("running")) {
+        return existing;
+    }
+    if (incomingValue == null && benchmarkStatusRank(incoming.status) < benchmarkStatusRank(existing.status)) {
+        return existing;
+    }
+    return Object.assign({}, existing, incoming);
+}
+
 function mergeBenchmarkResults(existing, incoming) {
     if (!existing) return incoming;
     if (!incoming) return existing;
@@ -944,8 +966,11 @@ function mergeBenchmarkResults(existing, incoming) {
     function put(row) {
         if (!row) return;
         var copy = Object.assign({}, row);
-        byKey[benchmarkKey(copy.name)] = copy;
-        byKey[benchmarkKey(copy.task)] = copy;
+        var nameKey = benchmarkKey(copy.name);
+        var taskKey = benchmarkKey(copy.task);
+        copy = mergeBenchmarkRow(byKey[nameKey] || byKey[taskKey], copy);
+        byKey[nameKey] = copy;
+        byKey[taskKey] = copy;
     }
     (existing.benchmarks || []).forEach(put);
     (incoming.benchmarks || []).forEach(put);
