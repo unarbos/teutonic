@@ -60,7 +60,7 @@ EVAL_N = int(os.environ.get("TEUTONIC_EVAL_N", "5000"))
 # a populated private holdout pool should set TEUTONIC_EVAL_N_PRIVATE=0; the
 # whole-corpus-overfit defense is then disabled (public-only mode).
 EVAL_N_PRIVATE = int(os.environ.get("TEUTONIC_EVAL_N_PRIVATE", str(EVAL_N // 2)))
-EVAL_N_PUBLIC = int(os.environ.get("TEUTONIC_EVAL_N_PUBLIC", str(EVAL_N - EVAL_N_PRIVATE)))
+EVAL_N_PUBLIC = int(os.environ.get("TEUTONIC_EVAL_N_PUBLIC", "20000"))
 EVAL_ALPHA = 0.001
 SEQ_LEN = 2048
 POLL_INTERVAL = 30
@@ -75,7 +75,7 @@ BURN_UID = int(os.environ.get("TEUTONIC_BURN_UID", "0"))
 
 # Watchdogs / anti-stuckness safeguards.
 TICK_WARN_AFTER = int(os.environ.get("TEUTONIC_TICK_WARN_AFTER", "120"))
-TICK_RESTART_AFTER = int(os.environ.get("TEUTONIC_TICK_RESTART_AFTER", "1800"))
+TICK_RESTART_AFTER = int(os.environ.get("TEUTONIC_TICK_RESTART_AFTER", "3000"))
 STREAM_IDLE_WARN_AFTER = int(os.environ.get("TEUTONIC_STREAM_IDLE_WARN_AFTER", "180"))
 STREAM_IDLE_TIMEOUT = int(os.environ.get("TEUTONIC_STREAM_IDLE_TIMEOUT", "420"))
 HEALTHCHECK_INTERVAL = int(os.environ.get("TEUTONIC_HEALTHCHECK_INTERVAL", "60"))
@@ -527,6 +527,7 @@ def _download_code_files(ref: ModelRef, files: set[str]) -> Path:
     target.mkdir(parents=True, exist_ok=True)
 
     allow_patterns = sorted(files)
+
     from hippius_hub import snapshot_download
 
     snapshot_download(
@@ -611,6 +612,154 @@ def validate_custom_code_policy(
     if py_files:
         return "quasar *.py files are allowed only with the exact approved auto_map"
     return None
+
+
+def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
+    """Fetch OCI manifest and return safetensor layer digests + commit timestamp.
+
+    Returns None when the check cannot be performed (HF refs, network error,
+    manifest absent) so callers can fail open rather than blocking valid submissions.
+
+    Return shape::
+
+        {
+            "safetensor_layers": {"model-00001-of-00004.safetensors": "sha256:...", ...},
+            "committed_at": "2026-06-08T15:45:59.489795+00:00",   # may be None
+        }
+    """
+    if oci_digest.startswith("hf:"):
+        return None
+    try:
+        from hippius_hub._oci import fetch_manifest
+        from hippius_hub.auth import get_oci_bearer_token, resolve_token_value
+        from hippius_hub.constants import resolve_registry
+        from hippius_hub.file_download import _oci_repo_path
+
+        registry = resolve_registry(None)
+        oci_repo = _oci_repo_path(repo_id, None)
+        raw_token = _resolve_hub_token(f"copy-check manifest {repo_id}")
+        oci_token = get_oci_bearer_token(oci_repo, resolve_token_value(raw_token), push=False)
+        manifest = fetch_manifest(registry, oci_repo, oci_digest, oci_token, missing_ok=True)
+        if not manifest:
+            return None
+        safetensor_layers: dict[str, str] = {}
+        for layer in manifest.get("layers", []):
+            title = layer.get("annotations", {}).get("org.opencontainers.image.title", "")
+            if title.endswith(".safetensors") and "digest" in layer:
+                safetensor_layers[title] = layer["digest"]
+        committed_at = manifest.get("annotations", {}).get("org.opencontainers.image.created")
+        return {"safetensor_layers": safetensor_layers, "committed_at": committed_at}
+    except Exception:
+        log.debug("could not fetch OCI info for %s@%s (copy check skipped)",
+                  repo_id, oci_digest[:19], exc_info=True)
+        return None
+
+
+def check_model_copy(
+    challenger_repo: str,
+    challenger_digest: str,
+    king_repo: str,
+    king_digest: str,
+) -> dict | None:
+    """Check whether the challenger is a weight-for-weight copy of the king.
+
+    Returns None when models differ or the check cannot be performed.
+
+    When an exact copy is detected, returns a dict with an ``action`` key:
+
+    * ``"reject"`` — challenger committed *after* the king; it is a copy and
+      should be rejected.
+    * ``"crown_earlier"`` — challenger was committed *before* the king; the
+      challenger is the original and should displace the king without an eval.
+
+    The dict also carries ``reason``, ``challenger_committed_at``, and
+    ``king_committed_at`` for logging / dashboard display.
+    """
+    if not king_repo or not king_digest:
+        return None
+    if challenger_repo == king_repo and challenger_digest == king_digest:
+        return {
+            "action": "reject",
+            "reason": (
+                f"challenger is identical to the current king "
+                f"(same repo {challenger_repo!r} and digest {challenger_digest[:19]})"
+            ),
+            "challenger_committed_at": None,
+            "king_committed_at": None,
+        }
+
+    challenger_info = _fetch_model_oci_info(challenger_repo, challenger_digest)
+    if not challenger_info:
+        return None
+
+    king_info = _fetch_model_oci_info(king_repo, king_digest)
+    if not king_info:
+        return None
+
+    challenger_layers = challenger_info["safetensor_layers"]
+    king_layers = king_info["safetensor_layers"]
+
+    if not challenger_layers or len(challenger_layers) != len(king_layers):
+        return None
+
+    mismatches = [
+        title for title, digest in challenger_layers.items()
+        if king_layers.get(title) != digest
+    ]
+    if mismatches:
+        return None
+
+    # Weights are identical — decide by commit timestamp.
+    n = len(challenger_layers)
+    challenger_ts = challenger_info["committed_at"]
+    king_ts = king_info["committed_at"]
+
+    def _parse_ts(ts: str | None):
+        if not ts:
+            return None
+        try:
+            dt = datetime.fromisoformat(ts)
+            # Normalize to UTC so aware/naive comparisons never raise TypeError.
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
+    challenger_dt = _parse_ts(challenger_ts)
+    king_dt = _parse_ts(king_ts)
+
+    base_reason = (
+        f"all {n} .safetensors layers have identical OCI digests; "
+        f"challenger committed_at={challenger_ts}, king committed_at={king_ts}"
+    )
+
+    # Fail-safe: if timestamps are missing or unparseable, reject the copy.
+    if challenger_dt is None or king_dt is None:
+        return {
+            "action": "reject",
+            "reason": f"model is a copy of the king (timestamps unavailable — rejecting): {base_reason}",
+            "challenger_committed_at": challenger_ts,
+            "king_committed_at": king_ts,
+        }
+
+    if challenger_dt < king_dt:
+        return {
+            "action": "crown_earlier",
+            "reason": (
+                f"model is identical to the king but was committed earlier "
+                f"({challenger_ts} < {king_ts}); displacing king with original author"
+            ),
+            "challenger_committed_at": challenger_ts,
+            "king_committed_at": king_ts,
+        }
+
+    return {
+        "action": "reject",
+        "reason": f"model is a copy of the king (committed after king): {base_reason}",
+        "challenger_committed_at": challenger_ts,
+        "king_committed_at": king_ts,
+    }
 
 
 def validate_challenger_config(model_repo: str, challenger_digest: str,
@@ -1112,20 +1261,36 @@ class State:
             return ""
         return info.get("digest", "")
 
-    def set_king(self, hotkey, model_repo, block, challenge_id="seed", king_digest=""):
+    def set_king(self, hotkey, model_repo, block, challenge_id="seed", king_digest="",
+                 *, displace_in_place=False):
         global _king_config, _king_config_key
         _king_config = None
         _king_config_key = None
         self.failed_repos.clear()
         self.evaluated_repos.clear()
-        reign = self.king.get("reign_number", 0) + (0 if challenge_id == "seed" else 1)
         prev_repo = self.king.get("model_repo") if self.king else ""
-        if self.king and challenge_id != "seed":
-            past = {**self.king,
-                    "uid": self.uid_map.get(self.king.get("hotkey", "")),
-                    "coldkey": self.coldkey_for(self.king.get("hotkey", ""))}
-            self.king_chain.insert(0, past)
-            self.king_chain = self.king_chain[:KING_CHAIN_SIZE - 1]
+        if displace_in_place:
+            # crown_earlier: the displaced king had identical weights — it is a copy,
+            # not a prior champion.  Don't push it to king_chain; the challenger is
+            # the original author and simply reclaims the same king slot.
+            # Also evict any chain entries that share the displaced OCI digest so a
+            # miner cannot accumulate multiple slots via repeated crown_earlier events.
+            displaced_digest = self.king.get("king_digest", "")
+            if displaced_digest:
+                self.king_chain = [
+                    e for e in self.king_chain
+                    if e.get("king_digest") != displaced_digest
+                ]
+            # Inherit the existing reign number — this is the same slot, not a new one.
+            reign = self.king.get("reign_number", 0) if self.king else 1
+        else:
+            reign = self.king.get("reign_number", 0) + (0 if challenge_id == "seed" else 1)
+            if self.king and challenge_id != "seed":
+                past = {**self.king,
+                        "uid": self.uid_map.get(self.king.get("hotkey", "")),
+                        "coldkey": self.coldkey_for(self.king.get("hotkey", ""))}
+                self.king_chain.insert(0, past)
+                self.king_chain = self.king_chain[:KING_CHAIN_SIZE - 1]
         self.king = {
             "hotkey": hotkey, "model_repo": model_repo,
             "king_digest": king_digest,
@@ -1163,6 +1328,10 @@ class State:
         }
         if verdict.get("rejection_reason"):
             entry["rejection_reason"] = verdict["rejection_reason"]
+        if verdict.get("challenger_committed_at") is not None:
+            entry["challenger_committed_at"] = verdict["challenger_committed_at"]
+        if verdict.get("king_committed_at") is not None:
+            entry["king_committed_at"] = verdict["king_committed_at"]
         self.history.insert(0, entry)
         self.r2.put("state/dashboard_history.json", {"history": self.history})
 
@@ -1504,6 +1673,13 @@ def _is_transient_eval_error(exc: Exception | str) -> tuple[bool, str]:
     # back-to-back).
     if ("stuck cdn" in text) or ("prefetch" in text and "exceeded" in text):
         return False, "prefetch_exhausted"
+    if (
+        "failed to download shard" in text
+        or "s3 shard download failed" in text
+        or "retriesexceeded" in text
+        or "max retries exceeded" in text
+    ):
+        return True, "dataset_shard_download"
     if text.startswith("eval server error") or "'eval server error'" in text:
         return False, "eval_server_reported"
     transient_markers = (
@@ -1638,6 +1814,82 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         state.record_failure(entry, "digest_not_found",
                               f"Hippius returned no metadata for {model_repo}@{challenger_digest[:19]}: {exc}")
         return
+
+    copy_result = check_model_copy(
+        model_repo, challenger_digest,
+        king_repo=state.king.get("model_repo", ""),
+        king_digest=state.king.get("king_digest", ""),
+    )
+    if copy_result is not None:
+        action = copy_result["action"]
+        reason = copy_result["reason"]
+        if action == "reject":
+            log.warning("rejecting %s (%s): %s", cid, model_repo, reason)
+            state.failed_repos.add(model_key)
+            state.record_failure(entry, "model_copy", reason)
+            return
+        if action == "crown_earlier":
+            # WARNING: org.opencontainers.image.created is a client-set annotation.
+            # A miner can backdate it.  This path must only run when the timestamp
+            # comparison is trustworthy (i.e. registry-attested timestamps are used).
+            log.warning(
+                "%s (%s): identical weights but earlier commit — displacing king. %s",
+                cid, model_repo, reason,
+            )
+            state.set_phase("crown_earlier_commit", challenge_id=cid,
+                            notes=f"crowning {model_repo} as original author")
+            prev_repo = state.king.get("model_repo") if state.king else ""
+            dethrone_block = entry.get("block", 0) or _safe_block(subtensor)
+
+            rejection = validate_challenger_config(
+                model_repo, challenger_digest,
+                king_repo=state.king.get("model_repo", ""),
+                king_digest=state.king.get("king_digest", ""),
+            )
+            if rejection:
+                log.warning("crown_earlier %s (%s) blocked by config check: %s",
+                            cid, model_repo, rejection)
+                state.failed_repos.add(model_key)
+                state.record_failure(entry, "config_rejected", rejection)
+                return
+
+            synthetic_verdict = {
+                "accepted": True,
+                "verdict": "crown_earlier_commit",
+                "challenge_id": cid,
+                "challenger_digest": challenger_digest,
+                "rejection_reason": None,
+                "mu_hat": 0.0,
+                "lcb": 0.0,
+                "delta": 0.0,
+                "avg_king_loss": 0.0,
+                "avg_challenger_loss": 0.0,
+                "wall_time_s": 0.0,
+                "timestamp": _now(),
+                "challenger_committed_at": copy_result.get("challenger_committed_at"),
+                "king_committed_at": copy_result.get("king_committed_at"),
+            }
+            # Increment before set_king (which flushes), matching the normal eval path.
+            state.stats["accepted"] += 1
+            state.record_verdict(synthetic_verdict, model_repo, hotkey)
+            state.set_king(hotkey, model_repo, dethrone_block,
+                           challenge_id=cid, king_digest=challenger_digest,
+                           displace_in_place=True)
+            state.last_winner_hotkey = hotkey
+            state.flush_dashboard(force=True)
+            try:
+                await maybe_set_weights(subtensor, wallet, state,
+                                        force=True, reason="crown_earlier_commit")
+            except Exception:
+                log.exception("force weight-set after crown_earlier_commit failed")
+            await notify_new_king({
+                "hotkey": hotkey,
+                "model_repo": model_repo,
+                "reign_number": state.king.get("reign_number", 0),
+                "king_digest": challenger_digest,
+                "previous_repo": prev_repo,
+            }, synthetic_verdict)
+            return
 
     state.set_phase("validate_config", challenge_id=cid, notes=f"validating {model_repo}")
     rejection = validate_challenger_config(
