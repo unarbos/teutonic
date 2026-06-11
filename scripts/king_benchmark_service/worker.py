@@ -254,6 +254,14 @@ def build_eval_cmd(
         cmd += ["--max-batch-size", str(max_batch_size).strip()]
     if snapshot_dir is not None:
         cmd += ["--snapshot-dir", str(snapshot_dir)]
+    model_family = job.get("model_family") or os.environ.get("TEUTONIC_KING_BENCH_MODEL_FAMILY", "quasar")
+    if str(model_family).strip():
+        cmd += ["--model-family", str(model_family).strip()]
+    trust_remote_code = job.get("trust_remote_code")
+    if trust_remote_code is None:
+        trust_remote_code = os.environ.get("TEUTONIC_KING_BENCH_TRUST_REMOTE_CODE", "true")
+    if str(trust_remote_code).strip():
+        cmd += ["--trust-remote-code", str(trust_remote_code).strip()]
     if model_args_extra and model_args_extra.strip():
         cmd += ["--model-args-extra", model_args_extra.strip()]
     if device and device.strip() and device.lower() not in {"auto", "none"}:

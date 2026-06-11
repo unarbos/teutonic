@@ -25,6 +25,7 @@ from typing import Any
 
 import boto3
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -60,6 +61,10 @@ def write_json(path: Path, payload: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
     tmp.replace(path)
+
+
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text())
 
 
 def write_text(path: Path, body: str) -> None:
@@ -106,6 +111,17 @@ def partition_round_robin(files: list[str], n_parts: int) -> list[list[str]]:
     parts = [[] for _ in range(n_parts)]
     for idx, file_path in enumerate(files):
         parts[idx % n_parts].append(file_path)
+    return parts
+
+
+def partition_contiguous(files: list[str], n_parts: int) -> list[list[str]]:
+    base, extra = divmod(len(files), n_parts)
+    parts: list[list[str]] = []
+    start = 0
+    for idx in range(n_parts):
+        size = base + (1 if idx < extra else 0)
+        parts.append(files[start:start + size])
+        start += size
     return parts
 
 
@@ -215,19 +231,28 @@ def make_run_script(
         "--tokenizer", tokenizer,
         "--dest-prefix", dest_prefix,
         "--file-list", file_list_path,
-        "--one-npy-per-parquet",
         "--part-manifest-only",
         "--distributed-run-id", run_id,
         "--part-id", part_id,
         "--scratch-dir", scratch_dir,
         "--progress-dir", progress_dir,
         "--text-column", args.text_column,
+        "--seq-len", str(args.seq_len),
+        "--shard-size-gb", str(args.shard_size_gb),
         "--workers", str(workers),
         "--min-free-gb", str(args.remote_min_free_gb),
         "--worker-disk-gb", str(args.remote_worker_disk_gb),
         "--max-inflight-files", str(max_inflight_files),
+        "--cpu-reserve", str(args.remote_cpu_reserve),
         "--auto-max-workers", str(args.remote_auto_max_workers),
     ]
+    if args.packed_shards:
+        if args.ordered_packed_parts:
+            cmd.append("--ordered-packed-part")
+    else:
+        cmd.append("--one-npy-per-parquet")
+    if args.tokens_column:
+        cmd.extend(["--tokens-column", args.tokens_column])
     if args.dry_run:
         cmd.append("--dry-run")
     exports = "\n".join(shell_export(name, value) for name, value in remote_env.items())
@@ -476,6 +501,19 @@ def run_lium_retry(
     raise last_exc
 
 
+def remote_part_process_active(
+    *,
+    pod_name: str,
+    env: dict[str, str],
+    part_id: str,
+) -> bool:
+    pattern = f"ingest_hf.py.*--part-id {part_id}"
+    cmd = ["lium", "exec", pod_name, f"pgrep -af {shlex.quote(pattern)} || true"]
+    proc = lium_eval.run(cmd, env=env, check=False, capture_output=True)
+    output = proc.stdout or ""
+    return any("ingest_hf.py" in line and f"--part-id {part_id}" in line for line in output.splitlines())
+
+
 def stage_remote_files(
     *,
     pod_name: str,
@@ -610,6 +648,21 @@ def get_json_key(client, bucket: str, key: str) -> dict[str, Any]:
     return json.loads(body)
 
 
+def s3_key_exists(client, bucket: str, key: str) -> bool:
+    try:
+        client.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        raise
+
+
+def available_manifest_keys(client, bucket: str, keys: list[str]) -> list[str]:
+    return [key for key in keys if s3_key_exists(client, bucket, key)]
+
+
 def list_s3_keys(client, bucket: str, prefix: str) -> set[str]:
     keys: set[str] = set()
     kwargs: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix}
@@ -630,6 +683,14 @@ def dedupe_keep_order(values: list[str]) -> list[str]:
             seen.add(value)
             out.append(value)
     return out
+
+
+def manifest_keys_from_row(row: dict[str, Any], fallback_key: str) -> list[str]:
+    keys = list(row.get("manifest_keys") or [])
+    if not keys:
+        keys = [fallback_key]
+        keys.extend(row.get("repair_manifest_keys") or [])
+    return dedupe_keep_order([key for key in keys if key])
 
 
 def part_manifest_coverage(
@@ -663,14 +724,14 @@ def part_manifest_coverage(
                 "failed_files": len(manifest.get("failed_files") or []),
             }
         )
+        seen.update(fp for fp in manifest.get("completed_files") or [] if fp in expected)
         failed_files.extend(fp for fp in manifest.get("failed_files") or [] if fp in expected)
         for shard in shards:
             source_file = shard.get("source_file")
-            if source_file not in expected:
+            if source_file and source_file not in expected:
                 raise RuntimeError(f"unexpected source file in {key}: {source_file!r}")
-            if source_file in seen:
-                raise RuntimeError(f"duplicate source file across part manifests: {source_file}")
-            seen.add(source_file)
+            if source_file:
+                seen.add(source_file)
             shard_count += 1
             total_tokens += int(shard.get("n_tokens", 0))
     missing_files = [fp for fp in part_files if fp not in seen]
@@ -685,6 +746,80 @@ def part_manifest_coverage(
         "total_shards": shard_count,
         "total_tokens": total_tokens,
     }
+
+
+def complete_part_from_manifests(
+    *,
+    row: dict[str, Any],
+    manifest_keys: list[str],
+    repair_manifest_keys: list[str],
+    pod_name: str | None,
+    lium_env: dict[str, str],
+    remote_env: dict[str, str],
+    local_part_dir: Path,
+    remote_root: str,
+    part_files: list[str],
+    dataset: str,
+    tokenizer: str,
+    dest_prefix: str,
+    run_id: str,
+    part_id: str,
+    args: argparse.Namespace,
+    log_path: Path,
+) -> dict[str, Any]:
+    client = make_s3_client(args, remote_env)
+    bucket = remote_env["TEUTONIC_DS_BUCKET"]
+    for attempt in range(args.repair_attempts + 1):
+        existing_keys = available_manifest_keys(client, bucket, manifest_keys)
+        if not existing_keys:
+            raise RuntimeError(f"no part manifests found for {part_id}")
+        coverage = part_manifest_coverage(
+            client=client,
+            bucket=bucket,
+            manifest_keys=existing_keys,
+            part_files=part_files,
+            dataset=dataset,
+            tokenizer=tokenizer,
+        )
+        row.update(
+            manifest_keys=list(existing_keys),
+            repair_manifest_keys=[key for key in repair_manifest_keys if key in existing_keys],
+            manifest_summaries=coverage["manifest_summaries"],
+            missing_files=coverage["missing_files"],
+            failed_files=coverage["failed_files"],
+            total_shards=coverage["total_shards"],
+            total_tokens=coverage["total_tokens"],
+        )
+        if coverage["complete"]:
+            row["status"] = "completed"
+            return row
+        if attempt >= args.repair_attempts:
+            raise RuntimeError(
+                f"part incomplete after {attempt} repair attempts; "
+                f"missing={len(coverage['missing_files'])} failed={len(coverage['failed_files'])} "
+                f"first={coverage['repair_files'][:10]}"
+            )
+        if not pod_name:
+            raise RuntimeError(f"part {part_id} needs repair but has no pod_name")
+        repair_key = run_repair_attempt(
+            pod_name=pod_name,
+            env=lium_env,
+            local_part_dir=local_part_dir,
+            remote_root=remote_root,
+            repair_files=coverage["repair_files"],
+            dataset=dataset,
+            tokenizer=tokenizer,
+            dest_prefix=dest_prefix,
+            run_id=run_id,
+            base_part_id=part_id,
+            attempt=attempt + 1,
+            remote_env=remote_env,
+            args=args,
+            log_path=log_path,
+        )
+        repair_manifest_keys.append(repair_key)
+        manifest_keys.append(repair_key)
+    return row
 
 
 def merge_part_manifests(
@@ -704,15 +839,21 @@ def merge_part_manifests(
     order = {file_path: idx for idx, file_path in enumerate(expected_files)}
     part_keys = [ingest_hf.part_manifest_key(dest_prefix, run_id, part_id) for part_id in part_ids]
     shards: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen_files: set[str] = set()
+    seen_keys: set[str] = set()
     total_tokens = 0
     part_summaries: list[dict[str, Any]] = []
+    tokenization_mode = "seq_packed_shards" if args.packed_shards else "one_npy_per_parquet"
+    tokens_column = ""
     for key in part_keys:
         manifest = get_json_key(client, bucket, key)
         if manifest.get("source") != dataset:
             raise RuntimeError(f"part source mismatch in {key}: {manifest.get('source')!r}")
         if manifest.get("tokenizer") != tokenizer:
             raise RuntimeError(f"part tokenizer mismatch in {key}: {manifest.get('tokenizer')!r}")
+        tokenization_mode = manifest.get("tokenization_mode") or tokenization_mode
+        tokens_column = manifest.get("tokens_column") or tokens_column
+        seen_files.update(fp for fp in manifest.get("completed_files") or [] if fp in expected)
         manifest_shards = manifest.get("shards", [])
         part_summaries.append(
             {
@@ -725,17 +866,20 @@ def merge_part_manifests(
         )
         for shard in manifest_shards:
             source_file = shard.get("source_file")
-            if source_file not in expected:
+            if source_file and source_file not in expected:
                 raise RuntimeError(f"unexpected source file in {key}: {source_file!r}")
-            if source_file in seen:
-                raise RuntimeError(f"duplicate source file across parts: {source_file}")
-            seen.add(source_file)
+            shard_key = shard.get("key")
+            if shard_key in seen_keys:
+                raise RuntimeError(f"duplicate shard key across parts: {shard_key}")
+            seen_keys.add(shard_key)
+            if source_file:
+                seen_files.add(source_file)
             shards.append(dict(shard))
             total_tokens += int(shard.get("n_tokens", 0))
-    missing = [fp for fp in expected_files if fp not in seen]
+    missing = [fp for fp in expected_files if fp not in seen_files]
     if missing:
         raise RuntimeError(f"missing {len(missing)} source files; first missing: {missing[:5]}")
-    shards.sort(key=lambda shard: order[shard["source_file"]])
+    shards.sort(key=lambda shard: (order.get(shard.get("source_file"), len(order)), shard.get("key", "")))
     expected_keys = {shard["key"] for shard in shards}
     uploaded_keys = list_s3_keys(client, bucket, f"{dest_prefix.rstrip('/')}/shards/")
     missing_objects = sorted(expected_keys - uploaded_keys)
@@ -743,7 +887,7 @@ def merge_part_manifests(
         raise RuntimeError(f"missing {len(missing_objects)} uploaded shard objects; first missing: {missing_objects[:5]}")
     now = utcnow_iso()
     final_manifest = {
-        "version": "v4-one-npy-per-parquet-merged",
+        "version": "v4-seq-packed-merged" if args.packed_shards else "v4-one-npy-per-parquet-merged",
         "schema_version": SCHEMA_VERSION,
         "created": now,
         "updated": now,
@@ -751,7 +895,7 @@ def merge_part_manifests(
         "tokenizer": tokenizer,
         "dtype": "uint32",
         "source": dataset,
-        "tokenization_mode": "one_npy_per_parquet",
+        "tokenization_mode": tokenization_mode,
         "distributed_run_id": run_id,
         "total_tokens": total_tokens,
         "total_shards": len(shards),
@@ -761,6 +905,8 @@ def merge_part_manifests(
         "part_summaries": part_summaries,
         "shards": shards,
     }
+    if tokens_column:
+        final_manifest["tokens_column"] = tokens_column
     put_manifest_with_client(client, bucket, dest_prefix.rstrip("/"), final_manifest)
     return final_manifest
 
@@ -802,13 +948,19 @@ def discover_files(dataset: str, args: argparse.Namespace) -> list[str]:
         include_prefixes = tuple(p.strip() for p in args.include_prefixes.split(",") if p.strip())
     else:
         include_prefixes = ingest_hf.default_include_prefixes_for_dataset(dataset)
+    exclude_prefixes = tuple(p.strip().rstrip("/") + "/" for p in (args.exclude_prefixes or "").split(",") if p.strip())
     files = ingest_hf.discover_parquet_files(
         dataset,
         os.environ.get("HF_TOKEN", ""),
         langs=args.langs.split(",") if args.langs else None,
         include_prefixes=include_prefixes,
     )
-    return [fp for _config, fp in files]
+    file_paths = [fp for _config, fp in files]
+    if exclude_prefixes:
+        before = len(file_paths)
+        file_paths = [fp for fp in file_paths if not fp.startswith(exclude_prefixes)]
+        print(f"[filter] excluded {before - len(file_paths)} parquet files via --exclude-prefixes={','.join(exclude_prefixes)}", flush=True)
+    return file_paths
 
 
 def run_part(
@@ -824,6 +976,7 @@ def run_part(
     remote_env: dict[str, str],
     run_dir: Path,
     args: argparse.Namespace,
+    resume_row: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     part_id = f"part-{part_idx:03d}"
     local_part_dir = run_dir / "parts" / part_id
@@ -840,17 +993,120 @@ def run_part(
         "remote_root": remote_root,
         "error": None,
     }
+    if resume_row:
+        for key in (
+            "pod_name",
+            "gpu",
+            "gpu_count",
+            "manifest_keys",
+            "repair_manifest_keys",
+            "manifest_summaries",
+            "missing_files",
+            "failed_files",
+            "total_shards",
+            "total_tokens",
+        ):
+            if key in resume_row:
+                row[key] = resume_row[key]
+        row["previous_status"] = resume_row.get("status")
     if args.dry_run:
         write_json(local_part_dir / "files.json", {"files": part_files})
         row["status"] = "dry_run"
         return row
+
+    local_command_log = local_part_dir / "local-command.log"
+    if args.resume and resume_row and resume_row.get("status") == "completed":
+        try:
+            manifest_keys = manifest_keys_from_row(row, row["manifest_key"])
+            repair_manifest_keys = list(row.get("repair_manifest_keys") or [])
+            return complete_part_from_manifests(
+                row=row,
+                manifest_keys=manifest_keys,
+                repair_manifest_keys=repair_manifest_keys,
+                pod_name=row.get("pod_name"),
+                lium_env=lium_env,
+                remote_env=remote_env,
+                local_part_dir=local_part_dir,
+                remote_root=remote_root,
+                part_files=part_files,
+                dataset=dataset,
+                tokenizer=tokenizer,
+                dest_prefix=dest_prefix,
+                run_id=run_id,
+                part_id=part_id,
+                args=args,
+                log_path=local_command_log,
+            )
+        except Exception as exc:
+            append_log(local_command_log, f"[resume-completed-validation-exception] {exc!r}")
+            row.update(status="failed", error=repr(exc))
+            return row
+
     if not rental["pod_name"]:
         row.update(status="failed", error=rental["error"] or "rent failed")
         return row
     row.update(status="running", pod_name=rental["pod_name"], gpu=rental["gpu"], gpu_count=rental["count"])
-    local_command_log = local_part_dir / "local-command.log"
     registry_update(args, rental["pod_name"], status="running_ingest", local_run_dir=str(local_part_dir), remote_root=remote_root)
     try:
+        if args.resume and resume_row:
+            manifest_keys = manifest_keys_from_row(row, row["manifest_key"])
+            repair_manifest_keys = list(row.get("repair_manifest_keys") or [])
+            wait_started = time.time()
+            while True:
+                client = make_s3_client(args, remote_env)
+                bucket = remote_env["TEUTONIC_DS_BUCKET"]
+                existing_keys = available_manifest_keys(client, bucket, manifest_keys)
+                active = remote_part_process_active(pod_name=rental["pod_name"], env=lium_env, part_id=part_id)
+                if existing_keys:
+                    coverage = part_manifest_coverage(
+                        client=client,
+                        bucket=bucket,
+                        manifest_keys=existing_keys,
+                        part_files=part_files,
+                        dataset=dataset,
+                        tokenizer=tokenizer,
+                    )
+                    row.update(
+                        manifest_keys=list(existing_keys),
+                        repair_manifest_keys=[key for key in repair_manifest_keys if key in existing_keys],
+                        manifest_summaries=coverage["manifest_summaries"],
+                        missing_files=coverage["missing_files"],
+                        failed_files=coverage["failed_files"],
+                        total_shards=coverage["total_shards"],
+                        total_tokens=coverage["total_tokens"],
+                    )
+                    if coverage["complete"]:
+                        row["status"] = "completed"
+                        registry_update(args, rental["pod_name"], status="ingest_complete", run_finished_at=utcnow_iso())
+                        return row
+                    if not active:
+                        return complete_part_from_manifests(
+                            row=row,
+                            manifest_keys=manifest_keys,
+                            repair_manifest_keys=repair_manifest_keys,
+                            pod_name=rental["pod_name"],
+                            lium_env=lium_env,
+                            remote_env=remote_env,
+                            local_part_dir=local_part_dir,
+                            remote_root=remote_root,
+                            part_files=part_files,
+                            dataset=dataset,
+                            tokenizer=tokenizer,
+                            dest_prefix=dest_prefix,
+                            run_id=run_id,
+                            part_id=part_id,
+                            args=args,
+                            log_path=local_command_log,
+                        )
+                if not active:
+                    break
+                elapsed = time.time() - wait_started
+                if elapsed >= args.resume_wait_s:
+                    raise RuntimeError(f"remote {part_id} is still running after resume wait timeout ({args.resume_wait_s}s)")
+                row["status"] = "waiting_remote"
+                append_log(local_command_log, f"[resume] {part_id} still active on {rental['pod_name']}; sleeping {args.resume_poll_s}s")
+                time.sleep(args.resume_poll_s)
+
         stage_remote_files(
             pod_name=rental["pod_name"],
             env=lium_env,
@@ -879,56 +1135,27 @@ def run_part(
             log_path=local_command_log,
         )
 
-        client = make_s3_client(args, remote_env)
-        bucket = remote_env["TEUTONIC_DS_BUCKET"]
-        manifest_keys = [row["manifest_key"]]
-        repair_manifest_keys: list[str] = []
-        for attempt in range(args.repair_attempts + 1):
-            coverage = part_manifest_coverage(
-                client=client,
-                bucket=bucket,
-                manifest_keys=manifest_keys,
-                part_files=part_files,
-                dataset=dataset,
-                tokenizer=tokenizer,
-            )
-            row.update(
-                manifest_keys=list(manifest_keys),
-                repair_manifest_keys=list(repair_manifest_keys),
-                manifest_summaries=coverage["manifest_summaries"],
-                missing_files=coverage["missing_files"],
-                failed_files=coverage["failed_files"],
-                total_shards=coverage["total_shards"],
-                total_tokens=coverage["total_tokens"],
-            )
-            if coverage["complete"]:
-                row["status"] = "completed"
-                registry_update(args, rental["pod_name"], status="ingest_complete", run_finished_at=utcnow_iso())
-                return row
-            if attempt >= args.repair_attempts:
-                raise RuntimeError(
-                    f"part incomplete after {attempt} repair attempts; "
-                    f"missing={len(coverage['missing_files'])} failed={len(coverage['failed_files'])} "
-                    f"first={coverage['repair_files'][:10]}"
-                )
-            repair_key = run_repair_attempt(
-                pod_name=rental["pod_name"],
-                env=lium_env,
-                local_part_dir=local_part_dir,
-                remote_root=remote_root,
-                repair_files=coverage["repair_files"],
-                dataset=dataset,
-                tokenizer=tokenizer,
-                dest_prefix=dest_prefix,
-                run_id=run_id,
-                base_part_id=part_id,
-                attempt=attempt + 1,
-                remote_env=remote_env,
-                args=args,
-                log_path=local_command_log,
-            )
-            repair_manifest_keys.append(repair_key)
-            manifest_keys.append(repair_key)
+        row = complete_part_from_manifests(
+            row=row,
+            manifest_keys=[row["manifest_key"]],
+            repair_manifest_keys=[],
+            pod_name=rental["pod_name"],
+            lium_env=lium_env,
+            remote_env=remote_env,
+            local_part_dir=local_part_dir,
+            remote_root=remote_root,
+            part_files=part_files,
+            dataset=dataset,
+            tokenizer=tokenizer,
+            dest_prefix=dest_prefix,
+            run_id=run_id,
+            part_id=part_id,
+            args=args,
+            log_path=local_command_log,
+        )
+        if row.get("status") == "completed":
+            registry_update(args, rental["pod_name"], status="ingest_complete", run_finished_at=utcnow_iso())
+        return row
     except Exception as exc:
         append_log(local_command_log, f"[exception] {exc!r}")
         row.update(status="failed", error=repr(exc))
@@ -955,16 +1182,36 @@ def run_once(args: argparse.Namespace) -> int:
     dataset = ingest_hf.normalize_hf_repo_id(args.dataset, "dataset")
     tokenizer = ingest_hf.normalize_hf_repo_id(args.tokenizer, "model")
     dest_prefix = args.dest_prefix.rstrip("/")
+    if args.resume and not args.run_id:
+        raise SystemExit("--resume requires a stable --run-id")
     run_id = args.run_id or utcnow().strftime("%Y%m%dT%H%M%SZ") + "-" + slugify(dataset.split("/")[-1])
     run_dir = args.results_root.expanduser().resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    files = discover_files(dataset, args)
-    if args.limit_files > 0:
-        files = files[: args.limit_files]
+    previous_status: dict[str, Any] | None = None
+    previous_rows_by_part: dict[str, dict[str, Any]] = {}
+    status_path = run_dir / "status.json"
+    input_files_path = run_dir / "input_files.json"
+    if args.resume and status_path.exists():
+        previous_status = read_json(status_path)
+        if previous_status.get("dataset") != dataset:
+            raise SystemExit(f"resume dataset mismatch: {previous_status.get('dataset')!r} != {dataset!r}")
+        if previous_status.get("tokenizer") != tokenizer:
+            raise SystemExit(f"resume tokenizer mismatch: {previous_status.get('tokenizer')!r} != {tokenizer!r}")
+        if previous_status.get("dest_prefix") != dest_prefix:
+            raise SystemExit(f"resume dest-prefix mismatch: {previous_status.get('dest_prefix')!r} != {dest_prefix!r}")
+        previous_rows_by_part = {row["part_id"]: row for row in previous_status.get("parts", [])}
+
+    if args.resume and input_files_path.exists():
+        raw_files = read_json(input_files_path)
+        files = raw_files["files"] if isinstance(raw_files, dict) else raw_files
+    else:
+        files = discover_files(dataset, args)
+        if args.limit_files > 0:
+            files = files[: args.limit_files]
     if not files:
         raise SystemExit("no parquet files discovered")
-    parts = partition_round_robin(files, args.pods)
+    parts = partition_contiguous(files, args.pods) if (args.packed_shards and args.ordered_packed_parts) else partition_round_robin(files, args.pods)
     part_ids = [f"part-{idx:03d}" for idx in range(args.pods)]
 
     rows = [
@@ -976,9 +1223,16 @@ def run_once(args: argparse.Namespace) -> int:
         }
         for idx, part_files in enumerate(parts)
     ]
-    write_json(run_dir / "input_files.json", {"files": files})
+    if previous_rows_by_part:
+        for row in rows:
+            previous = previous_rows_by_part.get(row["part_id"])
+            if previous:
+                row.update(previous)
+                row["file_count"] = len(parts[part_ids.index(row["part_id"])])
+                row["manifest_key"] = ingest_hf.part_manifest_key(dest_prefix, run_id, row["part_id"])
+    write_json(input_files_path, {"files": files})
     write_json(run_dir / "plan.json", {"run_id": run_id, "parts": rows})
-    write_json(run_dir / "status.json", build_status(run_id=run_id, status="running", dataset=dataset, tokenizer=tokenizer, dest_prefix=dest_prefix, rows=rows, run_dir=run_dir, args=args))
+    write_json(run_dir / "status.json", build_status(run_id=run_id, status="resuming" if previous_status else "running", dataset=dataset, tokenizer=tokenizer, dest_prefix=dest_prefix, rows=rows, run_dir=run_dir, args=args))
 
     if args.dry_run:
         for idx, part_files in enumerate(parts):
@@ -995,15 +1249,50 @@ def run_once(args: argparse.Namespace) -> int:
 
     row_by_part = {row["part_id"]: dict(row) for row in rows}
     for idx, part_id in enumerate(part_ids):
-        row_by_part[part_id].update(
-            status="renting",
-            pod_name=None,
-            gpu=None,
-            gpu_count=None,
+        row = row_by_part[part_id]
+        previous = previous_rows_by_part.get(part_id) if args.resume else None
+        row.update(
             local_dir=str(run_dir / "parts" / part_id),
             remote_root=f"{args.remote_base.rstrip('/')}/{run_id}/{part_id}",
             error=None,
         )
+        if previous and previous.get("status") == "completed":
+            row["status"] = "completed"
+        elif previous and previous.get("pod_name"):
+            row["status"] = "acquired"
+        else:
+            row.update(status="renting", pod_name=None, gpu=None, gpu_count=None)
+    if args.resume and previous_rows_by_part:
+        client = make_s3_client(args, remote_env)
+        bucket = remote_env["TEUTONIC_DS_BUCKET"]
+        for idx, part_id in enumerate(part_ids):
+            row = row_by_part[part_id]
+            if row.get("status") == "completed":
+                continue
+            manifest_keys = manifest_keys_from_row(row, row["manifest_key"])
+            existing_keys = available_manifest_keys(client, bucket, manifest_keys)
+            if not existing_keys:
+                continue
+            coverage = part_manifest_coverage(
+                client=client,
+                bucket=bucket,
+                manifest_keys=existing_keys,
+                part_files=parts[idx],
+                dataset=dataset,
+                tokenizer=tokenizer,
+            )
+            row.update(
+                manifest_keys=list(existing_keys),
+                repair_manifest_keys=[key for key in row.get("repair_manifest_keys", []) if key in existing_keys],
+                manifest_summaries=coverage["manifest_summaries"],
+                missing_files=coverage["missing_files"],
+                failed_files=coverage["failed_files"],
+                total_shards=coverage["total_shards"],
+                total_tokens=coverage["total_tokens"],
+            )
+            if coverage["complete"]:
+                row["status"] = "completed"
+
     write_json(
         run_dir / "status.json",
         build_status(
@@ -1019,33 +1308,57 @@ def run_once(args: argparse.Namespace) -> int:
     )
 
     rental_by_part: dict[str, dict[str, Any]] = {}
-    rent_pool = cf.ThreadPoolExecutor(max_workers=args.pods)
+    parts_to_acquire = [pid for pid in part_ids if row_by_part[pid].get("status") != "completed"]
+    for pid in part_ids:
+        if pid not in parts_to_acquire:
+            row = row_by_part[pid]
+            rental_by_part[pid] = {
+                "pod_name": row.get("pod_name"),
+                "gpu": row.get("gpu"),
+                "count": row.get("gpu_count"),
+                "error": None,
+                "resumed_completed": True,
+            }
+    rent_pool = cf.ThreadPoolExecutor(max_workers=max(1, len(parts_to_acquire)))
     rent_future_map = {}
     try:
-        if existing_pods:
-            rent_future_map = {
-                rent_pool.submit(
-                    claim_existing_pod_for_part,
-                    part_id=part_ids[idx],
-                    run_id=run_id,
-                    pod_name=existing_pods[idx],
-                    args=args,
-                    env=lium_env,
-                ): part_ids[idx]
-                for idx in range(args.pods)
-            }
-        else:
-            rent_future_map = {
-                rent_pool.submit(
-                    rent_pod_for_part,
-                    part_id=part_ids[idx],
-                    run_id=run_id,
-                    gpu_specs=gpu_specs,
-                    args=args,
-                    env=lium_env,
-                ): part_ids[idx]
-                for idx in range(args.pods)
-            }
+        for idx, part_id in enumerate(part_ids):
+            if part_id not in parts_to_acquire:
+                continue
+            previous_pod = row_by_part[part_id].get("pod_name") if args.resume else None
+            if previous_pod:
+                rent_future_map[
+                    rent_pool.submit(
+                        claim_existing_pod_for_part,
+                        part_id=part_id,
+                        run_id=run_id,
+                        pod_name=previous_pod,
+                        args=args,
+                        env=lium_env,
+                    )
+                ] = part_id
+            elif existing_pods:
+                rent_future_map[
+                    rent_pool.submit(
+                        claim_existing_pod_for_part,
+                        part_id=part_id,
+                        run_id=run_id,
+                        pod_name=existing_pods[idx],
+                        args=args,
+                        env=lium_env,
+                    )
+                ] = part_id
+            else:
+                rent_future_map[
+                    rent_pool.submit(
+                        rent_pod_for_part,
+                        part_id=part_id,
+                        run_id=run_id,
+                        gpu_specs=gpu_specs,
+                        args=args,
+                        env=lium_env,
+                    )
+                ] = part_id
         for fut in cf.as_completed(rent_future_map):
             part_id = rent_future_map[fut]
             try:
@@ -1097,7 +1410,7 @@ def run_once(args: argparse.Namespace) -> int:
     finally:
         rent_pool.shutdown(wait=False, cancel_futures=True)
 
-    acquisition_failed = [row_by_part[pid] for pid in part_ids if row_by_part[pid].get("status") != "acquired"]
+    acquisition_failed = [row_by_part[pid] for pid in parts_to_acquire if row_by_part[pid].get("status") != "acquired"]
     if acquisition_failed:
         for rental in rental_by_part.values():
             if rental.get("pod_name"):
@@ -1127,6 +1440,7 @@ def run_once(args: argparse.Namespace) -> int:
                 remote_env=remote_env,
                 run_dir=run_dir,
                 args=args,
+                resume_row=previous_rows_by_part.get(part_ids[idx]) if args.resume else None,
             ): part_ids[idx]
             for idx, part_files in enumerate(parts)
         }
@@ -1208,12 +1522,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--remote-min-free-gb", type=float, default=float(os.environ.get("TEUTONIC_LIUM_INGEST_REMOTE_MIN_FREE_GB", "20")))
     parser.add_argument("--remote-worker-disk-gb", type=float, default=float(os.environ.get("TEUTONIC_LIUM_INGEST_REMOTE_WORKER_DISK_GB", "1")))
     parser.add_argument("--remote-max-inflight-files", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_REMOTE_MAX_INFLIGHT", "16")))
+    parser.add_argument("--remote-cpu-reserve", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_REMOTE_CPU_RESERVE", "2")), help="CPU cores each remote pod should leave unused in auto worker mode.")
     parser.add_argument("--remote-auto-max-workers", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_REMOTE_AUTO_MAX_WORKERS", "32")))
     parser.add_argument("--repair-attempts", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_REPAIR_ATTEMPTS", "2")), help="Retry only missing/failed files on the same pod before marking a part failed.")
     parser.add_argument("--repair-workers", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_REPAIR_WORKERS", "4")), help="Workers to use for targeted repair attempts. 0 means min(remote-workers, 4).")
     parser.add_argument("--repair-max-inflight-files", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_REPAIR_MAX_INFLIGHT", "4")), help="Max in-flight files for targeted repair attempts. 0 means repair-workers.")
     parser.add_argument("--text-column", default=os.environ.get("TEUTONIC_LIUM_INGEST_TEXT_COLUMN", "text"))
+    parser.add_argument("--tokens-column", default=os.environ.get("TEUTONIC_LIUM_INGEST_TOKENS_COLUMN", ""), help="Read pre-tokenized List[int] ids from this parquet column instead of tokenizing text.")
+    parser.add_argument("--packed-shards", action="store_true", help="Use seq-packed shard mode instead of writing one .npy per source parquet.")
+    parser.add_argument("--ordered-packed-parts", action="store_true", help="With --packed-shards, process each pod as one ordered stream. Slower, but preserves cross-parquet adjacency within a part.")
+    parser.add_argument("--seq-len", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_SEQ_LEN", "2048")), help="Sequence packing length passed to ingest_hf.py in --packed-shards mode.")
+    parser.add_argument("--shard-size-gb", type=float, default=float(os.environ.get("TEUTONIC_LIUM_INGEST_SHARD_SIZE_GB", "2.0")), help="Approximate packed .npy shard payload size in GiB.")
     parser.add_argument("--include-prefixes", default=os.environ.get("TEUTONIC_LIUM_INGEST_INCLUDE_PREFIXES", None))
+    parser.add_argument("--exclude-prefixes", default=os.environ.get("TEUTONIC_LIUM_INGEST_EXCLUDE_PREFIXES", ""), help="Comma-separated parquet path prefixes to exclude after include filtering.")
     parser.add_argument("--langs", default=os.environ.get("TEUTONIC_LIUM_INGEST_LANGS", None))
     parser.add_argument("--limit-files", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_LIMIT_FILES", "0")))
     parser.add_argument("--ttl", default=os.environ.get("TEUTONIC_LIUM_INGEST_TTL", "36h"))
@@ -1231,6 +1552,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--keep-on-success", action="store_true", help="Do not delete successful pods.")
     parser.add_argument("--delete-on-failure", action="store_true", help="Delete failed pods after copying logs.")
     parser.add_argument("--no-registry-updates", action="store_true", help="Do not read/write the local Lium rental registry. Useful when passing already-rented pods or when another coordinator is updating the registry.")
+    parser.add_argument("--resume", action="store_true", help="Resume a prior run. Requires --run-id; reuses status/input files, completed parts, and prior pod names.")
+    parser.add_argument("--resume-wait-s", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_RESUME_WAIT_S", "86400")), help="Seconds to wait for an already-running remote part before restarting it during --resume.")
+    parser.add_argument("--resume-poll-s", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_RESUME_POLL_S", "60")), help="Polling interval while waiting for already-running remote parts during --resume.")
     parser.add_argument("--no-merge", action="store_true", help="Do not merge part manifests into the final manifest.")
     parser.add_argument("--dry-run", action="store_true", help="Discover/split files and write local plan without renting pods.")
     args = parser.parse_args()
@@ -1242,12 +1566,27 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--pods must be positive")
     if args.repair_attempts < 0:
         raise SystemExit("--repair-attempts must be non-negative")
+    if args.packed_shards and args.ordered_packed_parts and args.repair_attempts:
+        print("[warn] --ordered-packed-parts uses ordered streams; forcing --repair-attempts 0", flush=True)
+        args.repair_attempts = 0
+    if args.remote_cpu_reserve < 0:
+        raise SystemExit("--remote-cpu-reserve must be non-negative")
     if args.repair_workers < 0:
         raise SystemExit("--repair-workers must be non-negative")
     if args.repair_max_inflight_files < 0:
         raise SystemExit("--repair-max-inflight-files must be non-negative")
+    if args.resume_wait_s < 0:
+        raise SystemExit("--resume-wait-s must be non-negative")
+    if args.resume_poll_s <= 0:
+        raise SystemExit("--resume-poll-s must be positive")
     if args.existing_pods_list and args.pods != len(args.existing_pods_list):
         raise SystemExit(f"--pods ({args.pods}) must match --existing-pods count ({len(args.existing_pods_list)})")
+    if args.tokens_column and args.packed_shards:
+        raise SystemExit("--tokens-column is currently only supported with one-npy-per-parquet mode")
+    if args.seq_len <= 0:
+        raise SystemExit("--seq-len must be positive")
+    if args.shard_size_gb <= 0:
+        raise SystemExit("--shard-size-gb must be positive")
     return args
 
 
