@@ -74,6 +74,9 @@ DEFAULT_S3_AUTH_SOURCE = os.environ.get("TEUTONIC_DS_AUTH_SOURCE", "env")
 DEFAULT_S3_SHARD_CONTAINS = os.environ.get("TEUTONIC_DS_SHARD_CONTAINS", "/shards/")
 DEFAULT_S3_SHARD_SUFFIX = os.environ.get("TEUTONIC_DS_SHARD_SUFFIX", ".npy")
 DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "512"))
+# In parallel mode each model gets only n/2 GPUs → more layers per GPU → larger MLP intermediates.
+# Use a smaller batch to avoid OOM.  512 is fine for 8-GPU sequential; 256 for 4-GPU parallel.
+DEFAULT_PARALLEL_BATCH_SIZE = int(os.environ.get("EVAL_PARALLEL_BATCH_SIZE", "128"))
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0025"))
@@ -90,7 +93,7 @@ EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 
 PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
 
-EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "1800"))
+EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "3000"))
 DEFAULT_LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "32"))
 DEFAULT_LOG_EVERY_BATCHES = int(os.environ.get("EVAL_LOG_EVERY_BATCHES", "1"))
 DEFAULT_MODEL_DEVICE_MAP = os.environ.get("TEUTONIC_MODEL_DEVICE_MAP", "auto")
@@ -177,6 +180,7 @@ class EvalRequest(BaseModel):
     model_device_map: str = DEFAULT_MODEL_DEVICE_MAP
     gpu_memory_fraction: float = DEFAULT_GPU_MEMORY_FRACTION
     parallel_models: bool = DEFAULT_PARALLEL_MODELS
+    parallel_batch_size: int = DEFAULT_PARALLEL_BATCH_SIZE
 
 
 def setup_logging() -> None:
@@ -330,29 +334,29 @@ def materialize_model(repo_or_url: str, digest: str = "", on_phase=None) -> str:
 
     def download_once() -> str:
         target.mkdir(parents=True, exist_ok=True)
-        if repo_or_url.startswith("http") and "huggingface.co" in repo_or_url:
-            from huggingface_hub import snapshot_download
+        # if repo_or_url.startswith("http") and "huggingface.co" in repo_or_url:
+        #     from huggingface_hub import snapshot_download
 
-            revision = digest[3:] if digest.startswith("hf:") else (digest or None)
-            return snapshot_download(
-                repo_id=repo,
-                revision=revision,
-                local_dir=str(target),
-                allow_patterns=MODEL_ALLOW_PATTERNS,
-                max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
-                token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
-            )
-        if digest.startswith("hf:"):
-            from huggingface_hub import snapshot_download
+        #     revision = digest[3:] if digest.startswith("hf:") else (digest or None)
+        #     return snapshot_download(
+        #         repo_id=repo,
+        #         revision=revision,
+        #         local_dir=str(target),
+        #         allow_patterns=MODEL_ALLOW_PATTERNS,
+        #         max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
+        #         token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
+        #     )
+        # if digest.startswith("hf:"):
+        #     from huggingface_hub import snapshot_download
 
-            return snapshot_download(
-                repo_id=repo,
-                revision=digest[3:],
-                local_dir=str(target),
-                allow_patterns=MODEL_ALLOW_PATTERNS,
-                max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
-                token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
-            )
+        #     return snapshot_download(
+        #         repo_id=repo,
+        #         revision=digest[3:],
+        #         local_dir=str(target),
+        #         allow_patterns=MODEL_ALLOW_PATTERNS,
+        #         max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
+        #         token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
+        #     )
 
         from hippius_hub import snapshot_download
         from model_store import get_hub_token
@@ -1547,17 +1551,18 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             from concurrent.futures import ThreadPoolExecutor
             _eval_pool = ThreadPoolExecutor(max_workers=2)
 
+        effective_batch_size = req.parallel_batch_size if use_parallel else req.batch_size
         king_losses: list[float] = []
         challenger_losses: list[float] = []
         king_sum = 0.0
         challenger_sum = 0.0
         eval_t0 = time.time()
-        total_batches = (len(sequences) + req.batch_size - 1) // req.batch_size
+        total_batches = (len(sequences) + effective_batch_size - 1) // effective_batch_size
         log_every_batches = max(1, int(req.log_every_batches or 1))
-        for start in range(0, len(sequences), req.batch_size):
+        for start in range(0, len(sequences), effective_batch_size):
             check_eval_runtime(t0)
-            batch_idx = (start // req.batch_size) + 1
-            batch = sequences[start : start + req.batch_size]
+            batch_idx = (start // effective_batch_size) + 1
+            batch = sequences[start : start + effective_batch_size]
             if _eval_pool is not None:
                 kfut = _eval_pool.submit(compute_per_sequence_loss, king, batch, req.lm_head_chunk)
                 cfut = _eval_pool.submit(compute_per_sequence_loss, challenger, batch, req.lm_head_chunk)
@@ -1762,5 +1767,5 @@ if __name__ == "__main__":
 
     setup_logging()
     host = os.environ.get("EVAL_HOST", "127.0.0.1")
-    port = int(os.environ.get("EVAL_PORT", "9010"))
+    port = int(os.environ.get("EVAL_PORT", "9000"))
     uvicorn.run(app, host=host, port=port, log_level="info")

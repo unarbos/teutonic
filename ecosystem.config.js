@@ -36,8 +36,8 @@ module.exports = {
       // First-deploy degraded mode: no private holdout pool yet, so use
       // public-only eval. Once /var/teutonic/private_pool is populated, bump
       // TEUTONIC_EVAL_N_PRIVATE to 2500 and TEUTONIC_EVAL_N_PUBLIC to 2500.
-      TEUTONIC_EVAL_N: "10000",
-      TEUTONIC_EVAL_N_PUBLIC: "10000",
+      TEUTONIC_EVAL_N: "20000",
+      TEUTONIC_EVAL_N_PUBLIC: "20000",
       TEUTONIC_EVAL_N_PRIVATE: "0",
       TEUTONIC_NETUID: "3",
       TEUTONIC_NETWORK: "finney",
@@ -54,8 +54,6 @@ module.exports = {
       TEUTONIC_DS_ACCESS_KEY: doppler("HIPPIUS_ACCESS_KEY"),
       TEUTONIC_DS_SECRET_KEY: doppler("HIPPIUS_SECRET_KEY"),
       TMC_API_KEY: doppler("TMC_API_KEY"),
-      DISCORD_BOT_TOKEN: doppler("DISCORD_BOT_TOKEN"),
-      DISCORD_CHANNEL_ID: doppler("DISCORD_CHANNEL_ID"),
       // Hard wall-clock cap per model: validator's `_bounded_eval` aborts
       // and records `eval_hard_timeout` at this mark — no retry, next entry
       // runs. Aligned with eval-server's HF_PREFETCH_TIMEOUT=1800s so a
