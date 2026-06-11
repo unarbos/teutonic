@@ -73,7 +73,10 @@ DEFAULT_S3_PREFIX = os.environ.get("TEUTONIC_DS_PREFIX", "dataset/finewebedu/")
 DEFAULT_S3_AUTH_SOURCE = os.environ.get("TEUTONIC_DS_AUTH_SOURCE", "env")
 DEFAULT_S3_SHARD_CONTAINS = os.environ.get("TEUTONIC_DS_SHARD_CONTAINS", "/shards/")
 DEFAULT_S3_SHARD_SUFFIX = os.environ.get("TEUTONIC_DS_SHARD_SUFFIX", ".npy")
-DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "256"))
+DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "512"))
+# In parallel mode each model gets only n/2 GPUs → more layers per GPU → larger MLP intermediates.
+# Use a smaller batch to avoid OOM.  512 is fine for 8-GPU sequential; 256 for 4-GPU parallel.
+DEFAULT_PARALLEL_BATCH_SIZE = int(os.environ.get("EVAL_PARALLEL_BATCH_SIZE", "128"))
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0025"))
@@ -90,10 +93,11 @@ EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 
 PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
 
-EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "1800"))
-DEFAULT_LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "256"))
+EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "3000"))
+DEFAULT_LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "32"))
 DEFAULT_LOG_EVERY_BATCHES = int(os.environ.get("EVAL_LOG_EVERY_BATCHES", "1"))
 DEFAULT_MODEL_DEVICE_MAP = os.environ.get("TEUTONIC_MODEL_DEVICE_MAP", "auto")
+DEFAULT_PARALLEL_MODELS = os.environ.get("TEUTONIC_PARALLEL_MODELS", "1") == "1"
 DEFAULT_GPU_MEMORY_FRACTION = float(os.environ.get("TEUTONIC_GPU_MEMORY_FRACTION", "0.45"))
 DEFAULT_MODEL_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRIES", "3"))
 DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRY_BACKOFF_S", "15"))
@@ -132,6 +136,7 @@ _gpu_ids: list[int] = []
 _king_model = None
 _king_key: tuple[str, ...] | None = None
 _king_device = ""
+_king_gpu_ids: list[int] = []
 
 
 class EvalRequest(BaseModel):
@@ -174,6 +179,8 @@ class EvalRequest(BaseModel):
     log_every_batches: int = DEFAULT_LOG_EVERY_BATCHES
     model_device_map: str = DEFAULT_MODEL_DEVICE_MAP
     gpu_memory_fraction: float = DEFAULT_GPU_MEMORY_FRACTION
+    parallel_models: bool = DEFAULT_PARALLEL_MODELS
+    parallel_batch_size: int = DEFAULT_PARALLEL_BATCH_SIZE
 
 
 def setup_logging() -> None:
@@ -204,6 +211,14 @@ def device_plan(req: EvalRequest) -> str:
         return f"cuda:{_gpu_ids[0]}"
     if mode != "auto":
         raise ValueError("model_device_map must be one of: auto, single")
+    return "auto"
+
+
+def device_plan_for_gpus(gpu_ids: list[int]) -> str:
+    if not torch.cuda.is_available() or not gpu_ids:
+        return "cpu"
+    if len(gpu_ids) == 1:
+        return f"cuda:{gpu_ids[0]}"
     return "auto"
 
 
@@ -319,29 +334,29 @@ def materialize_model(repo_or_url: str, digest: str = "", on_phase=None) -> str:
 
     def download_once() -> str:
         target.mkdir(parents=True, exist_ok=True)
-        if repo_or_url.startswith("http") and "huggingface.co" in repo_or_url:
-            from huggingface_hub import snapshot_download
+        # if repo_or_url.startswith("http") and "huggingface.co" in repo_or_url:
+        #     from huggingface_hub import snapshot_download
 
-            revision = digest[3:] if digest.startswith("hf:") else (digest or None)
-            return snapshot_download(
-                repo_id=repo,
-                revision=revision,
-                local_dir=str(target),
-                allow_patterns=MODEL_ALLOW_PATTERNS,
-                max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
-                token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
-            )
-        if digest.startswith("hf:"):
-            from huggingface_hub import snapshot_download
+        #     revision = digest[3:] if digest.startswith("hf:") else (digest or None)
+        #     return snapshot_download(
+        #         repo_id=repo,
+        #         revision=revision,
+        #         local_dir=str(target),
+        #         allow_patterns=MODEL_ALLOW_PATTERNS,
+        #         max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
+        #         token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
+        #     )
+        # if digest.startswith("hf:"):
+        #     from huggingface_hub import snapshot_download
 
-            return snapshot_download(
-                repo_id=repo,
-                revision=digest[3:],
-                local_dir=str(target),
-                allow_patterns=MODEL_ALLOW_PATTERNS,
-                max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
-                token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
-            )
+        #     return snapshot_download(
+        #         repo_id=repo,
+        #         revision=digest[3:],
+        #         local_dir=str(target),
+        #         allow_patterns=MODEL_ALLOW_PATTERNS,
+        #         max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
+        #         token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
+        #     )
 
         from hippius_hub import snapshot_download
         from model_store import get_hub_token
@@ -697,32 +712,47 @@ def compare_model_configs(king_config, challenger_config) -> list[dict]:
 
 
 def load_safetensors_state_dict(model_dir: str) -> dict:
+    from concurrent.futures import ThreadPoolExecutor
     from safetensors.torch import load_file
 
     path = Path(model_dir)
-    state = {}
     shard_names = snapshot_safetensor_names(model_dir)
     if not shard_names:
         raise FileNotFoundError(f"no .safetensors files found in {model_dir}")
-    for shard_name in shard_names:
+
+    results: dict[str, dict] = {}
+    lock = threading.Lock()
+
+    def _load(shard_name: str) -> None:
         log.info("loading shard %s", shard_name)
-        state.update(load_file(str(path / shard_name), device="cpu"))
+        shard_state = load_file(str(path / shard_name), device="cpu")
+        with lock:
+            results[shard_name] = shard_state
+
+    with ThreadPoolExecutor(max_workers=len(shard_names)) as pool:
+        list(pool.map(_load, shard_names))
+
+    state: dict = {}
+    for shard_name in shard_names:
+        state.update(results[shard_name])
     return state
 
 
-def gpu_max_memory(fraction: float) -> dict:
-    if not torch.cuda.is_available() or not _gpu_ids:
+def gpu_max_memory(fraction: float, gpu_ids: list[int] | None = None) -> dict:
+    ids = gpu_ids if gpu_ids is not None else _gpu_ids
+    if not torch.cuda.is_available() or not ids:
         return {}
     fraction = min(max(float(fraction), 0.05), 0.95)
     max_memory = {}
-    for gpu_id in _gpu_ids:
+    for gpu_id in ids:
         props = torch.cuda.get_device_properties(gpu_id)
         gib = max(1, int((props.total_memory / (1024**3)) * fraction))
         max_memory[gpu_id] = f"{gib}GiB"
     return max_memory
 
 
-def dispatch_model_across_gpus(model, req: EvalRequest, label: str, on_phase=None):
+def dispatch_model_across_gpus(model, req: EvalRequest, label: str, gpu_ids: list[int] | None = None, on_phase=None):
+    effective_ids = gpu_ids if gpu_ids is not None else _gpu_ids
     try:
         from accelerate import dispatch_model, infer_auto_device_map
     except Exception as exc:
@@ -732,8 +762,8 @@ def dispatch_model_across_gpus(model, req: EvalRequest, label: str, on_phase=Non
         ) from exc
 
     no_split = list(getattr(model, "_no_split_modules", None) or [])
-    max_memory = gpu_max_memory(req.gpu_memory_fraction)
-    device_map = balanced_transformer_device_map(model)
+    max_memory = gpu_max_memory(req.gpu_memory_fraction, effective_ids)
+    device_map = balanced_transformer_device_map(model, effective_ids)
     if device_map:
         if on_phase:
             used = sorted({str(device) for device in device_map.values()})
@@ -745,7 +775,7 @@ def dispatch_model_across_gpus(model, req: EvalRequest, label: str, on_phase=Non
     if on_phase:
         on_phase({
             "phase": f"{label}_device_map_infer_start",
-            "gpus": _gpu_ids,
+            "gpus": effective_ids,
             "max_memory": max_memory,
             "no_split": no_split,
         })
@@ -763,8 +793,9 @@ def dispatch_model_across_gpus(model, req: EvalRequest, label: str, on_phase=Non
     return model
 
 
-def balanced_transformer_device_map(model) -> dict:
-    if not torch.cuda.is_available() or len(_gpu_ids) < 2:
+def balanced_transformer_device_map(model, gpu_ids: list[int] | None = None) -> dict:
+    ids = gpu_ids if gpu_ids is not None else _gpu_ids
+    if not torch.cuda.is_available() or len(ids) < 2:
         return {}
     core = getattr(model, "model", None)
     layers = getattr(core, "layers", None)
@@ -776,8 +807,8 @@ def balanced_transformer_device_map(model) -> dict:
         return {}
 
     device_map = {}
-    first = _gpu_ids[0]
-    last = _gpu_ids[-1]
+    first = ids[0]
+    last = ids[-1]
 
     for name, _module in model.named_children():
         if name != "model":
@@ -787,12 +818,40 @@ def balanced_transformer_device_map(model) -> dict:
         full_name = f"model.{name}"
         if name == "layers":
             continue
-        device_map[full_name] = first if name in ("embed_tokens", "wte") else last
+        # rotary_emb co-located with embed_tokens: avoids cross-GPU inv_freq transfer
+        # when computing position embeddings at the start of each forward pass.
+        if name in ("embed_tokens", "wte", "rotary_emb"):
+            device_map[full_name] = first
+        else:
+            device_map[full_name] = last  # norm, etc.
 
+    # Reserve the last GPU for norm + lm_head only.  It already bears the largest
+    # activation spike: full hidden states (~4 GB) + logit chunk (~4 GB with chunk=32).
+    # Distribute all transformer layers across GPUs 0..last-1.
+    n_layer_gpus = max(1, len(ids) - 1)
+    for layer_idx in range(n_layers):
+        gpu_idx = min(n_layer_gpus - 1, (layer_idx * n_layer_gpus) // n_layers)
+        device_map[f"model.layers.{layer_idx}"] = ids[gpu_idx]
+
+    return device_map
+
+
+def balanced_transformer_device_map_from_config(config) -> dict | None:
+    if not torch.cuda.is_available() or len(_gpu_ids) < 2:
+        return None
+    n_layers = getattr(config, "num_hidden_layers", None)
+    if not n_layers:
+        return None
+    first = _gpu_ids[0]
+    last = _gpu_ids[-1]
+    device_map: dict = {
+        "model.embed_tokens": first,
+        "model.norm": last,
+        "lm_head": last,
+    }
     for layer_idx in range(n_layers):
         gpu_idx = min(len(_gpu_ids) - 1, (layer_idx * len(_gpu_ids)) // n_layers)
         device_map[f"model.layers.{layer_idx}"] = _gpu_ids[gpu_idx]
-
     return device_map
 
 
@@ -806,7 +865,7 @@ def model_input_device(model) -> torch.device:
     return next(model.parameters()).device
 
 
-def load_quasar_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, on_phase=None):
+def load_quasar_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
     from transformers import AutoModelForCausalLM
 
     if on_phase:
@@ -832,9 +891,10 @@ def load_quasar_model(snapshot_dir: str, config, device: str, label: str, req: E
     if on_phase:
         on_phase({"phase": f"{label}_to_device_start", "device": device, "dtype": str(dtype)})
     if device == "auto":
-        log.info("%s dispatching across GPUs %s dtype=%s", label, _gpu_ids, dtype)
+        effective_ids = gpu_ids if gpu_ids is not None else _gpu_ids
+        log.info("%s dispatching across GPUs %s dtype=%s", label, effective_ids, dtype)
         model = model.to(dtype=dtype)
-        model = dispatch_model_across_gpus(model, req, label, on_phase=on_phase)
+        model = dispatch_model_across_gpus(model, req, label, gpu_ids=gpu_ids, on_phase=on_phase)
     else:
         log.info("%s moving to %s dtype=%s", label, device, dtype)
         model = model.to(device=device, dtype=dtype)
@@ -1347,11 +1407,12 @@ def bootstrap_verdict(king_losses: list[float], challenger_losses: list[float], 
     }
 
 
-def ensure_king(req: EvalRequest, snapshot: str, config, config_source: str, device: str, on_phase=None):
-    global _king_model, _king_key, _king_device
+def ensure_king(req: EvalRequest, snapshot: str, config, config_source: str, device: str, gpu_ids: list[int] | None = None, on_phase=None):
+    global _king_model, _king_key, _king_device, _king_gpu_ids
     repo = normalize_model_ref(req.king_repo)
     key = (repo, req.king_digest or "latest", config_source)
-    if _king_model is not None and _king_key == key and _king_device == device:
+    effective_gpu_ids = list(gpu_ids) if gpu_ids is not None else list(_gpu_ids)
+    if _king_model is not None and _king_key == key and _king_device == device and _king_gpu_ids == effective_gpu_ids:
         if on_phase:
             on_phase({"phase": "king_reuse", "repo": repo, "device": device})
         return _king_model
@@ -1359,9 +1420,10 @@ def ensure_king(req: EvalRequest, snapshot: str, config, config_source: str, dev
         del _king_model
         _king_model = None
         torch.cuda.empty_cache()
-    _king_model = load_quasar_model(snapshot, config, device, "king", req, on_phase=on_phase)
+    _king_model = load_quasar_model(snapshot, config, device, "king", req, gpu_ids=gpu_ids, on_phase=on_phase)
     _king_key = key
     _king_device = device
+    _king_gpu_ids = effective_gpu_ids
     return _king_model
 
 
@@ -1423,6 +1485,7 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
     threading.Thread(target=heartbeat_loop, daemon=True, name=f"heartbeat-{eval_id}").start()
 
     challenger = None
+    _eval_pool = None
     try:
         on_phase({"phase": "setup_start"})
         limits_meta = apply_eval_limits(req, eval_id)
@@ -1459,32 +1522,55 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         check_eval_runtime(t0)
         on_phase({"phase": "dataset_sample_done", "digest": dataset_meta["digest"][:16]})
 
-        model_device = device_plan(req)
-        king = ensure_king(req, king_snapshot, king_config, king_artifacts["source"], model_device, on_phase=on_phase)
+        use_parallel = req.parallel_models and len(_gpu_ids) >= 4
+        if use_parallel:
+            mid = len(_gpu_ids) // 2
+            king_gpu_ids = _gpu_ids[:mid]
+            challenger_gpu_ids = _gpu_ids[mid:]
+            on_phase({"phase": "parallel_models_setup", "king_gpus": king_gpu_ids, "challenger_gpus": challenger_gpu_ids})
+        else:
+            king_gpu_ids = _gpu_ids
+            challenger_gpu_ids = _gpu_ids
+
+        king_device = device_plan_for_gpus(king_gpu_ids)
+        challenger_device = device_plan_for_gpus(challenger_gpu_ids)
+        king = ensure_king(req, king_snapshot, king_config, king_artifacts["source"], king_device, gpu_ids=king_gpu_ids, on_phase=on_phase)
         check_eval_runtime(t0)
         challenger = load_quasar_model(
             challenger_snapshot,
             challenger_config,
-            model_device,
+            challenger_device,
             "challenger",
             req,
+            gpu_ids=challenger_gpu_ids,
             on_phase=on_phase,
         )
         check_eval_runtime(t0)
 
+        if use_parallel:
+            from concurrent.futures import ThreadPoolExecutor
+            _eval_pool = ThreadPoolExecutor(max_workers=2)
+
+        effective_batch_size = req.parallel_batch_size if use_parallel else req.batch_size
         king_losses: list[float] = []
         challenger_losses: list[float] = []
         king_sum = 0.0
         challenger_sum = 0.0
         eval_t0 = time.time()
-        total_batches = (len(sequences) + req.batch_size - 1) // req.batch_size
+        total_batches = (len(sequences) + effective_batch_size - 1) // effective_batch_size
         log_every_batches = max(1, int(req.log_every_batches or 1))
-        for start in range(0, len(sequences), req.batch_size):
+        for start in range(0, len(sequences), effective_batch_size):
             check_eval_runtime(t0)
-            batch_idx = (start // req.batch_size) + 1
-            batch = sequences[start : start + req.batch_size]
-            kl = compute_per_sequence_loss(king, batch, req.lm_head_chunk)
-            cl = compute_per_sequence_loss(challenger, batch, req.lm_head_chunk)
+            batch_idx = (start // effective_batch_size) + 1
+            batch = sequences[start : start + effective_batch_size]
+            if _eval_pool is not None:
+                kfut = _eval_pool.submit(compute_per_sequence_loss, king, batch, req.lm_head_chunk)
+                cfut = _eval_pool.submit(compute_per_sequence_loss, challenger, batch, req.lm_head_chunk)
+                kl = kfut.result()
+                cl = cfut.result()
+            else:
+                kl = compute_per_sequence_loss(king, batch, req.lm_head_chunk)
+                cl = compute_per_sequence_loss(challenger, batch, req.lm_head_chunk)
             king_losses.extend(kl)
             challenger_losses.extend(cl)
             king_sum += float(np.sum(kl))
@@ -1524,7 +1610,9 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             "challenger_digest": req.challenger_digest,
             "code_model": req.code_model,
             "allow_code_model_fallback": req.allow_code_model_fallback,
-            "model_device": model_device,
+            "king_device": king_device,
+            "challenger_device": challenger_device,
+            "parallel_models": use_parallel,
             "gpu_memory_fraction": req.gpu_memory_fraction,
             "limits": limits_meta,
             "model_artifacts": {
@@ -1547,6 +1635,8 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         events.put({"type": "error", "data": {"error": str(exc)}})
     finally:
         heartbeat_stop.set()
+        if _eval_pool is not None:
+            _eval_pool.shutdown(wait=False)
         if challenger is not None:
             del challenger
             torch.cuda.empty_cache()
@@ -1677,5 +1767,5 @@ if __name__ == "__main__":
 
     setup_logging()
     host = os.environ.get("EVAL_HOST", "127.0.0.1")
-    port = int(os.environ.get("EVAL_PORT", "9010"))
+    port = int(os.environ.get("EVAL_PORT", "9000"))
     uvicorn.run(app, host=host, port=port, log_level="info")
