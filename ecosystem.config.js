@@ -29,9 +29,9 @@ module.exports = {
       // chain.toml at the repo root. Override here only for short-lived
       // experiments — the static file is the source of truth.
       TEUTONIC_EVAL_DATASET_MODE: "raw_hippius",
-      TEUTONIC_RAW_DATASET_PREFIX: "hf-mirrors/HuggingFaceFW/fineweb-edu/data",
-      TEUTONIC_RAW_DATASET_MANIFEST: "hf-mirrors/HuggingFaceFW/fineweb-edu/data/_manifest.json",
-      TEUTONIC_RAW_TOKENIZER_REPO: "Qwen/Qwen3-8B",
+      TEUTONIC_RAW_DATASET_PREFIX: "teutonic-sn3/dataset/data",
+      TEUTONIC_RAW_DATASET_MANIFEST: "teutonic-sn3/dataset/all-datasets.manifest.json",
+      TEUTONIC_RAW_TOKENIZER_REPO: "silx-ai/Quasar-10B",
       ///TEUTONIC_FORCE_SEED_KING: "1", 22.05.2026 16:07 override
       // First-deploy degraded mode: no private holdout pool yet, so use
       // public-only eval. Once /var/teutonic/private_pool is populated, bump
