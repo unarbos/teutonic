@@ -60,12 +60,14 @@ EVAL_N = int(os.environ.get("TEUTONIC_EVAL_N", "5000"))
 # a populated private holdout pool should set TEUTONIC_EVAL_N_PRIVATE=0; the
 # whole-corpus-overfit defense is then disabled (public-only mode).
 EVAL_N_PRIVATE = int(os.environ.get("TEUTONIC_EVAL_N_PRIVATE", str(EVAL_N // 2)))
-EVAL_N_PUBLIC = int(os.environ.get("TEUTONIC_EVAL_N_PUBLIC", "20000"))
+EVAL_N_PUBLIC = int(os.environ.get("TEUTONIC_EVAL_N_PUBLIC", str(EVAL_N - EVAL_N_PRIVATE)))
+EVAL_N_PUBLIC = 20000
 EVAL_ALPHA = 0.001
 SEQ_LEN = 2048
 POLL_INTERVAL = 30
 WEIGHT_INTERVAL = 300
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
+MIN_SUBMISSION_BLOCK = int(os.environ.get("TEUTONIC_MIN_SUBMISSION_BLOCK", "8377970"))
 
 # Weight policy: equal-share across the current king plus up to four prior
 # distinct kings that are still registered. If none are available, fall back to
@@ -75,7 +77,7 @@ BURN_UID = int(os.environ.get("TEUTONIC_BURN_UID", "0"))
 
 # Watchdogs / anti-stuckness safeguards.
 TICK_WARN_AFTER = int(os.environ.get("TEUTONIC_TICK_WARN_AFTER", "120"))
-TICK_RESTART_AFTER = int(os.environ.get("TEUTONIC_TICK_RESTART_AFTER", "3000"))
+TICK_RESTART_AFTER = int(os.environ.get("TEUTONIC_TICK_RESTART_AFTER", "2700"))
 STREAM_IDLE_WARN_AFTER = int(os.environ.get("TEUTONIC_STREAM_IDLE_WARN_AFTER", "180"))
 STREAM_IDLE_TIMEOUT = int(os.environ.get("TEUTONIC_STREAM_IDLE_TIMEOUT", "420"))
 HEALTHCHECK_INTERVAL = int(os.environ.get("TEUTONIC_HEALTHCHECK_INTERVAL", "60"))
@@ -175,6 +177,9 @@ BLOCKS_PER_HOUR = 300
 # off the hot path and fail open when the public endpoint is degraded.
 DASHBOARD_FLUSH_MIN_INTERVAL = float(os.environ.get("TEUTONIC_DASHBOARD_FLUSH_MIN_INTERVAL", "5"))
 HIPPIUS_COOLDOWN_SECONDS = int(os.environ.get("TEUTONIC_HIPPIUS_COOLDOWN_SECONDS", "300"))
+S3_CONNECT_TIMEOUT = int(os.environ.get("TEUTONIC_S3_CONNECT_TIMEOUT", "5"))
+S3_READ_TIMEOUT = int(os.environ.get("TEUTONIC_S3_READ_TIMEOUT", "15"))
+S3_MAX_ATTEMPTS = int(os.environ.get("TEUTONIC_S3_MAX_ATTEMPTS", "3"))
 
 # Number of most-recent kings that share equal weight and appear in the Reigns table.
 KING_CHAIN_SIZE = int(os.environ.get("TEUTONIC_KING_CHAIN_SIZE", "5"))
@@ -309,11 +314,12 @@ class R2:
     def __init__(self):
         # Hippius is currently flaky on long-lived reads — bound every S3
         # call so a single hung connection cannot wedge the validator's
-        # main async loop for minutes (botocore default is 60s + retries).
+        # main async loop for minutes. Startup reads several state keys
+        # serially, so keep retry budgets short and operator-tunable.
         _s3_cfg = dict(
-            connect_timeout=15,
-            read_timeout=45,
-            retries={"max_attempts": 10, "mode": "adaptive"},
+            connect_timeout=S3_CONNECT_TIMEOUT,
+            read_timeout=S3_READ_TIMEOUT,
+            retries={"max_attempts": S3_MAX_ATTEMPTS, "mode": "standard"},
         )
         self.client = boto3.client(
             "s3", endpoint_url=R2_ENDPOINT,
@@ -383,7 +389,7 @@ class R2:
                     ContentType=content_type,
                     **extra,
                 )
-                return
+                # Also mirror successful Hippius dashboard writes to R2.
             except Exception as exc:
                 self._mark_hippius_failure(key, exc)
 
@@ -423,11 +429,15 @@ class R2:
             log.warning("R2 put failed for %s (non-fatal)", key)
 
     def get(self, key):
+        started = time.monotonic()
+        log.info("R2 get start: %s", key)
         try:
-            return json.loads(
-                self.client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read()
-            )
-        except Exception:
+            body = self.client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read()
+            data = json.loads(body)
+            log.info("R2 get ok: %s (%.1fs, %d bytes)", key, time.monotonic() - started, len(body))
+            return data
+        except Exception as exc:
+            log.warning("R2 get failed: %s (%.1fs): %s", key, time.monotonic() - started, exc)
             return None
 
     def ds_get(self, key):
@@ -639,9 +649,10 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
         oci_repo = _oci_repo_path(repo_id, None)
         raw_token = _resolve_hub_token(f"copy-check manifest {repo_id}")
         oci_token = get_oci_bearer_token(oci_repo, resolve_token_value(raw_token), push=False)
-        manifest = fetch_manifest(registry, oci_repo, oci_digest, oci_token, missing_ok=True)
-        if not manifest:
+        manifest_result = fetch_manifest(registry, oci_repo, oci_digest, oci_token, missing_ok=True)
+        if not manifest_result:
             return None
+        manifest = getattr(manifest_result, "manifest", manifest_result)
         safetensor_layers: dict[str, str] = {}
         for layer in manifest.get("layers", []):
             title = layer.get("annotations", {}).get("org.opencontainers.image.title", "")
@@ -921,6 +932,8 @@ def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys):
         if not entries or hotkey in seen_hotkeys:
             continue
         block, data = max(entries, key=lambda e: e[0])
+        if int(block or 0) <= MIN_SUBMISSION_BLOCK:
+            continue
         try:
             ref, author_hotkey = parse_reveal_v4(data)
         except ValueError:
@@ -1179,6 +1192,11 @@ class State:
         digest = reveal.get("model_digest", "")
         model_key = _model_key(repo, digest)
         hotkey = reveal.get("hotkey", "")
+        block = int(reveal.get("block", 0) or 0)
+        if block <= MIN_SUBMISSION_BLOCK:
+            log.info("skipping enqueue: submission from %s at block %s is not over %s",
+                     hotkey[:16], block, MIN_SUBMISSION_BLOCK)
+            return None
         king_hotkey = self.king.get("hotkey", "")
         if king_hotkey and hotkey == king_hotkey:
             log.info("skipping enqueue: hotkey %s is the current king", hotkey[:16])
@@ -1720,6 +1738,12 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
     state.set_phase("process_challenge", challenge_id=cid, notes=f"processing {model_repo}")
     state.note_progress(notes=f"started processing {cid}")
 
+    reveal_block = int(entry.get("block", 0) or 0)
+    if reveal_block <= MIN_SUBMISSION_BLOCK:
+        log.info("skipping %s: submission block %s is not over %s",
+                 cid, reveal_block, MIN_SUBMISSION_BLOCK)
+        return
+
     king_hotkey = state.king.get("hotkey", "")
     if king_hotkey and hotkey == king_hotkey:
         log.info("skipping %s: challenger hotkey %s is the current king", cid, hotkey[:16])
@@ -1974,7 +1998,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
     state.flush_dashboard(force=True)
 
     verdict = None
-    async with httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=30.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(2700.0, connect=30.0)) as client:
         eval_payload = {
             "king_repo": king_repo,
             "challenger_repo": model_repo,
@@ -2025,7 +2049,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         log.info("eval %s dispatched to eval server as %s", cid, eval_id)
 
         async with client.stream("GET", f"{EVAL_SERVER_URL}/eval/{eval_id}/stream",
-                                  timeout=httpx.Timeout(1800.0)) as stream:
+                                  timeout=httpx.Timeout(2700.0)) as stream:
             async for line in _stream_events_with_idle_watchdog(stream, state, cid):
                 if not line.startswith("data: "):
                     continue
@@ -2134,12 +2158,18 @@ async def main():
         log.error("set TEUTONIC_EVAL_SERVER")
         sys.exit(1)
 
+    log.info("startup: constructing storage clients")
     r2 = R2()
     state = State(r2)
+    log.info("startup: loading persisted state")
     state.load()
+    log.info("startup: persisted state loaded")
 
+    log.info("startup: opening wallet %s/%s", WALLET_NAME, WALLET_HOTKEY)
     wallet = bt.Wallet(name=WALLET_NAME, hotkey=WALLET_HOTKEY)
+    log.info("startup: connecting subtensor network=%s", NETWORK)
     subtensor = bt.Subtensor(network=NETWORK)
+    log.info("startup: subtensor connected")
 
     # §9: commit-reveal weights is the single load-bearing defense against
     # parallel-validator weight-copying. If SN3 doesn't have CR enabled,

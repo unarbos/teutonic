@@ -28,8 +28,10 @@ DEFAULT_MANIFEST_URLS: list[str] = (
     else [
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
         "https://us-east-1.hippius.com/teutonic-sn3/dataset/quasar-sn3-retok/manifest.json",
-        "https://us-east-1.hippius.com/teutonic-sn3/dataset/ultradata-math-quasar-10b/manifest.json",
+        "https://us-east-1.hippius.com/teutonic-sn3/dataset/ultradata-math-l3-quasar-10b/manifest.json",
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.1-quasar-10b/manifest.json",
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.2-quasar-10b/manifest.json"
     ]
 )
 
@@ -46,10 +48,12 @@ DEFAULT_SOURCE_WEIGHT_MAP: dict[str, float] = (
     }
     if _raw_weight_map
     else {
-        "automathtext-v2": 0.35,
-        "quasar-sn3": 0.05,
-        "ultradata-math": 0.35,
-        "finewebedu": 0.25,
+        "automathtext-v2": 0.3,
+        "quasar-sn3": 0.02,
+        "ultradata-math-l3": 0.2,
+        "finewebedu": 0.22,
+        "nemotron-specialized-v1.1": 0.12,
+        "nemotron-specialized-v1.2": 0.14
     }
 )
 
