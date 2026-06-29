@@ -1415,6 +1415,37 @@ def bootstrap_verdict(king_losses: list[float], challenger_losses: list[float], 
     }
 
 
+def _compute_source_scores(
+    king_losses: list[float],
+    challenger_losses: list[float],
+    source_labels: list[str] | None,
+) -> dict:
+    """Per-source avg_king_loss, avg_challenger_loss, mu_hat.
+
+    Returns an empty dict when source_labels is unavailable (non-multi-source
+    evals or old code paths that don't set _source_labels).
+    """
+    if not source_labels or len(source_labels) != len(king_losses):
+        return {}
+    king_arr = np.asarray(king_losses, dtype=np.float64)
+    chall_arr = np.asarray(challenger_losses, dtype=np.float64)
+    diff_arr = king_arr - chall_arr
+    labels_arr = np.asarray(source_labels)
+    scores: dict = {}
+    for name in sorted(set(source_labels)):
+        mask = labels_arr == name
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        scores[name] = {
+            "n_sequences": n,
+            "avg_king_loss": round(float(king_arr[mask].mean()), 6),
+            "avg_challenger_loss": round(float(chall_arr[mask].mean()), 6),
+            "mu_hat": round(float(diff_arr[mask].mean()), 6),
+        }
+    return scores
+
+
 def ensure_king(req: EvalRequest, snapshot: str, config, config_source: str, device: str, gpu_ids: list[int] | None = None, on_phase=None):
     global _king_model, _king_key, _king_device, _king_gpu_ids
     repo = normalize_model_ref(req.king_repo)
@@ -1527,6 +1558,8 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             "seq_len": req.seq_len,
         })
         sequences, dataset_meta = sample_eval_sequences(tokenizer, req, on_phase=on_phase)
+        # Pop private key so it never reaches the verdict JSON or disk record.
+        source_labels: list[str] | None = dataset_meta.pop("_source_labels", None)
         check_eval_runtime(t0)
         on_phase({"phase": "dataset_sample_done", "digest": dataset_meta["digest"][:16]})
 
@@ -1657,6 +1690,10 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                             f"{req.delta_threshold:.6f} after {done}/{n_total} seqs"
                         ),
                     }
+                    early_verdict["source_scores"] = _compute_source_scores(
+                        king_losses, challenger_losses,
+                        source_labels[:done] if source_labels else None,
+                    )
                     early_verdict.update({
                         "eval_id": eval_id,
                         "king_repo": normalize_model_ref(req.king_repo),
@@ -1688,6 +1725,9 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                     return
 
         verdict = bootstrap_verdict(king_losses, challenger_losses, req)
+        verdict["source_scores"] = _compute_source_scores(
+            king_losses, challenger_losses, source_labels
+        )
         verdict.update({
             "eval_id": eval_id,
             "king_repo": normalize_model_ref(req.king_repo),

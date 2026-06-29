@@ -15,6 +15,7 @@ import shutil
 import sys
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import bittensor as bt
@@ -624,8 +625,37 @@ def validate_custom_code_policy(
     return None
 
 
+def _parse_registry_timestamp(ts: str | None):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        try:
+            dt = parsedate_to_datetime(ts)
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_registry_timestamp(dt) -> str | None:
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _first_registry_timestamp(candidates: list[tuple[str, str | None]]) -> tuple[str | None, str | None]:
+    for source, value in candidates:
+        dt = _parse_registry_timestamp(value)
+        if dt is not None:
+            return _format_registry_timestamp(dt), source
+    return None, None
+
+
 def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
-    """Fetch OCI manifest and return safetensor layer digests + commit timestamp.
+    """Fetch OCI manifest and registry-observed timestamp metadata.
 
     Returns None when the check cannot be performed (HF refs, network error,
     manifest absent) so callers can fail open rather than blocking valid submissions.
@@ -635,13 +665,19 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
         {
             "safetensor_layers": {"model-00001-of-00004.safetensors": "sha256:...", ...},
             "committed_at": "2026-06-08T15:45:59.489795+00:00",   # may be None
+            "timestamp_source": "harbor_artifact.push_time",      # may be None
         }
     """
     if oci_digest.startswith("hf:"):
         return None
     try:
-        from hippius_hub._oci import fetch_manifest
-        from hippius_hub.auth import get_oci_bearer_token, resolve_token_value
+        from hippius_hub._harbor import harbor_get_artifact, split_repo_id
+        from hippius_hub._oci import manifest_url, oci_headers
+        from hippius_hub.auth import (
+            get_oci_bearer_token,
+            resolve_auth_header,
+            resolve_token_value,
+        )
         from hippius_hub.constants import resolve_registry
         from hippius_hub.file_download import _oci_repo_path
 
@@ -649,17 +685,50 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
         oci_repo = _oci_repo_path(repo_id, None)
         raw_token = _resolve_hub_token(f"copy-check manifest {repo_id}")
         oci_token = get_oci_bearer_token(oci_repo, resolve_token_value(raw_token), push=False)
-        manifest_result = fetch_manifest(registry, oci_repo, oci_digest, oci_token, missing_ok=True)
-        if not manifest_result:
+
+        resp = httpx.get(
+            manifest_url(registry, oci_repo, oci_digest),
+            headers=oci_headers(oci_token),
+            timeout=httpx.Timeout(15.0),
+        )
+        if resp.status_code == 404:
             return None
-        manifest = getattr(manifest_result, "manifest", manifest_result)
+        resp.raise_for_status()
+        manifest = resp.json()
+
         safetensor_layers: dict[str, str] = {}
         for layer in manifest.get("layers", []):
             title = layer.get("annotations", {}).get("org.opencontainers.image.title", "")
             if title.endswith(".safetensors") and "digest" in layer:
                 safetensor_layers[title] = layer["digest"]
-        committed_at = manifest.get("annotations", {}).get("org.opencontainers.image.created")
-        return {"safetensor_layers": safetensor_layers, "committed_at": committed_at}
+
+        artifact = None
+        auth_header = resolve_auth_header(raw_token)
+        if auth_header:
+            try:
+                project, repo = split_repo_id(oci_repo)
+                artifact = harbor_get_artifact(
+                    auth_header,
+                    project,
+                    repo,
+                    oci_digest,
+                    endpoint=None,
+                )
+            except Exception:
+                log.debug("could not fetch Harbor artifact metadata for %s@%s",
+                          repo_id, oci_digest[:19], exc_info=True)
+
+        timestamp_candidates: list[tuple[str, str | None]] = []
+        if isinstance(artifact, dict):
+            timestamp_candidates.append(("harbor_artifact.push_time", artifact.get("push_time")))
+        timestamp_candidates.append(("manifest_last_modified", resp.headers.get("Last-Modified")))
+
+        committed_at, timestamp_source = _first_registry_timestamp(timestamp_candidates)
+        return {
+            "safetensor_layers": safetensor_layers,
+            "committed_at": committed_at,
+            "timestamp_source": timestamp_source,
+        }
     except Exception:
         log.debug("could not fetch OCI info for %s@%s (copy check skipped)",
                   repo_id, oci_digest[:19], exc_info=True)
@@ -720,56 +789,55 @@ def check_model_copy(
     if mismatches:
         return None
 
-    # Weights are identical — decide by commit timestamp.
+    # Weights are identical; decide by registry-observed timestamp only.
     n = len(challenger_layers)
-    challenger_ts = challenger_info["committed_at"]
-    king_ts = king_info["committed_at"]
+    challenger_ts = challenger_info.get("committed_at")
+    king_ts = king_info.get("committed_at")
+    challenger_source = challenger_info.get("timestamp_source")
+    king_source = king_info.get("timestamp_source")
 
-    def _parse_ts(ts: str | None):
-        if not ts:
-            return None
-        try:
-            dt = datetime.fromisoformat(ts)
-            # Normalize to UTC so aware/naive comparisons never raise TypeError.
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except Exception:
-            return None
-
-    challenger_dt = _parse_ts(challenger_ts)
-    king_dt = _parse_ts(king_ts)
+    challenger_dt = _parse_registry_timestamp(challenger_ts)
+    king_dt = _parse_registry_timestamp(king_ts)
 
     base_reason = (
         f"all {n} .safetensors layers have identical OCI digests; "
-        f"challenger committed_at={challenger_ts}, king committed_at={king_ts}"
+        f"challenger pushed_at={challenger_ts} source={challenger_source}, "
+        f"king pushed_at={king_ts} source={king_source}"
     )
 
-    # Fail-safe: if timestamps are missing or unparseable, reject the copy.
-    if challenger_dt is None or king_dt is None:
+    result_meta = {
+        "challenger_committed_at": challenger_ts,
+        "king_committed_at": king_ts,
+        "challenger_timestamp_source": challenger_source,
+        "king_timestamp_source": king_source,
+    }
+
+    # Fail-safe: once weights are proven identical, never crown an "earlier"
+    # model unless both timestamps came from registry/server metadata. Client
+    # annotations such as org.opencontainers.image.created are intentionally
+    # excluded by _fetch_model_oci_info because a miner can backdate them.
+    if challenger_dt is None or king_dt is None or not challenger_source or not king_source:
         return {
             "action": "reject",
-            "reason": f"model is a copy of the king (timestamps unavailable — rejecting): {base_reason}",
-            "challenger_committed_at": challenger_ts,
-            "king_committed_at": king_ts,
+            "reason": f"model is a copy of the king (registry timestamps unavailable): {base_reason}",
+            **result_meta,
         }
 
     if challenger_dt < king_dt:
         return {
             "action": "crown_earlier",
             "reason": (
-                f"model is identical to the king but was committed earlier "
-                f"({challenger_ts} < {king_ts}); displacing king with original author"
+                f"model is identical to the king but has an earlier registry-observed push time "
+                f"({challenger_ts} < {king_ts}); displacing king with original author. "
+                f"{base_reason}"
             ),
-            "challenger_committed_at": challenger_ts,
-            "king_committed_at": king_ts,
+            **result_meta,
         }
 
     return {
         "action": "reject",
-        "reason": f"model is a copy of the king (committed after king): {base_reason}",
-        "challenger_committed_at": challenger_ts,
-        "king_committed_at": king_ts,
+        "reason": f"model is a copy of the king (not earlier than king): {base_reason}",
+        **result_meta,
     }
 
 
@@ -1350,6 +1418,16 @@ class State:
             entry["challenger_committed_at"] = verdict["challenger_committed_at"]
         if verdict.get("king_committed_at") is not None:
             entry["king_committed_at"] = verdict["king_committed_at"]
+        if verdict.get("challenger_timestamp_source"):
+            entry["challenger_timestamp_source"] = verdict["challenger_timestamp_source"]
+        if verdict.get("king_timestamp_source"):
+            entry["king_timestamp_source"] = verdict["king_timestamp_source"]
+        if verdict.get("source_scores"):
+            entry["source_scores"] = verdict["source_scores"]
+        if verdict.get("early_stopped"):
+            entry["early_stopped"] = True
+            entry["n_sequences"] = verdict.get("n_sequences")
+            entry["n_sequences_evaluated"] = verdict.get("n_sequences_evaluated")
         self.history.insert(0, entry)
         self.r2.put("state/dashboard_history.json", {"history": self.history})
 
@@ -1853,11 +1931,9 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             state.record_failure(entry, "model_copy", reason)
             return
         if action == "crown_earlier":
-            # WARNING: org.opencontainers.image.created is a client-set annotation.
-            # A miner can backdate it.  This path must only run when the timestamp
-            # comparison is trustworthy (i.e. registry-attested timestamps are used).
             log.warning(
-                "%s (%s): identical weights but earlier commit — displacing king. %s",
+                "%s (%s): identical weights but earlier registry push time; "
+                "displacing king. %s",
                 cid, model_repo, reason,
             )
             state.set_phase("crown_earlier_commit", challenge_id=cid,
@@ -1892,6 +1968,8 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
                 "timestamp": _now(),
                 "challenger_committed_at": copy_result.get("challenger_committed_at"),
                 "king_committed_at": copy_result.get("king_committed_at"),
+                "challenger_timestamp_source": copy_result.get("challenger_timestamp_source"),
+                "king_timestamp_source": copy_result.get("king_timestamp_source"),
             }
             # Increment before set_king (which flushes), matching the normal eval path.
             state.stats["accepted"] += 1
