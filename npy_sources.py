@@ -28,8 +28,12 @@ DEFAULT_MANIFEST_URLS: list[str] = (
     else [
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
         "https://us-east-1.hippius.com/teutonic-sn3/dataset/quasar-sn3-retok/manifest.json",
-        "https://us-east-1.hippius.com/teutonic-sn3/dataset/ultradata-math-quasar-10b/manifest.json",
+        "https://us-east-1.hippius.com/teutonic-sn3/dataset/ultradata-math-l3-quasar-10b/manifest.json",
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.1-quasar-10b/manifest.json",
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.2-quasar-10b/manifest.json",
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-cc-math-v1-4plus-mind-quasar-10b/manifest.json",
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json"
     ]
 )
 
@@ -46,10 +50,14 @@ DEFAULT_SOURCE_WEIGHT_MAP: dict[str, float] = (
     }
     if _raw_weight_map
     else {
-        "automathtext-v2": 0.35,
-        "quasar-sn3": 0.05,
-        "ultradata-math": 0.35,
-        "finewebedu": 0.25,
+        "automathtext-v2": 0.3,
+        "quasar-sn3": 0.02,
+        "ultradata-math-l3": 0.12,
+        "finewebedu": 0.24,
+        "nemotron-specialized-v1.1": 0.05,
+        "nemotron-specialized-v1.2": 0.07,
+        "nemotron-cc-math": 0.1,
+        "openthoughts3-1.2m": 0.1
     }
 )
 
@@ -375,6 +383,7 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
         })
 
     sequences: list[list[int]] = []
+    source_labels: list[str] = []  # parallel to sequences; same index → same source
     source_meta = []
     for target, (spec, refs) in zip(targets, refs_by_source):
         source_sequences: list[list[int]] = []
@@ -417,6 +426,7 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
             )
         taken = source_sequences[:target]
         sequences.extend(taken)
+        source_labels.extend([spec.name] * len(taken))
         log.info(
             "source %r: %d/%d seqs from %d shard(s): %s",
             spec.name,
@@ -443,7 +453,15 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
             "used_files": used_files,
         })
 
-    rng.shuffle(sequences)
+    # Shuffle sequences and source_labels together using the same permutation.
+    # Shuffling a Python list with rng.shuffle uses Fisher-Yates keyed only on
+    # the list length and the current RNG state, not on element values — so
+    # zip-shuffling [(seq, label), ...] produces the identical permutation as
+    # the previous bare rng.shuffle(sequences) call, preserving the digest.
+    tagged = list(zip(sequences, source_labels))
+    rng.shuffle(tagged)
+    sequences = [s for s, _ in tagged]
+    source_labels = [lb for _, lb in tagged]
     digest = hashlib.sha256(np.asarray(sequences, dtype=np.int64).tobytes()).hexdigest()
     log.info(
         "multi_source sample ready: n=%d seed=%d digest=%s sources=[%s]",
@@ -464,6 +482,10 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
         "source": "multi_source_npy",
         "source_mix_policy": req.source_mix_policy,
         "sources": source_meta,
+        # Private key: parallel list of source names for each sequence in the
+        # shuffled order. Consumed by eval_server to compute per-source scores;
+        # popped before writing to disk so it never appears in verdict JSON.
+        "_source_labels": source_labels,
     }
 
 

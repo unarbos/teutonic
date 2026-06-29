@@ -15,6 +15,7 @@ import shutil
 import sys
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import bittensor as bt
@@ -60,12 +61,14 @@ EVAL_N = int(os.environ.get("TEUTONIC_EVAL_N", "5000"))
 # a populated private holdout pool should set TEUTONIC_EVAL_N_PRIVATE=0; the
 # whole-corpus-overfit defense is then disabled (public-only mode).
 EVAL_N_PRIVATE = int(os.environ.get("TEUTONIC_EVAL_N_PRIVATE", str(EVAL_N // 2)))
-EVAL_N_PUBLIC = int(os.environ.get("TEUTONIC_EVAL_N_PUBLIC", "20000"))
+EVAL_N_PUBLIC = int(os.environ.get("TEUTONIC_EVAL_N_PUBLIC", str(EVAL_N - EVAL_N_PRIVATE)))
+EVAL_N_PUBLIC = 20000
 EVAL_ALPHA = 0.001
 SEQ_LEN = 2048
 POLL_INTERVAL = 30
 WEIGHT_INTERVAL = 300
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
+MIN_SUBMISSION_BLOCK = int(os.environ.get("TEUTONIC_MIN_SUBMISSION_BLOCK", "8377970"))
 
 # Weight policy: equal-share across the current king plus up to four prior
 # distinct kings that are still registered. If none are available, fall back to
@@ -75,7 +78,7 @@ BURN_UID = int(os.environ.get("TEUTONIC_BURN_UID", "0"))
 
 # Watchdogs / anti-stuckness safeguards.
 TICK_WARN_AFTER = int(os.environ.get("TEUTONIC_TICK_WARN_AFTER", "120"))
-TICK_RESTART_AFTER = int(os.environ.get("TEUTONIC_TICK_RESTART_AFTER", "3000"))
+TICK_RESTART_AFTER = int(os.environ.get("TEUTONIC_TICK_RESTART_AFTER", "2700"))
 STREAM_IDLE_WARN_AFTER = int(os.environ.get("TEUTONIC_STREAM_IDLE_WARN_AFTER", "180"))
 STREAM_IDLE_TIMEOUT = int(os.environ.get("TEUTONIC_STREAM_IDLE_TIMEOUT", "420"))
 HEALTHCHECK_INTERVAL = int(os.environ.get("TEUTONIC_HEALTHCHECK_INTERVAL", "60"))
@@ -175,6 +178,9 @@ BLOCKS_PER_HOUR = 300
 # off the hot path and fail open when the public endpoint is degraded.
 DASHBOARD_FLUSH_MIN_INTERVAL = float(os.environ.get("TEUTONIC_DASHBOARD_FLUSH_MIN_INTERVAL", "5"))
 HIPPIUS_COOLDOWN_SECONDS = int(os.environ.get("TEUTONIC_HIPPIUS_COOLDOWN_SECONDS", "300"))
+S3_CONNECT_TIMEOUT = int(os.environ.get("TEUTONIC_S3_CONNECT_TIMEOUT", "5"))
+S3_READ_TIMEOUT = int(os.environ.get("TEUTONIC_S3_READ_TIMEOUT", "15"))
+S3_MAX_ATTEMPTS = int(os.environ.get("TEUTONIC_S3_MAX_ATTEMPTS", "3"))
 
 # Number of most-recent kings that share equal weight and appear in the Reigns table.
 KING_CHAIN_SIZE = int(os.environ.get("TEUTONIC_KING_CHAIN_SIZE", "5"))
@@ -309,11 +315,12 @@ class R2:
     def __init__(self):
         # Hippius is currently flaky on long-lived reads — bound every S3
         # call so a single hung connection cannot wedge the validator's
-        # main async loop for minutes (botocore default is 60s + retries).
+        # main async loop for minutes. Startup reads several state keys
+        # serially, so keep retry budgets short and operator-tunable.
         _s3_cfg = dict(
-            connect_timeout=15,
-            read_timeout=45,
-            retries={"max_attempts": 10, "mode": "adaptive"},
+            connect_timeout=S3_CONNECT_TIMEOUT,
+            read_timeout=S3_READ_TIMEOUT,
+            retries={"max_attempts": S3_MAX_ATTEMPTS, "mode": "standard"},
         )
         self.client = boto3.client(
             "s3", endpoint_url=R2_ENDPOINT,
@@ -383,7 +390,7 @@ class R2:
                     ContentType=content_type,
                     **extra,
                 )
-                return
+                # Also mirror successful Hippius dashboard writes to R2.
             except Exception as exc:
                 self._mark_hippius_failure(key, exc)
 
@@ -423,11 +430,15 @@ class R2:
             log.warning("R2 put failed for %s (non-fatal)", key)
 
     def get(self, key):
+        started = time.monotonic()
+        log.info("R2 get start: %s", key)
         try:
-            return json.loads(
-                self.client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read()
-            )
-        except Exception:
+            body = self.client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read()
+            data = json.loads(body)
+            log.info("R2 get ok: %s (%.1fs, %d bytes)", key, time.monotonic() - started, len(body))
+            return data
+        except Exception as exc:
+            log.warning("R2 get failed: %s (%.1fs): %s", key, time.monotonic() - started, exc)
             return None
 
     def ds_get(self, key):
@@ -614,8 +625,37 @@ def validate_custom_code_policy(
     return None
 
 
+def _parse_registry_timestamp(ts: str | None):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        try:
+            dt = parsedate_to_datetime(ts)
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_registry_timestamp(dt) -> str | None:
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _first_registry_timestamp(candidates: list[tuple[str, str | None]]) -> tuple[str | None, str | None]:
+    for source, value in candidates:
+        dt = _parse_registry_timestamp(value)
+        if dt is not None:
+            return _format_registry_timestamp(dt), source
+    return None, None
+
+
 def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
-    """Fetch OCI manifest and return safetensor layer digests + commit timestamp.
+    """Fetch OCI manifest and registry-observed timestamp metadata.
 
     Returns None when the check cannot be performed (HF refs, network error,
     manifest absent) so callers can fail open rather than blocking valid submissions.
@@ -625,13 +665,19 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
         {
             "safetensor_layers": {"model-00001-of-00004.safetensors": "sha256:...", ...},
             "committed_at": "2026-06-08T15:45:59.489795+00:00",   # may be None
+            "timestamp_source": "harbor_artifact.push_time",      # may be None
         }
     """
     if oci_digest.startswith("hf:"):
         return None
     try:
-        from hippius_hub._oci import fetch_manifest
-        from hippius_hub.auth import get_oci_bearer_token, resolve_token_value
+        from hippius_hub._harbor import harbor_get_artifact, split_repo_id
+        from hippius_hub._oci import manifest_url, oci_headers
+        from hippius_hub.auth import (
+            get_oci_bearer_token,
+            resolve_auth_header,
+            resolve_token_value,
+        )
         from hippius_hub.constants import resolve_registry
         from hippius_hub.file_download import _oci_repo_path
 
@@ -639,16 +685,50 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
         oci_repo = _oci_repo_path(repo_id, None)
         raw_token = _resolve_hub_token(f"copy-check manifest {repo_id}")
         oci_token = get_oci_bearer_token(oci_repo, resolve_token_value(raw_token), push=False)
-        manifest = fetch_manifest(registry, oci_repo, oci_digest, oci_token, missing_ok=True)
-        if not manifest:
+
+        resp = httpx.get(
+            manifest_url(registry, oci_repo, oci_digest),
+            headers=oci_headers(oci_token),
+            timeout=httpx.Timeout(15.0),
+        )
+        if resp.status_code == 404:
             return None
+        resp.raise_for_status()
+        manifest = resp.json()
+
         safetensor_layers: dict[str, str] = {}
         for layer in manifest.get("layers", []):
             title = layer.get("annotations", {}).get("org.opencontainers.image.title", "")
             if title.endswith(".safetensors") and "digest" in layer:
                 safetensor_layers[title] = layer["digest"]
-        committed_at = manifest.get("annotations", {}).get("org.opencontainers.image.created")
-        return {"safetensor_layers": safetensor_layers, "committed_at": committed_at}
+
+        artifact = None
+        auth_header = resolve_auth_header(raw_token)
+        if auth_header:
+            try:
+                project, repo = split_repo_id(oci_repo)
+                artifact = harbor_get_artifact(
+                    auth_header,
+                    project,
+                    repo,
+                    oci_digest,
+                    endpoint=None,
+                )
+            except Exception:
+                log.debug("could not fetch Harbor artifact metadata for %s@%s",
+                          repo_id, oci_digest[:19], exc_info=True)
+
+        timestamp_candidates: list[tuple[str, str | None]] = []
+        if isinstance(artifact, dict):
+            timestamp_candidates.append(("harbor_artifact.push_time", artifact.get("push_time")))
+        timestamp_candidates.append(("manifest_last_modified", resp.headers.get("Last-Modified")))
+
+        committed_at, timestamp_source = _first_registry_timestamp(timestamp_candidates)
+        return {
+            "safetensor_layers": safetensor_layers,
+            "committed_at": committed_at,
+            "timestamp_source": timestamp_source,
+        }
     except Exception:
         log.debug("could not fetch OCI info for %s@%s (copy check skipped)",
                   repo_id, oci_digest[:19], exc_info=True)
@@ -709,56 +789,55 @@ def check_model_copy(
     if mismatches:
         return None
 
-    # Weights are identical — decide by commit timestamp.
+    # Weights are identical; decide by registry-observed timestamp only.
     n = len(challenger_layers)
-    challenger_ts = challenger_info["committed_at"]
-    king_ts = king_info["committed_at"]
+    challenger_ts = challenger_info.get("committed_at")
+    king_ts = king_info.get("committed_at")
+    challenger_source = challenger_info.get("timestamp_source")
+    king_source = king_info.get("timestamp_source")
 
-    def _parse_ts(ts: str | None):
-        if not ts:
-            return None
-        try:
-            dt = datetime.fromisoformat(ts)
-            # Normalize to UTC so aware/naive comparisons never raise TypeError.
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except Exception:
-            return None
-
-    challenger_dt = _parse_ts(challenger_ts)
-    king_dt = _parse_ts(king_ts)
+    challenger_dt = _parse_registry_timestamp(challenger_ts)
+    king_dt = _parse_registry_timestamp(king_ts)
 
     base_reason = (
         f"all {n} .safetensors layers have identical OCI digests; "
-        f"challenger committed_at={challenger_ts}, king committed_at={king_ts}"
+        f"challenger pushed_at={challenger_ts} source={challenger_source}, "
+        f"king pushed_at={king_ts} source={king_source}"
     )
 
-    # Fail-safe: if timestamps are missing or unparseable, reject the copy.
-    if challenger_dt is None or king_dt is None:
+    result_meta = {
+        "challenger_committed_at": challenger_ts,
+        "king_committed_at": king_ts,
+        "challenger_timestamp_source": challenger_source,
+        "king_timestamp_source": king_source,
+    }
+
+    # Fail-safe: once weights are proven identical, never crown an "earlier"
+    # model unless both timestamps came from registry/server metadata. Client
+    # annotations such as org.opencontainers.image.created are intentionally
+    # excluded by _fetch_model_oci_info because a miner can backdate them.
+    if challenger_dt is None or king_dt is None or not challenger_source or not king_source:
         return {
             "action": "reject",
-            "reason": f"model is a copy of the king (timestamps unavailable — rejecting): {base_reason}",
-            "challenger_committed_at": challenger_ts,
-            "king_committed_at": king_ts,
+            "reason": f"model is a copy of the king (registry timestamps unavailable): {base_reason}",
+            **result_meta,
         }
 
     if challenger_dt < king_dt:
         return {
             "action": "crown_earlier",
             "reason": (
-                f"model is identical to the king but was committed earlier "
-                f"({challenger_ts} < {king_ts}); displacing king with original author"
+                f"model is identical to the king but has an earlier registry-observed push time "
+                f"({challenger_ts} < {king_ts}); displacing king with original author. "
+                f"{base_reason}"
             ),
-            "challenger_committed_at": challenger_ts,
-            "king_committed_at": king_ts,
+            **result_meta,
         }
 
     return {
         "action": "reject",
-        "reason": f"model is a copy of the king (committed after king): {base_reason}",
-        "challenger_committed_at": challenger_ts,
-        "king_committed_at": king_ts,
+        "reason": f"model is a copy of the king (not earlier than king): {base_reason}",
+        **result_meta,
     }
 
 
@@ -921,6 +1000,8 @@ def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys):
         if not entries or hotkey in seen_hotkeys:
             continue
         block, data = max(entries, key=lambda e: e[0])
+        if int(block or 0) <= MIN_SUBMISSION_BLOCK:
+            continue
         try:
             ref, author_hotkey = parse_reveal_v4(data)
         except ValueError:
@@ -1179,6 +1260,11 @@ class State:
         digest = reveal.get("model_digest", "")
         model_key = _model_key(repo, digest)
         hotkey = reveal.get("hotkey", "")
+        block = int(reveal.get("block", 0) or 0)
+        if block <= MIN_SUBMISSION_BLOCK:
+            log.info("skipping enqueue: submission from %s at block %s is not over %s",
+                     hotkey[:16], block, MIN_SUBMISSION_BLOCK)
+            return None
         king_hotkey = self.king.get("hotkey", "")
         if king_hotkey and hotkey == king_hotkey:
             log.info("skipping enqueue: hotkey %s is the current king", hotkey[:16])
@@ -1332,6 +1418,16 @@ class State:
             entry["challenger_committed_at"] = verdict["challenger_committed_at"]
         if verdict.get("king_committed_at") is not None:
             entry["king_committed_at"] = verdict["king_committed_at"]
+        if verdict.get("challenger_timestamp_source"):
+            entry["challenger_timestamp_source"] = verdict["challenger_timestamp_source"]
+        if verdict.get("king_timestamp_source"):
+            entry["king_timestamp_source"] = verdict["king_timestamp_source"]
+        if verdict.get("source_scores"):
+            entry["source_scores"] = verdict["source_scores"]
+        if verdict.get("early_stopped"):
+            entry["early_stopped"] = True
+            entry["n_sequences"] = verdict.get("n_sequences")
+            entry["n_sequences_evaluated"] = verdict.get("n_sequences_evaluated")
         self.history.insert(0, entry)
         self.r2.put("state/dashboard_history.json", {"history": self.history})
 
@@ -1720,6 +1816,12 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
     state.set_phase("process_challenge", challenge_id=cid, notes=f"processing {model_repo}")
     state.note_progress(notes=f"started processing {cid}")
 
+    reveal_block = int(entry.get("block", 0) or 0)
+    if reveal_block <= MIN_SUBMISSION_BLOCK:
+        log.info("skipping %s: submission block %s is not over %s",
+                 cid, reveal_block, MIN_SUBMISSION_BLOCK)
+        return
+
     king_hotkey = state.king.get("hotkey", "")
     if king_hotkey and hotkey == king_hotkey:
         log.info("skipping %s: challenger hotkey %s is the current king", cid, hotkey[:16])
@@ -1829,11 +1931,9 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             state.record_failure(entry, "model_copy", reason)
             return
         if action == "crown_earlier":
-            # WARNING: org.opencontainers.image.created is a client-set annotation.
-            # A miner can backdate it.  This path must only run when the timestamp
-            # comparison is trustworthy (i.e. registry-attested timestamps are used).
             log.warning(
-                "%s (%s): identical weights but earlier commit — displacing king. %s",
+                "%s (%s): identical weights but earlier registry push time; "
+                "displacing king. %s",
                 cid, model_repo, reason,
             )
             state.set_phase("crown_earlier_commit", challenge_id=cid,
@@ -1868,6 +1968,8 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
                 "timestamp": _now(),
                 "challenger_committed_at": copy_result.get("challenger_committed_at"),
                 "king_committed_at": copy_result.get("king_committed_at"),
+                "challenger_timestamp_source": copy_result.get("challenger_timestamp_source"),
+                "king_timestamp_source": copy_result.get("king_timestamp_source"),
             }
             # Increment before set_king (which flushes), matching the normal eval path.
             state.stats["accepted"] += 1
@@ -1974,7 +2076,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
     state.flush_dashboard(force=True)
 
     verdict = None
-    async with httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=30.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(2700.0, connect=30.0)) as client:
         eval_payload = {
             "king_repo": king_repo,
             "challenger_repo": model_repo,
@@ -2025,7 +2127,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         log.info("eval %s dispatched to eval server as %s", cid, eval_id)
 
         async with client.stream("GET", f"{EVAL_SERVER_URL}/eval/{eval_id}/stream",
-                                  timeout=httpx.Timeout(1800.0)) as stream:
+                                  timeout=httpx.Timeout(2700.0)) as stream:
             async for line in _stream_events_with_idle_watchdog(stream, state, cid):
                 if not line.startswith("data: "):
                     continue
@@ -2134,12 +2236,18 @@ async def main():
         log.error("set TEUTONIC_EVAL_SERVER")
         sys.exit(1)
 
+    log.info("startup: constructing storage clients")
     r2 = R2()
     state = State(r2)
+    log.info("startup: loading persisted state")
     state.load()
+    log.info("startup: persisted state loaded")
 
+    log.info("startup: opening wallet %s/%s", WALLET_NAME, WALLET_HOTKEY)
     wallet = bt.Wallet(name=WALLET_NAME, hotkey=WALLET_HOTKEY)
+    log.info("startup: connecting subtensor network=%s", NETWORK)
     subtensor = bt.Subtensor(network=NETWORK)
+    log.info("startup: subtensor connected")
 
     # §9: commit-reveal weights is the single load-bearing defense against
     # parallel-validator weight-copying. If SN3 doesn't have CR enabled,

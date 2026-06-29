@@ -101,6 +101,14 @@ DEFAULT_PARALLEL_MODELS = os.environ.get("TEUTONIC_PARALLEL_MODELS", "1") == "1"
 DEFAULT_GPU_MEMORY_FRACTION = float(os.environ.get("TEUTONIC_GPU_MEMORY_FRACTION", "0.45"))
 DEFAULT_MODEL_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRIES", "3"))
 DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRY_BACKOFF_S", "15"))
+
+# Early stopping: abort once the challenger has no mathematical chance to win.
+# After at least EARLY_STOP_MIN_FRACTION of sequences are evaluated, check
+# whether (d_sum + remaining * d_max_observed) / n_total < delta_threshold.
+# Since LCB <= mu_hat, if that upper bound on mu_hat is below the threshold the
+# challenger cannot reach it regardless of the remaining samples.
+EVAL_EARLY_STOP = os.environ.get("EVAL_EARLY_STOP", "1") == "1"
+EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.1"))
 DEFAULT_MODEL_DOWNLOAD_WORKERS = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_WORKERS", "4"))
 DEFAULT_S3_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRIES", "5"))
 DEFAULT_S3_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRY_BACKOFF_S", "20"))
@@ -1407,6 +1415,37 @@ def bootstrap_verdict(king_losses: list[float], challenger_losses: list[float], 
     }
 
 
+def _compute_source_scores(
+    king_losses: list[float],
+    challenger_losses: list[float],
+    source_labels: list[str] | None,
+) -> dict:
+    """Per-source avg_king_loss, avg_challenger_loss, mu_hat.
+
+    Returns an empty dict when source_labels is unavailable (non-multi-source
+    evals or old code paths that don't set _source_labels).
+    """
+    if not source_labels or len(source_labels) != len(king_losses):
+        return {}
+    king_arr = np.asarray(king_losses, dtype=np.float64)
+    chall_arr = np.asarray(challenger_losses, dtype=np.float64)
+    diff_arr = king_arr - chall_arr
+    labels_arr = np.asarray(source_labels)
+    scores: dict = {}
+    for name in sorted(set(source_labels)):
+        mask = labels_arr == name
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        scores[name] = {
+            "n_sequences": n,
+            "avg_king_loss": round(float(king_arr[mask].mean()), 6),
+            "avg_challenger_loss": round(float(chall_arr[mask].mean()), 6),
+            "mu_hat": round(float(diff_arr[mask].mean()), 6),
+        }
+    return scores
+
+
 def ensure_king(req: EvalRequest, snapshot: str, config, config_source: str, device: str, gpu_ids: list[int] | None = None, on_phase=None):
     global _king_model, _king_key, _king_device, _king_gpu_ids
     repo = normalize_model_ref(req.king_repo)
@@ -1519,6 +1558,8 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             "seq_len": req.seq_len,
         })
         sequences, dataset_meta = sample_eval_sequences(tokenizer, req, on_phase=on_phase)
+        # Pop private key so it never reaches the verdict JSON or disk record.
+        source_labels: list[str] | None = dataset_meta.pop("_source_labels", None)
         check_eval_runtime(t0)
         on_phase({"phase": "dataset_sample_done", "digest": dataset_meta["digest"][:16]})
 
@@ -1601,7 +1642,92 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                 "avg_challenger_loss": round(challenger_sum / done, 6),
             })
 
+            # Early stop: can challenger still mathematically achieve LCB > delta_threshold?
+            # Upper bound on final mu_hat = assume all remaining seqs give the max
+            # observed per-seq advantage. Since LCB <= mu_hat, if mu_upper < delta_threshold
+            # the challenger cannot win regardless of the remaining samples.
+            n_total = len(sequences)
+            if (EVAL_EARLY_STOP and done < n_total
+                    and done >= int(n_total * EVAL_EARLY_STOP_MIN_FRACTION)):
+                d_max = float(diff_so_far.max())
+                remaining = n_total - done
+                mu_upper = (float(diff_so_far.sum()) + remaining * d_max) / n_total
+                if mu_upper < req.delta_threshold:
+                    # Compute the real bootstrap LCB on the partial observed data
+                    # using the same formula as bootstrap_verdict. The partial LCB
+                    # will be <= mu_hat <= mu_upper < delta_threshold.
+                    es_rng = np.random.default_rng(req.bootstrap_seed)
+                    n_es = len(diff_so_far)
+                    es_boot = np.empty(req.n_bootstrap, dtype=np.float64)
+                    for _b in range(req.n_bootstrap):
+                        _idx = es_rng.integers(0, n_es, size=n_es)
+                        es_boot[_b] = diff_so_far[_idx].mean()
+                    lcb_partial = float(np.quantile(es_boot, req.alpha))
+                    eval_log.info(
+                        "early stop at %d/%d seqs: best-case mu_hat=%.6f "
+                        "lcb_partial=%.6f < delta=%.6f",
+                        done, n_total, mu_upper, lcb_partial, req.delta_threshold,
+                    )
+                    elapsed = time.time() - t0
+                    early_verdict = {
+                        "accepted": False,
+                        "verdict": "king",
+                        "mu_hat": round(mu_hat, 6),
+                        "mu_hat_upper_bound": round(mu_upper, 6),
+                        "lcb": round(lcb_partial, 6),
+                        "delta": req.delta_threshold,
+                        "delta_threshold": req.delta_threshold,
+                        "alpha": req.alpha,
+                        "n_bootstrap": req.n_bootstrap,
+                        "n_sequences": n_total,
+                        "n_sequences_evaluated": done,
+                        "avg_king_loss": round(king_sum / done, 6),
+                        "avg_challenger_loss": round(challenger_sum / done, 6),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "early_stopped": True,
+                        "early_stop_reason": (
+                            f"best_case_mu_hat={mu_upper:.6f} < delta_threshold="
+                            f"{req.delta_threshold:.6f} after {done}/{n_total} seqs"
+                        ),
+                    }
+                    early_verdict["source_scores"] = _compute_source_scores(
+                        king_losses, challenger_losses,
+                        source_labels[:done] if source_labels else None,
+                    )
+                    early_verdict.update({
+                        "eval_id": eval_id,
+                        "king_repo": normalize_model_ref(req.king_repo),
+                        "challenger_repo": normalize_model_ref(req.challenger_repo),
+                        "king_digest": req.king_digest,
+                        "challenger_digest": req.challenger_digest,
+                        "code_model": req.code_model,
+                        "allow_code_model_fallback": req.allow_code_model_fallback,
+                        "king_device": king_device,
+                        "challenger_device": challenger_device,
+                        "parallel_models": use_parallel,
+                        "gpu_memory_fraction": req.gpu_memory_fraction,
+                        "limits": limits_meta,
+                        "model_artifacts": {
+                            "king": king_artifacts,
+                            "challenger": challenger_artifacts,
+                            "tokenizer": tokenizer_meta,
+                        },
+                        "dataset": dataset_meta,
+                        "dataset_source": req.dataset_source,
+                        "wall_time_s": round(elapsed, 1),
+                    })
+                    early_verdict["record_path"] = write_record(
+                        eval_id, {"request": req.model_dump(), "verdict": early_verdict}
+                    )
+                    record["state"] = "completed"
+                    record["verdict"] = early_verdict
+                    events.put({"type": "verdict", "data": early_verdict})
+                    return
+
         verdict = bootstrap_verdict(king_losses, challenger_losses, req)
+        verdict["source_scores"] = _compute_source_scores(
+            king_losses, challenger_losses, source_labels
+        )
         verdict.update({
             "eval_id": eval_id,
             "king_repo": normalize_model_ref(req.king_repo),
