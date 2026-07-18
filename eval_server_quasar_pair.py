@@ -101,6 +101,9 @@ DEFAULT_PARALLEL_MODELS = os.environ.get("TEUTONIC_PARALLEL_MODELS", "1") == "1"
 DEFAULT_GPU_MEMORY_FRACTION = float(os.environ.get("TEUTONIC_GPU_MEMORY_FRACTION", "0.45"))
 DEFAULT_MODEL_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRIES", "3"))
 DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRY_BACKOFF_S", "15"))
+MODEL_ENCRYPTION_MANIFEST_NAME = "teutonic_encryption.json"
+DEFAULT_MODEL_DECRYPTION_KEY = _repo_root / "keys" / "validator_model_decryption.key"
+MODEL_DECRYPTION_KEY_MODE = 0o600
 
 # Early stopping: abort once the challenger has no mathematical chance to win.
 # After at least EARLY_STOP_MIN_FRACTION of sequences are evaluated, check
@@ -324,16 +327,169 @@ def snapshot_has_required_files(path: Path) -> bool:
     return all((path / filename).exists() for filename in custom_code_files_from_config(path / "config.json"))
 
 
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def model_decryption_key() -> Path:
+    configured = os.environ.get("TEUTONIC_MODEL_DECRYPTION_KEY")
+    key = Path(configured).expanduser() if configured else DEFAULT_MODEL_DECRYPTION_KEY
+    key = key.resolve()
+    if not key.is_file() or not os.access(key, os.R_OK):
+        raise RuntimeError(
+            "encrypted model snapshot found, but no private key is available; "
+            "set TEUTONIC_MODEL_DECRYPTION_KEY or create keys/validator_model_decryption.key"
+        )
+    return key
+
+
+def model_decryption_key_available() -> bool:
+    configured = os.environ.get("TEUTONIC_MODEL_DECRYPTION_KEY")
+    key = Path(configured).expanduser() if configured else DEFAULT_MODEL_DECRYPTION_KEY
+    return key.is_file() and os.access(key, os.R_OK)
+
+
+def ensure_model_decryption_key_permissions() -> None:
+    configured = os.environ.get("TEUTONIC_MODEL_DECRYPTION_KEY")
+    key = Path(configured).expanduser() if configured else DEFAULT_MODEL_DECRYPTION_KEY
+    if not key.exists():
+        return
+    try:
+        mode = key.stat().st_mode & 0o777
+        if mode != MODEL_DECRYPTION_KEY_MODE:
+            key.chmod(MODEL_DECRYPTION_KEY_MODE)
+            log.info("set model decryption key permissions to 0600: %s", key)
+    except OSError as exc:
+        log.warning("could not set model decryption key permissions for %s: %s", key, exc)
+    if not model_decryption_key_available():
+        log.warning(
+            "model decryption key exists but is not readable by this process: %s",
+            key,
+        )
+
+
+def load_encryption_manifest(snapshot: Path) -> dict | None:
+    manifest_path = snapshot / MODEL_ENCRYPTION_MANIFEST_NAME
+    if not manifest_path.exists():
+        return None
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("scheme") != "age-x25519":
+        raise RuntimeError(f"unsupported model encryption scheme: {manifest.get('scheme')!r}")
+    if not manifest.get("files"):
+        raise RuntimeError(f"{MODEL_ENCRYPTION_MANIFEST_NAME} has no encrypted files")
+    return manifest
+
+
+def decrypted_snapshot_path(snapshot: Path) -> Path:
+    return snapshot.with_name(snapshot.name + "-decrypted")
+
+
+def decrypted_snapshot_is_current(output: Path, manifest: dict) -> bool:
+    if not snapshot_has_required_files(output):
+        return False
+    for item in manifest.get("files", []):
+        dst = output / item["path"]
+        if not dst.is_file():
+            return False
+        if dst.stat().st_size != int(item.get("plain_size", -1)):
+            return False
+        if sha256_file(dst) != item.get("plain_sha256"):
+            return False
+    return True
+
+
+def decrypt_model_snapshot(snapshot_dir: str, on_phase=None) -> str:
+    snapshot = Path(snapshot_dir).resolve()
+    manifest = load_encryption_manifest(snapshot)
+    if manifest is None:
+        return str(snapshot)
+
+    output = decrypted_snapshot_path(snapshot)
+    if decrypted_snapshot_is_current(output, manifest):
+        return str(output)
+
+    age = shutil.which("age")
+    if age is None:
+        raise RuntimeError("encrypted model snapshot found, but `age` is not installed on PATH")
+    identity = model_decryption_key()
+
+    if on_phase:
+        on_phase({"phase": "model_decrypt_start", "source": str(snapshot), "output": str(output)})
+    if output.exists():
+        shutil.rmtree(output)
+
+    encrypted = {item["path"]: item for item in manifest["files"]}
+    for src in sorted(p for p in snapshot.rglob("*") if p.is_file()):
+        rel = str(src.relative_to(snapshot)).replace("\\", "/")
+        if rel == MODEL_ENCRYPTION_MANIFEST_NAME:
+            continue
+        dst = output / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if rel in encrypted:
+            subprocess.run([age, "-d", "-i", str(identity), "-o", str(dst), str(src)], check=True)
+            item = encrypted[rel]
+            if sha256_file(dst) != item.get("plain_sha256"):
+                raise RuntimeError(f"{rel}: plaintext sha256 mismatch after decrypt")
+            if dst.stat().st_size != int(item.get("plain_size", -1)):
+                raise RuntimeError(f"{rel}: plaintext size mismatch after decrypt")
+        elif src.name.endswith(".safetensors"):
+            raise RuntimeError(f"{rel}: .safetensors file is missing from {MODEL_ENCRYPTION_MANIFEST_NAME}")
+        else:
+            shutil.copy2(src, dst)
+
+    if on_phase:
+        on_phase({"phase": "model_decrypt_done", "files": len(encrypted), "path": str(output)})
+    return str(output)
+
+
+def snapshot_safetensors_digest(snapshot_dir: str) -> str:
+    path = Path(snapshot_dir)
+    shard_names = snapshot_safetensor_names(snapshot_dir)
+    if not shard_names:
+        raise FileNotFoundError(f"no .safetensors files found in {snapshot_dir}")
+    h = hashlib.sha256()
+    for shard_name in shard_names:
+        h.update(shard_name.encode("utf-8"))
+        h.update(b"\0")
+        with (path / shard_name).open("rb") as f:
+            while chunk := f.read(1024 * 1024):
+                h.update(chunk)
+    return h.hexdigest()
+
+
+def reject_duplicate_safetensors(king_snapshot: str, challenger_snapshot: str, on_phase=None) -> dict:
+    if on_phase:
+        on_phase({"phase": "duplicate_check_start"})
+    king_digest = snapshot_safetensors_digest(king_snapshot)
+    challenger_digest = snapshot_safetensors_digest(challenger_snapshot)
+    if king_digest == challenger_digest:
+        raise RuntimeError(
+            "challenger plaintext .safetensors are identical to the king; "
+            "encrypted submissions are checked after decrypt"
+        )
+    meta = {
+        "king_safetensors_sha256": king_digest,
+        "challenger_safetensors_sha256": challenger_digest,
+    }
+    if on_phase:
+        on_phase({"phase": "duplicate_check_done", **{k: v[:16] for k, v in meta.items()}})
+    return meta
+
+
 def materialize_model(repo_or_url: str, digest: str = "", on_phase=None) -> str:
     """Download or reuse a model snapshot from local path, HF, or Hippius."""
     repo = normalize_model_ref(repo_or_url)
     local = Path(repo)
     if local.exists():
-        return str(local.resolve())
+        return decrypt_model_snapshot(str(local.resolve()), on_phase=on_phase)
 
     target = MODEL_CACHE_DIR / repo.replace("/", "--") / (digest.replace(":", "-") if digest else "latest")
     if target.exists() and snapshot_has_required_files(target):
-        return str(target)
+        return decrypt_model_snapshot(str(target), on_phase=on_phase)
     if target.exists():
         shutil.rmtree(target)
 
@@ -397,6 +553,7 @@ def materialize_model(repo_or_url: str, digest: str = "", on_phase=None) -> str:
             path = download_once()
             if not snapshot_has_required_files(Path(path)):
                 raise RuntimeError(f"downloaded snapshot is incomplete: {path}")
+            path = decrypt_model_snapshot(path, on_phase=on_phase)
             break
         except Exception as exc:
             last_exc = exc
@@ -1569,6 +1726,8 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         check_eval_runtime(t0)
         challenger_snapshot = materialize_model(req.challenger_repo, req.challenger_digest, on_phase=on_phase)
         check_eval_runtime(t0)
+        duplicate_meta = reject_duplicate_safetensors(king_snapshot, challenger_snapshot, on_phase=on_phase)
+        check_eval_runtime(t0)
         king_config, king_artifacts = load_model_config(king_snapshot, req, "king", on_phase=on_phase)
         challenger_config, challenger_artifacts = load_model_config(
             challenger_snapshot,
@@ -1743,6 +1902,7 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                             "king": king_artifacts,
                             "challenger": challenger_artifacts,
                             "tokenizer": tokenizer_meta,
+                            "duplicate_check": duplicate_meta,
                         },
                         "dataset": dataset_meta,
                         "dataset_source": req.dataset_source,
@@ -1777,6 +1937,7 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                 "king": king_artifacts,
                 "challenger": challenger_artifacts,
                 "tokenizer": tokenizer_meta,
+                "duplicate_check": duplicate_meta,
             },
             "dataset": dataset_meta,
             "dataset_source": req.dataset_source,
@@ -1812,6 +1973,7 @@ async def lifespan(app: FastAPI):
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     EVAL_RECORD_DIR.mkdir(parents=True, exist_ok=True)
     SHARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_model_decryption_key_permissions()
     _gpu_ids = parse_gpu_ids()
     log.info(
         "Quasar pair eval server starting; gpus=%s model_cache=%s shard_cache=%s records=%s",
@@ -1856,6 +2018,11 @@ async def health():
             "retry_backoff_s": DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S,
             "workers": DEFAULT_MODEL_DOWNLOAD_WORKERS,
             "allow_patterns": MODEL_ALLOW_PATTERNS,
+        },
+        "encryption": {
+            "manifest_name": MODEL_ENCRYPTION_MANIFEST_NAME,
+            "age_available": shutil.which("age") is not None,
+            "private_key_available": model_decryption_key_available(),
         },
         "probe_enabled": PROBE_ENABLED,
         "allow_code_model_fallback_default": DEFAULT_ALLOW_CODE_MODEL_FALLBACK,
