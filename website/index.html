@@ -87,6 +87,83 @@ body {
     margin-top: 4px;
 }
 
+.dataset-panel {
+    border: var(--border);
+    padding: 10px;
+    margin-top: 10px;
+    width: min(100%, 980px);
+    text-align: left;
+    position: relative;
+}
+.dataset-panel::before {
+    content: "";
+    position: absolute;
+    inset: 3px;
+    border: var(--border-faint);
+    pointer-events: none;
+}
+.dataset-panel-head,
+.dataset-overview,
+.dataset-table-wrap {
+    position: relative;
+    z-index: 1;
+}
+.dataset-panel-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+.dataset-panel-head a {
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: var(--border);
+}
+.dataset-overview {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin-bottom: 8px;
+}
+.dataset-table-wrap {
+    overflow-x: auto;
+}
+.dataset-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+    text-transform: uppercase;
+}
+.dataset-table th,
+.dataset-table td {
+    border-bottom: var(--border-faint);
+    padding: 5px 6px;
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+}
+.dataset-table th:first-child,
+.dataset-table td:first-child,
+.dataset-table th:last-child,
+.dataset-table td:last-child {
+    text-align: left;
+}
+.dataset-table a {
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: var(--border);
+}
+.dataset-sub {
+    display: block;
+    color: var(--ink-muted);
+    font-size: 9px;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
 .bench-panel {
     border: var(--border);
     padding: 10px;
@@ -395,6 +472,44 @@ th:last-child, td:last-child { text-align: right; }
     cursor: pointer;
 }
 
+.ds-bar {
+    display: inline-block;
+    height: 7px;
+    background: var(--ink);
+    opacity: 0.35;
+    vertical-align: middle;
+    margin-right: 5px;
+    flex-shrink: 0;
+}
+.ds-name { font-family: 'Space Mono', monospace; font-size: 11px; }
+.ds-delta-pos { color: #2a2; }
+.ds-delta-neg { color: #c55; }
+
+/* History row expand */
+.hist-row-expandable { cursor: pointer; user-select: none; }
+.hist-caret {
+    display: inline-block;
+    font-size: 7px;
+    margin-right: 4px;
+    opacity: 0.4;
+    transition: transform 0.12s;
+    vertical-align: middle;
+}
+.hist-caret.open { transform: rotate(90deg); opacity: 0.7; }
+.hist-detail { display: none; pointer-events: none; }
+.hist-detail.open { display: table-row; }
+.hist-detail > td { cursor: default !important; background: transparent !important; color: var(--ink) !important; }
+.hist-detail-inner { padding: 8px 8px 10px 0; border-top: var(--border-faint); }
+.hist-ds-table { border-collapse: collapse; font-size: 11px; }
+.hist-ds-table th {
+    font-size: 10px; letter-spacing: 0.04em; padding: 3px 10px 3px 0;
+    border-bottom: var(--border-faint); background: transparent; position: static; text-align: left;
+}
+.hist-ds-table td { padding: 2px 10px 2px 0; border-bottom: none; white-space: nowrap; text-align: left; }
+.hist-ds-mu-pos { color: #2a2; }
+.hist-ds-mu-neg { color: #c55; }
+.hist-ds-mu-neutral { opacity: 0.5; }
+
 @media (max-width: 640px) {
     .page {
         padding: 16px 12px;
@@ -482,8 +597,20 @@ th:last-child, td:last-child { text-align: right; }
             <span><span id="king-health" title="King repo status"></span> KING: <a id="king-link-top" href="#" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">--</a> <span id="king-rev" style="opacity:0.6;"></span></span>
             <span>GENESIS: <a id="genesis-link" href="#" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">--</a> <span id="genesis-rev" style="opacity:0.6;"></span></span>
             <span>VALIDATOR: <a href="https://github.com/unarbos/teutonic" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);">GitHub</a></span>
-            <span id="dataset-line">DATASET: <span id="dataset-name">FINEWEBEDU</span> <a id="dataset-manifest-link" href="https://s3.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json" target="_blank" style="color:var(--ink);text-decoration:none;border-bottom:var(--border);" title="Dataset manifest for the eval corpus">Manifest</a> <span id="dataset-summary" style="opacity:0.6;"></span></span>
             <span id="king-reign" style="font-size:10px;opacity:0.5;"></span>
+            <div class="dataset-panel" id="dataset-panel">
+                <div class="dataset-panel-head">
+                    <span>Dataset Mix</span>
+                    <a id="dataset-manifest-link" href="https://s3.hippius.com/teutonic-sn3/dataset/all-datasets.manifest.json" target="_blank" title="All-datasets manifest">Manifest</a>
+                </div>
+                <div class="dataset-overview" id="dataset-overview"><span id="dataset-summary">Loading dataset manifest...</span></div>
+                <div class="dataset-table-wrap">
+                    <table class="dataset-table">
+                        <thead><tr><th>Dataset</th><th>Weight</th><th>Tokens</th><th>Seq @ Len</th><th>Eval Draw</th><th>Source</th></tr></thead>
+                        <tbody id="dataset-sources"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -533,6 +660,25 @@ th:last-child, td:last-child { text-align: right; }
         <div id="last-winner" style="font-size:12px;line-height:1.8;min-height:48px;display:flex;flex-wrap:wrap;gap:0 16px;">--</div>
     </div>
 
+    <!-- <div id="dataset-scores-section" style="display:none">
+        <div class="section-label" style="display:flex;justify-content:space-between;align-items:baseline;">
+            <span>Dataset Scores</span>
+            <span id="dataset-scores-meta" style="font-weight:normal;font-size:11px;opacity:0.55;"></span>
+        </div>
+        <div class="scroll-box" style="max-height:220px;">
+            <table style="table-layout:auto">
+                <thead><tr>
+                    <th style="min-width:140px">Dataset</th>
+                    <th>King Loss</th>
+                    <th>Chall Loss</th>
+                    <th title="challenger advantage: positive means challenger had lower loss on this source">&Delta; (mu_hat)</th>
+                    <th>N</th>
+                </tr></thead>
+                <tbody id="dataset-scores-body"></tbody>
+            </table>
+        </div>
+    </div> -->
+
     <div>
         <div class="section-label">Reigns</div>
         <div class="scroll-box scroll-king-chain">
@@ -570,7 +716,10 @@ th:last-child, td:last-child { text-align: right; }
     </div>
 
     <div>
-        <div class="section-label">History</div>
+        <div class="section-label" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>History</span>
+            <button id="history-errors-toggle" class="bench-history-toggle" type="button">Show Errors</button>
+        </div>
         <div class="scroll-box scroll-hist">
             <table>
                 <thead><tr>
@@ -597,19 +746,25 @@ var STORAGE_ENDPOINTS = [
     "https://eu-central-1.hippius.com/teutonic-sn3",
     "https://s3.hippius.com/teutonic-sn3"
 ];
-var DATASET_MANIFEST_KEY = "dataset/finewebedu/manifest.json";
+var DATASET_MANIFEST_KEY = "dataset/all-datasets.manifest.json";
 var DATA_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/dashboard.json"; });
 var HTML_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/index.html"; });
 var DATASET_MANIFEST_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/" + DATASET_MANIFEST_KEY; });
 var BENCH_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/king-benchmark-daily/all-kings/latest.json"; });
 var BENCH_INDEX_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/king-benchmark-daily/all-kings/index.json"; });
 var BENCHMARK_ORDER = [
-    { name: "MMLU", task: "mmlu", fewshot: 5 },
-    { name: "MMLU-Pro", task: "mmlu_pro", fewshot: 5 },
+    { name: "MMLU", task: "mmlu", fewshot: 0 },
     { name: "BBH", task: "leaderboard_bbh", fewshot: 3 },
-    { name: "ARC-C", task: "arc_challenge", fewshot: 25 },
+    { name: "ARC-C", task: "arc_challenge", fewshot: 0 },
     { name: "TruthfulQA", task: "truthfulqa_mc2", fewshot: 0 },
-    { name: "WinoGrande", task: "winogrande", fewshot: 5 }
+    { name: "WinoGrande", task: "winogrande", fewshot: 0 },
+    { name: "GPQA", task: "leaderboard_gpqa", fewshot: 0 },
+    { name: "ARC-E", task: "arc_easy", fewshot: 0 },
+    { name: "PIQA", task: "piqa", fewshot: 0 },
+    { name: "HellaSwag", task: "hellaswag", fewshot: 0 },
+    { name: "OpenBookQA", task: "openbookqa", fewshot: 0 },
+    { name: "MATH-500", task: "minerva_math500", fewshot: 4 },
+    { name: "MMLU-Pro", task: "mmlu_pro", fewshot: 5 }
 ];
 var DATA_URL = DATA_ENDPOINTS[0];
 var DATASET_MANIFEST_URL = DATASET_MANIFEST_ENDPOINTS[0];
@@ -625,10 +780,12 @@ var _benchHistoryOpen = localStorage.getItem("benchHistoryOpen") === "1";
 var _benchHistoryPage = Number(localStorage.getItem("benchHistoryPage") || 0);
 var _benchHistoryPageSize = Number(localStorage.getItem("benchHistoryPageSize") || 5);
 if ([5, 10, 25, 50].indexOf(_benchHistoryPageSize) === -1) _benchHistoryPageSize = 5;
+var _historyShowErrors = false;
 var _chartMode = localStorage.getItem("chartMode") || "ppl";
 var _smoothMode = localStorage.getItem("smoothMode") || "lowess";
 var _chartScaleFocus = localStorage.getItem("chartScaleFocus") || "king";
 var _datasetManifestPromise = null;
+var _datasetManifestData = null;
 
 (function initTheme() {
     var saved = localStorage.getItem("theme");
@@ -663,6 +820,45 @@ function setDatasetSummary(text) {
     el.textContent = text ? " " + text.toUpperCase() : "";
 }
 
+function formatDatasetWeight(weight) {
+    var pct = Number(weight) * 100;
+    if (!isFinite(pct)) return "";
+    return (Math.abs(pct - Math.round(pct)) < 0.05 ? String(Math.round(pct)) : pct.toFixed(1)) + "%";
+}
+
+function formatInteger(value) {
+    var n = Number(value);
+    if (!isFinite(n)) return "--";
+    return Math.round(n).toLocaleString("en-US");
+}
+
+function formatCompactNumber(value) {
+    var n = Number(value);
+    if (!isFinite(n)) return "--";
+    var abs = Math.abs(n);
+    var units = [
+        { v: 1e12, s: "T" },
+        { v: 1e9, s: "B" },
+        { v: 1e6, s: "M" },
+        { v: 1e3, s: "K" }
+    ];
+    for (var i = 0; i < units.length; i++) {
+        if (abs >= units[i].v) {
+            var scaled = n / units[i].v;
+            return scaled.toFixed(Math.abs(scaled) >= 100 ? 0 : 2).replace(/\.00$/, "") + units[i].s;
+        }
+    }
+    return formatInteger(n);
+}
+
+function formatSmallPercent(value) {
+    var n = Number(value);
+    if (!isFinite(n)) return "--";
+    if (n === 0) return "0%";
+    if (Math.abs(n) < 0.01) return n.toPrecision(2) + "%";
+    return (Math.abs(n) >= 10 ? n.toFixed(1) : n.toFixed(3)).replace(/0+$/, "").replace(/\.$/, "") + "%";
+}
+
 function datasetMetaFromPayload(d) {
     if (d && d.current_eval && d.current_eval.dataset) return d.current_eval.dataset;
     var hist = d && d.history ? d.history : [];
@@ -688,8 +884,104 @@ function setDatasetSummaryFromMeta(meta) {
     return true;
 }
 
+function enabledDatasetSources(manifest) {
+    return (manifest && manifest.sources ? manifest.sources : []).filter(function(source) {
+        return source && source.enabled !== false;
+    });
+}
+
+function normalizedDatasetWeights(sources) {
+    var weights = sources.map(function(source) { return Number(source.weight); });
+    var total = weights.reduce(function(acc, weight) {
+        return acc + (isFinite(weight) && weight > 0 ? weight : 0);
+    }, 0);
+    if (total <= 0) return sources.map(function() { return sources.length ? 1 / sources.length : 0; });
+    return weights.map(function(weight) { return isFinite(weight) && weight > 0 ? weight / total : 0; });
+}
+
+function datasetEvalShape(manifest, meta) {
+    var totals = manifest && manifest.totals ? manifest.totals : {};
+    var seqLen = Number((meta && meta.seq_len) || manifest.sequence_length || totals.sequence_length || 2048);
+    var evalSeqs = Number((meta && (meta.n || meta.sampled)) || manifest.default_eval_sequences || 0);
+    return { seqLen: seqLen, evalSeqs: evalSeqs, evalTokens: seqLen * evalSeqs };
+}
+
+function addDatasetCell(row, text, subtext, href) {
+    var cell = document.createElement("td");
+    if (href) {
+        var link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = text || "--";
+        cell.appendChild(link);
+    } else {
+        cell.textContent = text || "--";
+    }
+    if (subtext) {
+        var sub = document.createElement("span");
+        sub.className = "dataset-sub";
+        sub.textContent = subtext;
+        cell.appendChild(sub);
+    }
+    row.appendChild(cell);
+}
+
+function renderDatasetPanel(manifest, meta) {
+    if (!manifest) return false;
+    _datasetManifestData = manifest;
+    var sources = enabledDatasetSources(manifest);
+    var weights = normalizedDatasetWeights(sources);
+    var totals = manifest.totals || {};
+    var shape = datasetEvalShape(manifest, meta);
+    var totalTokens = Number(totals.total_tokens || sources.reduce(function(acc, source) { return acc + Number(source.total_tokens || 0); }, 0));
+    var totalShards = Number(totals.total_shards || sources.reduce(function(acc, source) { return acc + Number(source.total_shards || 0); }, 0));
+    var estimatedSequences = Number(totals.estimated_sequences || (shape.seqLen ? Math.floor(totalTokens / shape.seqLen) : 0));
+    var summary = [
+        sources.length + " datasets",
+        formatCompactNumber(totalTokens) + " tokens",
+        formatInteger(totalShards) + " shards",
+        "seq len " + formatInteger(shape.seqLen)
+    ];
+    if (estimatedSequences) summary.push(formatCompactNumber(estimatedSequences) + " possible seq");
+    if (shape.evalSeqs) summary.push("eval sample " + formatInteger(shape.evalSeqs) + " seq / " + formatCompactNumber(shape.evalTokens) + " tokens");
+    if (manifest.tokenizer) summary.push(manifest.tokenizer);
+    setDatasetSummary(summary.join(" · "));
+
+    var body = document.getElementById("dataset-sources");
+    if (!body) return true;
+    body.innerHTML = "";
+    if (!sources.length) {
+        var empty = document.createElement("tr");
+        addDatasetCell(empty, "No enabled datasets", "");
+        body.appendChild(empty);
+        return true;
+    }
+    sources.forEach(function(source, idx) {
+        var row = document.createElement("tr");
+        var tokenCount = Number(source.total_tokens || 0);
+        var shardCount = Number(source.total_shards || 0);
+        var sourceSeqs = Number(source.estimated_sequences || (shape.seqLen ? Math.floor(tokenCount / shape.seqLen) : 0));
+        var evalSeqs = shape.evalSeqs ? Math.round(shape.evalSeqs * weights[idx]) : 0;
+        var evalTokens = evalSeqs * shape.seqLen;
+        var sampleRate = tokenCount > 0 ? evalTokens / tokenCount * 100 : 0;
+        var sourceFiles = source.source_files != null ? formatInteger(source.source_files) + " source files" : "";
+        var sourceMeta = [source.tokenization_mode, sourceFiles].filter(Boolean).join(" · ");
+        var tokenizerMeta = [source.tokenizer, source.dtype].filter(Boolean).join(" · ");
+        addDatasetCell(row, source.name || "dataset", sourceMeta, source.manifest_url);
+        addDatasetCell(row, formatDatasetWeight(source.weight), "normalized " + formatDatasetWeight(weights[idx]));
+        addDatasetCell(row, formatCompactNumber(tokenCount), formatInteger(shardCount) + " shards");
+        addDatasetCell(row, formatCompactNumber(sourceSeqs), "len " + formatInteger(shape.seqLen));
+        addDatasetCell(row, evalSeqs ? formatInteger(evalSeqs) + " seq" : "--", evalSeqs ? formatCompactNumber(evalTokens) + " tokens · " + formatSmallPercent(sampleRate) + " sampled" : "");
+        addDatasetCell(row, source.source_repo || source.source || "--", tokenizerMeta);
+        body.appendChild(row);
+    });
+    return true;
+}
+
 function setDatasetSummaryFromManifest(manifest) {
     if (!manifest) return false;
+    if (manifest.sources && manifest.sources.length) return renderDatasetPanel(manifest, datasetMetaFromPayload(_lastData));
     var items = manifest.files || manifest.shards || [];
     var parquetCount = 0;
     var totalBytes = 0;
@@ -874,6 +1166,9 @@ var ERROR_MESSAGES = {
     }
 };
 
+function shortSourceName(n) {
+    return n.replace(/-quasar-\d+b$/i, "").replace(/-retok$/, "");
+}
 function modelRepo(obj) { return (obj && (obj.model_repo || obj.challenger_repo)) || ""; }
 function modelDigest(obj) { return (obj && (obj.model_digest || obj.king_digest || obj.challenger_digest)) || ""; }
 function shortDigest(d) { return d ? d.slice(0, 19) : ""; }
@@ -912,6 +1207,54 @@ function benchmarkScoreValue(row) {
     if (row.score != null) return row.score;
     if (row.metric && row.metric.value != null) return row.metric.value;
     return null;
+}
+
+function benchmarkScoreCount(result) {
+    if (!result || !Array.isArray(result.benchmarks)) return 0;
+    var rows = completeBenchmarkRows(result, { missingStatus: "not_run" });
+    var count = 0;
+    rows.forEach(function(row) {
+        var value = benchmarkScoreValue(row);
+        if (value != null && isFinite(value)) count++;
+    });
+    return count;
+}
+
+function isCompleteBenchmarkResult(result) {
+    return benchmarkScoreCount(result) >= BENCHMARK_ORDER.length;
+}
+
+function selectFeaturedBenchmarkPayload(payload) {
+    var candidates = [];
+    var seen = {};
+    function addResult(result) {
+        if (!result || !Array.isArray(result.benchmarks)) return;
+        var key = benchmarkResultKey(result) || String(candidates.length);
+        if (seen[key] != null) {
+            candidates[seen[key]] = mergeBenchmarkResults(candidates[seen[key]], result);
+            return;
+        }
+        seen[key] = candidates.length;
+        candidates.push(result);
+    }
+
+    addResult(normalizeBenchmarkPayload(payload));
+    addResult(normalizeBenchmarkPayload(payload, { activeOnly: true, includeActive: true }));
+    benchmarkHistoryRows().forEach(addResult);
+
+    if (!candidates.length) return null;
+
+    var complete = candidates.filter(isCompleteBenchmarkResult).sort(function(a, b) {
+        return compareBenchmarkKings(a, b, true);
+    });
+    if (complete.length) return complete[0];
+
+    candidates.sort(function(a, b) {
+        var scoreDelta = benchmarkScoreCount(b) - benchmarkScoreCount(a);
+        if (scoreDelta) return scoreDelta;
+        return compareBenchmarkKings(a, b, true);
+    });
+    return candidates[0];
 }
 
 function benchmarkModelLabel(model) {
@@ -1032,7 +1375,7 @@ function renderBenchmarks(payload) {
     var grid = document.getElementById("bench-grid");
     var meta = document.getElementById("bench-meta");
     if (!grid || !meta) return;
-    payload = normalizeBenchmarkPayload(payload);
+    payload = selectFeaturedBenchmarkPayload(payload);
     if (!payload || !Array.isArray(payload.benchmarks)) {
         meta.textContent = "No benchmark data";
         grid.innerHTML = completeBenchmarkRows(null).map(function(b) {
@@ -1042,10 +1385,10 @@ function renderBenchmarks(payload) {
         return;
     }
     var rows = completeBenchmarkRows(payload);
-    var totals = payload.totals || {};
+    var scoredCount = benchmarkScoreCount(payload);
     var model = payload.model || {};
     var modelLabel = benchmarkModelDisplayLabel(model);
-    meta.textContent = (payload.status || "--") + " · " + (totals.completed || 0) + "/" + BENCHMARK_ORDER.length + " complete · " + modelLabel;
+    meta.textContent = (payload.status || "--") + " · " + scoredCount + "/" + BENCHMARK_ORDER.length + " scores · " + modelLabel;
     grid.innerHTML = rows.map(function(b) {
         var status = b.status || "running";
         var metricName = b.metric && b.metric.name ? b.metric.name.replace(/,none$/, "") : "--";
@@ -1284,11 +1627,15 @@ function pollBenchmarkHistory() {
             .then(function(data) {
                 if (_benchHistoryData) return;
                 _benchHistoryData = data;
-                renderBenchmarkHistory();
+                if (_lastBenchData) renderBenchmarks(_lastBenchData);
+                else renderBenchmarkHistory();
             })
             .catch(function() {
                 failures++;
-                if (failures === BENCH_INDEX_ENDPOINTS.length) renderBenchmarkHistory();
+                if (failures === BENCH_INDEX_ENDPOINTS.length) {
+                    if (_lastBenchData) renderBenchmarks(_lastBenchData);
+                    else renderBenchmarkHistory();
+                }
             });
     });
 }
@@ -1316,9 +1663,17 @@ async function pollBenchmarks() {
 
 function render(d) {
     setDatasetManifestLink(DATASET_MANIFEST_URL);
-    if (!setDatasetSummaryFromMeta(datasetMetaFromPayload(d))) {
-        loadDatasetManifest();
+    var datasetMeta = datasetMetaFromPayload(d);
+    if (_datasetManifestData) {
+        renderDatasetPanel(_datasetManifestData, datasetMeta);
     }
+    loadDatasetManifest().then(function(manifest) {
+        if (manifest) {
+            renderDatasetPanel(manifest, datasetMeta);
+        } else if (!setDatasetSummaryFromMeta(datasetMeta)) {
+            setDatasetSummary("manifest link");
+        }
+    });
 
     var mkt = d.market || {};
     if (mkt.tao_price_usd) {
@@ -1733,19 +2088,70 @@ function render(d) {
         }).join("");
     }
 
+    // --- Dataset Scores ---
+    // (function() {
+    //     // var section = document.getElementById("dataset-scores-section");
+    //     var body = document.getElementById("dataset-scores-body");
+    //     var meta = document.getElementById("dataset-scores-meta");
+    //     var entry = null;
+    //     var allH = d.history || [];
+    //     for (var di = 0; di < allH.length; di++) {
+    //         var ss = allH[di].source_scores;
+    //         if (ss && typeof ss === "object" && Object.keys(ss).length > 0) {
+    //             entry = allH[di]; break;
+    //         }
+    //     }
+    //     if (!entry) { section.style.display = "none"; return; }
+    //     section.style.display = "";
+    //     var ss = entry.source_scores;
+    //     var names = Object.keys(ss).sort();
+    //     var klVals = names.map(function(n) { return ss[n].avg_king_loss || 0; });
+    //     var klMin = Math.min.apply(null, klVals);
+    //     var klMax = Math.max.apply(null, klVals);
+    //     var klSpan = klMax - klMin || 1;
+    //     var ago = entry.timestamp ? " — " + timeAgo(entry.timestamp) : "";
+    //     var isEarly = entry.early_stopped ? " (early stop, " + (entry.n_sequences_evaluated || "?") + "/" + (entry.n_sequences || "?") + " seqs)" : "";
+    //     meta.textContent = (entry.challenger_repo ? shortSourceName(entry.challenger_repo) : "") + ago + isEarly;
+    //     body.innerHTML = names.map(function(name) {
+    //         var s = ss[name];
+    //         var kl = s.avg_king_loss || 0;
+    //         var cl = s.avg_challenger_loss || 0;
+    //         var mu = s.mu_hat !== undefined ? s.mu_hat : (kl - cl);
+    //         var n = s.n_sequences || 0;
+    //         var barW = Math.round(((kl - klMin) / klSpan) * 60 + 4);
+    //         var muCls = mu > 0.0005 ? "ds-delta-pos" : (mu < -0.0005 ? "ds-delta-neg" : "");
+    //         var muSign = mu >= 0 ? "+" : "";
+    //         return '<tr title="' + name + '">' +
+    //             '<td><span class="ds-bar" style="width:' + barW + 'px"></span>' +
+    //             '<span class="ds-name">' + shortSourceName(name) + '</span></td>' +
+    //             '<td>' + kl.toFixed(4) + '</td>' +
+    //             '<td>' + cl.toFixed(4) + '</td>' +
+    //             '<td class="' + muCls + '">' + muSign + mu.toFixed(5) + '</td>' +
+    //             '<td>' + n + '</td>' +
+    //             '</tr>';
+    //     }).join("");
+    // })();
+
     // --- History (duel results) ---
     var hb = document.getElementById("hist");
     var history = d.history || [];
+    var historyErrorCount = history.filter(function(h) { return h.verdict === "error"; }).length;
+    var historyErrorsToggle = document.getElementById("history-errors-toggle");
+    if (historyErrorsToggle) historyErrorsToggle.textContent = _historyShowErrors ? "Hide Errors" : "Show Errors";
+    if (!_historyShowErrors) history = history.filter(function(h) { return h.verdict !== "error"; });
     if (history.length === 0) {
-        hb.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:16px">No duels yet</td></tr>';
+        hb.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:16px">' + (historyErrorCount ? "No non-error duels yet" : "No duels yet") + '</td></tr>';
     } else {
-        hb.innerHTML = history.map(function(h) {
+        var rows = [];
+        history.forEach(function(h, idx) {
             var isErr = h.verdict === "error";
             var kl = h.avg_king_loss || 0;
             var cl = h.avg_challenger_loss || 0;
             var repo = modelRepo(h) || "--";
             var repoLink = modelRepo(h) ? modelLink(modelRepo(h), modelDigest(h), repo) : repo;
             var uid = h.uid != null ? h.uid : "--";
+            var hasScores = !isErr && h.source_scores && Object.keys(h.source_scores).length > 0;
+            var detailId = "hist-detail-" + idx;
 
             var verdictCell;
             if (isErr) {
@@ -1766,8 +2172,10 @@ function render(d) {
             var ago = timeAgo(h.timestamp);
             var fullTs = h.timestamp ? new Date(h.timestamp).toUTCString() : "";
             if (!isErr && h.wall_time_s) ago += " (" + h.wall_time_s.toFixed(0) + "s)";
+            var caret = hasScores ? '<span class="hist-caret">►</span>' : '';
 
-            return '<tr>' +
+            rows.push(
+                '<tr' + (hasScores ? ' class="hist-row-expandable" data-detail-id="' + detailId + '"' : '') + '>' +
                 '<td>' + uid + '</td>' +
                 '<td>' + repoLink + '</td>' +
                 '<td>' + hotkeyCell(h.hotkey, h.coldkey) + '</td>' +
@@ -1776,9 +2184,61 @@ function render(d) {
                 '<td>' + (isErr ? "--" : (h.lcb || 0).toFixed(6)) + '</td>' +
                 '<td>' + (isErr ? "--" : kl.toFixed(4)) + '</td>' +
                 '<td>' + (isErr ? "--" : cl.toFixed(4)) + '</td>' +
-                '<td title="' + fullTs + '">' + ago + '</td>' +
-                '</tr>';
-        }).join("");
+                '<td title="' + fullTs + '">' + caret + ago + '</td>' +
+                '</tr>'
+            );
+
+            if (hasScores) {
+                var ss = h.source_scores;
+                var sNames = Object.keys(ss).sort();
+                var klVals2 = sNames.map(function(n) { return ss[n].avg_king_loss || 0; });
+                var klMin2 = Math.min.apply(null, klVals2);
+                var klMax2 = Math.max.apply(null, klVals2);
+                var klSpan2 = klMax2 - klMin2 || 0.001;
+                var innerRows = sNames.map(function(name) {
+                    var s = ss[name];
+                    var skl = s.avg_king_loss || 0;
+                    var scl = s.avg_challenger_loss || 0;
+                    var smu = s.mu_hat != null ? s.mu_hat : (skl - scl);
+                    var barW = Math.round(((skl - klMin2) / klSpan2) * 48 + 3);
+                    var muCls = smu > 0.0005 ? ' class="hist-ds-mu-pos"' : (smu < -0.0005 ? ' class="hist-ds-mu-neg"' : ' class="hist-ds-mu-neutral"');
+                    var muSign = smu >= 0 ? "+" : "";
+                    var monoL = "font-family:'Space Mono',monospace;text-align:left";
+                    return '<tr>' +
+                        '<td style="' + monoL + '">' + shortSourceName(name) + '</td>' +
+                        '<td style="' + monoL + '">' + skl.toFixed(4) + '</td>' +
+                        '<td style="' + monoL + '">' + scl.toFixed(4) + '</td>' +
+                        '<td' + muCls + ' style="' + monoL + '">' + muSign + smu.toFixed(5) + '</td>' +
+                        '<td style="' + monoL + '">' + (s.n_sequences || 0).toLocaleString() + '</td>' +
+                        '</tr>';
+                }).join("");
+                var earlyNote = h.early_stopped
+                    ? '<div style="font-size:10px;opacity:0.4;margin-top:5px;text-transform:uppercase;letter-spacing:0.04em">Early stop — ' + (h.n_sequences_evaluated || "?") + " / " + (h.n_sequences || "?") + " seqs evaluated</div>"
+                    : "";
+                rows.push(
+                    '<tr class="hist-detail" id="' + detailId + '">' +
+                    '<td colspan="9"><div class="hist-detail-inner">' +
+                        '<table class="hist-ds-table"><thead><tr>' +
+                            '<th style="min-width:140px">Dataset</th>' +
+                            '<th>King Loss</th><th>Chall Loss</th>' +
+                            '<th title="challenger advantage: positive = challenger had lower loss">Δ</th>' +
+                            '<th>N</th>' +
+                        '</tr></thead><tbody>' + innerRows + '</tbody></table>' +
+                        earlyNote +
+                    '</div></td></tr>'
+                );
+            }
+        });
+        var openIds = {};
+        document.querySelectorAll("#hist .hist-detail.open").forEach(function(el) { openIds[el.id] = true; });
+        hb.innerHTML = rows.join("");
+        Object.keys(openIds).forEach(function(id) {
+            var detail = document.getElementById(id);
+            if (!detail) return;
+            detail.classList.add("open");
+            var prevRow = detail.previousElementSibling;
+            if (prevRow) { var c = prevRow.querySelector(".hist-caret"); if (c) c.classList.add("open"); }
+        });
     }
 }
 
@@ -1800,6 +2260,11 @@ function saveCachedEndpoint(url) {
     } catch (e) {}
 }
 
+async function dashboardJson(response) {
+    var text = await response.text();
+    return JSON.parse(text.replace(/:\s*(?:NaN|-?Infinity)(?=[,}\]])/g, ": null"));
+}
+
 // Race all endpoints in parallel; first 2xx JSON response wins.
 // Returns { url, data } or throws if every endpoint fails.
 async function raceEndpoints(buster) {
@@ -1810,7 +2275,7 @@ async function raceEndpoints(buster) {
             fetch(url + "?t=" + buster, { signal: ctrls[i].signal })
                 .then(function(r) {
                     if (!r.ok) throw new Error("HTTP " + r.status);
-                    return r.json().then(function(data) { return { url: url, data: data, idx: i }; });
+                    return dashboardJson(r).then(function(data) { return { url: url, data: data, idx: i }; });
                 })
                 .then(function(win) {
                     for (var j = 0; j < ctrls.length; j++) if (j !== win.idx) ctrls[j].abort();
@@ -1830,7 +2295,7 @@ async function poll() {
         if (DATA_URL) {
             try {
                 var r = await fetch(DATA_URL + "?t=" + buster);
-                if (r.ok) { _lastData = await r.json(); render(_lastData); return; }
+                if (r.ok) { _lastData = await dashboardJson(r); render(_lastData); return; }
                 throw new Error("HTTP " + r.status);
             } catch (e) {
                 // Fall through to a re-race so we recover from a downed endpoint.
@@ -1920,9 +2385,12 @@ DATA_URL = loadCachedEndpoint();
 })();
 
 setDatasetManifestLink(DATASET_MANIFEST_URL);
-setDatasetSummary("loading manifest...");
 loadDatasetManifest().then(function(manifest) {
-    if (!manifest) setDatasetSummary("manifest link");
+    if (manifest) {
+        renderDatasetPanel(manifest, datasetMetaFromPayload(_lastData));
+    } else {
+        setDatasetSummary("manifest link");
+    }
 });
 
 var benchHistoryToggle = document.getElementById("bench-history-toggle");
@@ -1955,6 +2423,37 @@ if (benchHistoryPanel) {
         renderBenchmarkHistory();
     });
 }
+
+var historyErrorsToggle = document.getElementById("history-errors-toggle");
+if (historyErrorsToggle) {
+    historyErrorsToggle.addEventListener("click", function() {
+        _historyShowErrors = !_historyShowErrors;
+        if (_lastData) render(_lastData);
+    });
+}
+
+(function initHistExpand() {
+    document.getElementById("hist").addEventListener("click", function(e) {
+        var row = e.target;
+        while (row && row.tagName !== "TR") row = row.parentElement;
+        if (!row || !row.classList.contains("hist-row-expandable")) return;
+        var detailId = row.getAttribute("data-detail-id");
+        if (!detailId) return;
+        var detail = document.getElementById(detailId);
+        if (!detail) return;
+        var caret = row.querySelector(".hist-caret");
+        var isOpen = detail.classList.contains("open");
+        document.querySelectorAll("#hist .hist-detail.open").forEach(function(d) {
+            if (d !== detail) {
+                d.classList.remove("open");
+                var prevRow = d.previousElementSibling;
+                if (prevRow) { var c = prevRow.querySelector(".hist-caret"); if (c) c.classList.remove("open"); }
+            }
+        });
+        detail.classList.toggle("open", !isOpen);
+        if (caret) caret.classList.toggle("open", !isOpen);
+    });
+})();
 
 poll();
 pollBenchmarks();

@@ -197,35 +197,19 @@ MAX_TRANSIENT_EVAL_RETRIES = int(os.environ.get("TEUTONIC_MAX_TRANSIENT_EVAL_RET
 # ---------------------------------------------------------------------------
 
 async def fetch_tmc_data() -> dict | None:
-    """Fetch TAO price, SN3 alpha price, and registration burn from TMC API."""
-    if not TMC_API_KEY:
-        return None
-    headers = {"Authorization": TMC_API_KEY}
+    """Fetch TAO price and SN3 alpha price from TMC public API."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-            market_resp, subnet_resp, burn_resp = await asyncio.gather(
-                client.get(f"{TMC_BASE}/market/market-data/", headers=headers),
-                client.get(f"{TMC_BASE}/subnets/{NETUID}/", headers=headers),
-                client.get(f"{TMC_BASE}/subnets/burn/{NETUID}/", headers=headers),
+            market_resp, subnet_resp = await asyncio.gather(
+                client.get(f"{TMC_BASE}/market/market-data/"),
+                client.get(f"{TMC_BASE}/subnets/{NETUID}/"),
             )
         m = market_resp.json()
         s = subnet_resp.json()
-        b = burn_resp.json()
         snap = s["latest_snapshot"]
         asp = float(snap["alpha_sqrt_price"])
         tao_price = m["current_price"]
         alpha_tao = asp ** 2
-        # `subnet_alpha_out_emission` is the GROSS per-block alpha emission
-        # to this subnet (in nanoalpha, 1e-9). It's split between three pots
-        # before reaching miners:
-        #   - pending_server_emission    -> miners (server side)
-        #   - pending_validator_emission -> validators
-        #   - pending_owner_cut          -> subnet owner
-        # The dashboard cares about the MINER share, so we scale the gross
-        # rate by `pending_server / (server + validator + owner)`. Earlier
-        # versions used the gross number unscaled, which double-counted by
-        # ~2x (miners actually get ~40% on SN3, not 100%). Falls back to a
-        # 50/50 split if any pending field is missing or zero.
         try:
             gross_apb = float(snap.get("subnet_alpha_out_emission", 0)) / 1e9
         except Exception:
@@ -244,7 +228,6 @@ async def fetch_tmc_data() -> dict | None:
             "tao_change_24h": m["usd_quote"]["percent_change_24h"],
             "sn3_alpha_price_tao": alpha_tao,
             "sn3_alpha_price_usd": alpha_tao * tao_price,
-            "sn3_reg_burn_tao": b[0]["burn"] / 1e9,
             "sn3_alpha_per_block": sn3_alpha_per_block,
             "sn3_miner_share": miner_share,
             "sn3_alpha_per_block_gross": gross_apb,
@@ -2085,7 +2068,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "shard_key": shard_key,
             "king_digest": king_digest,
             "challenger_digest": challenger_digest,
-            "delta_threshold": 0.0025,
+            "delta_threshold": 0.0015,
             "n_public": EVAL_N_PUBLIC,
             "n_private": EVAL_N_PRIVATE,
             "n_bootstrap": 10_000,

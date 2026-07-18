@@ -27,13 +27,13 @@ DEFAULT_MANIFEST_URLS: list[str] = (
     if _raw_manifest_urls
     else [
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
-        "https://us-east-1.hippius.com/teutonic-sn3/dataset/quasar-sn3-retok/manifest.json",
         "https://us-east-1.hippius.com/teutonic-sn3/dataset/ultradata-math-l3-quasar-10b/manifest.json",
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.1-quasar-10b/manifest.json",
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.2-quasar-10b/manifest.json",
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-cc-math-v1-4plus-mind-quasar-10b/manifest.json",
-        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json"
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json",
+        "https://s3.hippius.com/teutonic-sn3/dataset/pes2o-v3/manifest.json"
     ]
 )
 
@@ -50,14 +50,14 @@ DEFAULT_SOURCE_WEIGHT_MAP: dict[str, float] = (
     }
     if _raw_weight_map
     else {
-        "automathtext-v2": 0.3,
-        "quasar-sn3": 0.02,
+        "automathtext-v2": 0.27,
         "ultradata-math-l3": 0.12,
-        "finewebedu": 0.24,
-        "nemotron-specialized-v1.1": 0.05,
-        "nemotron-specialized-v1.2": 0.07,
-        "nemotron-cc-math": 0.1,
-        "openthoughts3-1.2m": 0.1
+        "finewebedu": 0.27,
+        "nemotron-specialized-v1.1": 0.03,
+        "nemotron-specialized-v1.2": 0.05,
+        "nemotron-cc-math": 0.06,
+        "openthoughts3-1.2m": 0.1,
+        "pes2o-v3": 0.1
     }
 )
 

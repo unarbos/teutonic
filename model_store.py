@@ -291,7 +291,8 @@ def list_remote_files(ref: ModelRef) -> list[str]:
     from hippius_hub.auth import get_oci_bearer_token, resolve_token_value
     token = _resolve_hub_token(f"Listing remote files for {ref.immutable_ref}")
     oci_token = get_oci_bearer_token(ref.repo, resolve_token_value(token), push=False)
-    manifest = fetch_manifest("https://registry.hippius.com", ref.repo, ref.digest, oci_token)
+    manifest_result = fetch_manifest("https://registry.hippius.com", ref.repo, ref.digest, oci_token)
+    manifest = getattr(manifest_result, "manifest", manifest_result)
     return sorted(layer_titles(manifest))
 
 

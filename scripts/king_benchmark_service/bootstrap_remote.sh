@@ -18,7 +18,7 @@ uv venv --clear --python 3.12 .venv
 . .venv/bin/activate
 uv pip install --upgrade pip wheel setuptools
 for attempt in 1 2 3 4 5; do
-  if uv pip install --upgrade "lm-eval[api]" accelerate datasets evaluate hf_transfer huggingface_hub hippius-hub httpx nvidia-ml-py sentencepiece protobuf transformers causal-conv1d flash-linear-attention tiktoken; then
+  if uv pip install --upgrade "lm-eval[api]" accelerate datasets evaluate hf_transfer huggingface_hub hippius-hub httpx nvidia-ml-py sentencepiece protobuf transformers causal-conv1d flash-linear-attention tiktoken math-verify latex2sympy2_extended antlr4-python3-runtime==4.11; then
     break
   fi
   if [ "$attempt" = "5" ]; then
@@ -29,7 +29,7 @@ done
 
 if python - <<'INNERPY'
 try:
-    import causal_conv1d, fla, hippius_hub, httpx, lm_eval, tiktoken, torch
+    import causal_conv1d, fla, hippius_hub, httpx, lm_eval, tiktoken, torch, math_verify
     print(f"bootstrap imports ok; torch={torch.__version__}")
 except Exception:
     raise SystemExit(1)

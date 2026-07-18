@@ -8,6 +8,7 @@ build/
 
 # Virtual environments
 .venv/
+.venv-fix/
 venv/
 env/
 
@@ -56,3 +57,7 @@ scripts/experiments/services/
 runs/
 models/
 tunnel.sh
+
+keys/validator_model_decryption.key
+
+scripts/king_benchmark_service/repair-backups

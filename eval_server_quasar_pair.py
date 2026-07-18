@@ -79,7 +79,7 @@ DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "512"))
 DEFAULT_PARALLEL_BATCH_SIZE = int(os.environ.get("EVAL_PARALLEL_BATCH_SIZE", "128"))
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
-DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0025"))
+DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
 DEFAULT_N_PUBLIC = int(os.environ.get("EVAL_N_PUBLIC", "1000"))
 DEFAULT_N_PRIVATE = int(os.environ.get("EVAL_N_PRIVATE", "1000"))
@@ -511,6 +511,37 @@ def patch_transformers_masking_compat() -> None:
     create_causal_mask_compat._quasar_compat = True
     masking_utils.create_causal_mask = create_causal_mask_compat
     log.info("patched transformers.masking_utils.create_causal_mask for Quasar")
+
+
+_triton_autotune_lock = threading.Lock()
+
+
+def patch_triton_autotuner_thread_safety() -> None:
+    """Make triton's Autotuner.run() safe to call from multiple threads at once.
+
+    King and challenger share the same compiled fla kernels (e.g. l2norm_fwd_kernel
+    inside chunk_gated_delta_rule), and run_eval's ThreadPoolExecutor drives their
+    forward passes concurrently. triton.runtime.autotuner.Autotuner.cache is a plain
+    dict with no locking, so two threads racing a cache-miss on the same kernel can
+    corrupt the in-flight entry and crash with "TypeError: 'NoneType' object is not
+    a mapping". King and challenger run on disjoint GPUs with independent CUDA
+    streams, so serializing the brief Python-side dispatch doesn't block actual GPU
+    overlap.
+    """
+    from triton.runtime.autotuner import Autotuner
+
+    if getattr(Autotuner, "_quasar_thread_safe", False):
+        return
+
+    original_run = Autotuner.run
+
+    def run_locked(self, *args, **kwargs):
+        with _triton_autotune_lock:
+            return original_run(self, *args, **kwargs)
+
+    Autotuner.run = run_locked
+    Autotuner._quasar_thread_safe = True
+    log.info("patched triton.runtime.autotuner.Autotuner.run for thread-safety")
 
 
 def patch_loaded_quasar_modules() -> None:
@@ -1531,6 +1562,7 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         on_phase({"phase": "limits_applied", **limits_meta})
         preflight_deps()
         patch_transformers_masking_compat()
+        patch_triton_autotuner_thread_safety()
 
         check_eval_runtime(t0)
         king_snapshot = materialize_model(req.king_repo, req.king_digest, on_phase=on_phase)

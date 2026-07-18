@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -43,7 +45,7 @@ class WorkerState:
             write_json(self.state_path, payload)
 
     def post_event(self, event: dict[str, Any]) -> None:
-        if not self.controller_url:
+        if not self.controller_url or self.controller_url.lower() in {"none", "off", "disabled"}:
             return
         try:
             http_json(f"{self.controller_url}/worker-events", method="POST", payload=event, token=self.callback_token, timeout_s=20)
@@ -53,7 +55,7 @@ class WorkerState:
             print(json.dumps({"event": "callback_error", **row}, sort_keys=False), flush=True)
 
     def post_result(self, result: dict[str, Any]) -> None:
-        if not self.controller_url:
+        if not self.controller_url or self.controller_url.lower() in {"none", "off", "disabled"}:
             return
         try:
             http_json(f"{self.controller_url}/worker-results", method="POST", payload=result, token=self.callback_token, timeout_s=120)
@@ -66,13 +68,36 @@ class WorkerState:
 def append_line(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as fh:
-        fh.write(json.dumps(payload, sort_keys=False) + "\n")
+        fh.write(json.dumps(payload, sort_keys=False, default=str) + "\n")
+
+
+WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def websocket_accept_key(key: str) -> str:
+    digest = hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def websocket_send_json(wfile: Any, payload: dict[str, Any]) -> None:
+    body = json.dumps(payload, sort_keys=False, default=str).encode("utf-8")
+    header = bytearray([0x81])
+    length = len(body)
+    if length < 126:
+        header.append(length)
+    elif length < 65536:
+        header.extend([126, (length >> 8) & 0xFF, length & 0xFF])
+    else:
+        header.append(127)
+        header.extend(length.to_bytes(8, "big"))
+    wfile.write(bytes(header) + body)
+    wfile.flush()
 
 
 def log_event(job_root: Path, event: str, payload: dict[str, Any]) -> None:
     row = {"at": utcnow_iso(), "event": event, **payload}
     append_line(job_root / "worker_events.jsonl", row)
-    print(json.dumps(row, sort_keys=False), flush=True)
+    print(json.dumps(row, sort_keys=False, default=str), flush=True)
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -177,7 +202,7 @@ def terminate_process_group(proc: subprocess.Popen[Any], *, grace_s: int = 20) -
 
 
 def pm2_event(event: str, payload: dict[str, Any]) -> None:
-    print(json.dumps({"at": utcnow_iso(), "event": event, **payload}, sort_keys=False), flush=True)
+    print(json.dumps({"at": utcnow_iso(), "event": event, **payload}, sort_keys=False, default=str), flush=True)
 
 
 def quote_cmd(cmd: list[str]) -> str:
@@ -246,6 +271,9 @@ def build_eval_cmd(
         str(standardized_results_path),
         "--resume",
     ]
+    batch_size_overrides = job.get("batch_size_overrides") or os.environ.get("TEUTONIC_KING_BENCH_BATCH_SIZE_OVERRIDES", "")
+    if str(batch_size_overrides).strip():
+        cmd += ["--batch-size-overrides", str(batch_size_overrides).strip()]
     lm_eval_bin = job.get("lm_eval_bin") or os.environ.get("TEUTONIC_KING_BENCH_LM_EVAL_BIN", "")
     if str(lm_eval_bin).strip():
         cmd += ["--lm-eval-bin", str(lm_eval_bin).strip()]
@@ -388,14 +416,28 @@ def accelerate_lm_eval_bin(state: WorkerState, gpu_ids: list[str]) -> str:
     return f"{accelerate} launch --multi_gpu --num_processes {len(gpu_ids)} --gpu_ids {gpu_arg} --mixed_precision bf16 --num_cpu_threads_per_process 8 --enable_cpu_affinity --main_process_port 29600 -m lm_eval"
 
 
+def configured_gpu_ids() -> list[str]:
+    return split_csv(
+        os.environ.get("TEUTONIC_KING_BENCH_GPU_IDS") or os.environ.get("CUDA_VISIBLE_DEVICES"),
+        [str(i) for i in range(4)],
+    )
+
+
 def run_hybrid_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
     job_id = job["job_id"]
     model = job["model"]
     benchmarks = list(job.get("benchmarks") or DEFAULT_BENCHMARKS)
-    mmlu_pro_names = {"MMLU-Pro", "mmlu_pro"}
-    phase1 = [bench for bench in benchmarks if bench not in mmlu_pro_names]
-    has_mmlu_pro = any(bench in mmlu_pro_names for bench in benchmarks)
-    phase2 = ["MMLU-Pro"] if has_mmlu_pro else []
+    accelerated_phase_benchmarks = (
+        ("MATH-500", {"MATH-500", "minerva_math500"}),
+        ("MMLU-Pro", {"MMLU-Pro", "mmlu_pro"}),
+    )
+    accelerated_names = set().union(*(names for _, names in accelerated_phase_benchmarks))
+    phase1 = [bench for bench in benchmarks if bench not in accelerated_names]
+    phase2 = [
+        canonical
+        for canonical, names in accelerated_phase_benchmarks
+        if any(bench in names for bench in benchmarks)
+    ]
 
     job_root = state.root / "jobs" / job_id
     run_dir = job_root / "run"
@@ -403,14 +445,14 @@ def run_hybrid_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
     eval_script = Path(job.get("eval_script") or state.root / "eval_king_benchmarks.py")
     started_at = utcnow_iso()
     progress_interval = int(job.get("progress_interval_s") or os.environ.get("TEUTONIC_WORKER_PROGRESS_INTERVAL_S", "60"))
-    gpu_ids = split_csv(os.environ.get("TEUTONIC_KING_BENCH_GPU_IDS"), [str(i) for i in range(8)])
+    gpu_ids = configured_gpu_ids()
     gpu_ids = gpu_ids[: max(1, int(os.environ.get("TEUTONIC_KING_BENCH_MAX_PARALLEL_BENCHMARKS", str(len(gpu_ids)))))]
     model_cache_dir = Path(os.environ.get("TEUTONIC_KING_BENCH_MODEL_CACHE_DIR", str(state.root / "model_cache"))) / slugify(model.get("king_id") or model.get("model_repo") or job_id)
     combined_path = run_dir / "standardized_results.json"
     completed_rows: dict[str, dict[str, Any]] = {}
     active: dict[str, dict[str, Any]] = {}
 
-    log_event(job_root, "job_started", {"job_id": job_id, "benchmarks": benchmarks, "mode": "hybrid-per-gpu-then-mmlu-pro-accelerate", "gpu_ids": gpu_ids, "model_cache_dir": str(model_cache_dir), "phase1": phase1, "phase2": phase2})
+    log_event(job_root, "job_started", {"job_id": job_id, "benchmarks": benchmarks, "mode": "hybrid-per-gpu-then-final-accelerate", "gpu_ids": gpu_ids, "model_cache_dir": str(model_cache_dir), "phase1": phase1, "phase2": phase2})
     append_line(job_root / "gpu_snapshots.jsonl", {"at": utcnow_iso(), "phase": "start", "snapshot": gpu_snapshot()})
 
     download_std = run_dir / "download_standardized_results.json"
@@ -448,7 +490,7 @@ def run_hybrid_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
             completed_rows=missing_model_rows(benchmarks, download_log, proc.returncode),
             active={},
             pending=[],
-            mode="hybrid-per-gpu-then-mmlu-pro-accelerate",
+            mode="hybrid-per-gpu-then-final-accelerate",
             gpu_ids=gpu_ids,
         )
         return {"returncode": 0, "status": "missing", "results": results, "artifacts": {"remote_run_dir": str(run_dir), "remote_log": str(download_log)}}
@@ -473,13 +515,13 @@ def run_hybrid_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
             completed_rows=completed_rows,
             active=active,
             pending=pending,
-            mode="hybrid-per-gpu-then-mmlu-pro-accelerate",
+            mode="hybrid-per-gpu-then-final-accelerate",
             gpu_ids=gpu_ids,
         )
-        event = {"event": "job_progress", "job_id": job_id, "model": model, "benchmarks": benchmarks, "status": "running", "mode": "hybrid-per-gpu-then-mmlu-pro-accelerate", "phase": phase, "updated_at": utcnow_iso(), "active": {bench: {"gpu_id": info["gpu_id"], "pid": info["pid"], "log": str(info["log_path"])} for bench, info in active.items()}, "pending": pending, "partial_results": results, "gpu_snapshot": snapshot}
+        event = {"event": "job_progress", "job_id": job_id, "model": model, "benchmarks": benchmarks, "status": "running", "mode": "hybrid-per-gpu-then-final-accelerate", "phase": phase, "updated_at": utcnow_iso(), "active": {bench: {"gpu_id": info["gpu_id"], "pid": info["pid"], "log": str(info["log_path"])} for bench, info in active.items()}, "pending": pending, "partial_results": results, "gpu_snapshot": snapshot}
         state.set_current(event)
         state.post_event(event)
-        pm2_event("job_progress", {"job_id": job_id, "mode": "hybrid-per-gpu-then-mmlu-pro-accelerate", "phase": phase, "active": list(active), "pending": pending, "totals": results.get("totals"), "gpu": compact_gpu_snapshot(snapshot)})
+        pm2_event("job_progress", {"job_id": job_id, "mode": "hybrid-per-gpu-then-final-accelerate", "phase": phase, "active": list(active), "pending": pending, "totals": results.get("totals"), "gpu": compact_gpu_snapshot(snapshot)})
 
     def start_single_gpu_benchmark(bench: str, gpu_id: str) -> dict[str, Any]:
         bench_slug = slugify(bench)
@@ -544,8 +586,8 @@ def run_hybrid_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
         if pending or active:
             time.sleep(5)
 
-    if phase2:
-        bench = "MMLU-Pro"
+    for phase2_index, bench in enumerate(phase2):
+        phase2_pending = phase2[phase2_index + 1:]
         bench_slug = slugify(bench)
         bench_run_dir = run_dir / "benchmarks" / bench_slug
         bench_log = job_root / "benchmark_logs" / f"{bench_slug}.log"
@@ -592,7 +634,7 @@ def run_hybrid_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
             now = time.time()
             if now - last_progress >= progress_interval:
                 last_progress = now
-                write_progress("phase2-mmlu-pro-all-gpus", [])
+                write_progress(f"phase2-{bench_slug}-all-gpus", phase2_pending)
             time.sleep(5)
 
     finished_at = utcnow_iso()
@@ -608,7 +650,7 @@ def run_hybrid_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
         completed_rows=completed_rows,
         active={},
         pending=[],
-        mode="hybrid-per-gpu-then-mmlu-pro-accelerate",
+        mode="hybrid-per-gpu-then-final-accelerate",
         gpu_ids=gpu_ids,
     )
     append_line(job_root / "gpu_snapshots.jsonl", {"at": utcnow_iso(), "phase": "finish", "snapshot": gpu_snapshot()})
@@ -626,7 +668,7 @@ def run_parallel_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any]:
     eval_script = Path(job.get("eval_script") or state.root / "eval_king_benchmarks.py")
     started_at = utcnow_iso()
     progress_interval = int(job.get("progress_interval_s") or os.environ.get("TEUTONIC_WORKER_PROGRESS_INTERVAL_S", "60"))
-    gpu_ids = split_csv(os.environ.get("TEUTONIC_KING_BENCH_GPU_IDS"), [str(i) for i in range(8)])
+    gpu_ids = configured_gpu_ids()
     gpu_ids = gpu_ids[: max(1, int(os.environ.get("TEUTONIC_KING_BENCH_MAX_PARALLEL_BENCHMARKS", str(len(gpu_ids)))))]
     model_cache_dir = Path(os.environ.get("TEUTONIC_KING_BENCH_MODEL_CACHE_DIR", str(state.root / "model_cache"))) / slugify(model.get("king_id") or model.get("model_repo") or job_id)
     combined_path = run_dir / "standardized_results.json"
@@ -795,7 +837,7 @@ def run_sequential_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any
     eval_script = Path(job.get("eval_script") or state.root / "eval_king_benchmarks.py")
     mode = os.environ.get("TEUTONIC_KING_BENCH_WORKER_MODE", "accelerate-data-parallel")
     snapshot_dir: Path | None = None
-    if mode == "accelerate-data-parallel":
+    if mode in {"accelerate-data-parallel", "hybrid-dashboard"}:
         model_args_extra = os.environ.get("TEUTONIC_KING_BENCH_ACCELERATE_MODEL_ARGS_EXTRA", "")
         device = os.environ.get("TEUTONIC_KING_BENCH_ACCELERATE_DEVICE", "cuda")
         snapshot_dir = Path(os.environ.get("TEUTONIC_KING_BENCH_MODEL_CACHE_DIR", str(state.root / "model_cache"))) / slugify(model.get("king_id") or model.get("model_repo") or job_id)
@@ -916,7 +958,7 @@ def run_sequential_job(state: WorkerState, job: dict[str, Any]) -> dict[str, Any
             active={},
             pending=[],
             mode=mode,
-            gpu_ids=split_csv(os.environ.get("CUDA_VISIBLE_DEVICES"), [str(i) for i in range(8)]),
+            gpu_ids=configured_gpu_ids(),
         )
         log_event(job_root, "job_missing_model", {"mode": mode, "returncode": returncode, "log": str(log_path), "totals": results.get("totals")})
         return {"returncode": 0, "status": "missing", "results": results, "artifacts": {"remote_run_dir": str(run_dir), "remote_log": str(log_path), "gpu_snapshots": str(job_root / "gpu_snapshots.jsonl"), "worker_events": str(job_root / "worker_events.jsonl")}}
@@ -1001,7 +1043,35 @@ class Handler(BaseHTTPRequestHandler):
             state: WorkerState = self.server.state  # type: ignore[attr-defined]
             self._json(200, state.snapshot())
             return
+        if self.path == "/events":
+            self._websocket_events()
+            return
         self._json(404, {"error": "not found"})
+
+    def _websocket_events(self) -> None:
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
+            self._json(400, {"error": "websocket upgrade required"})
+            return
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", websocket_accept_key(key))
+        self.end_headers()
+        self.close_connection = True
+        state: WorkerState = self.server.state  # type: ignore[attr-defined]
+        last_payload = None
+        try:
+            while True:
+                payload = state.snapshot()
+                payload.setdefault("event", "worker_status")
+                encoded = json.dumps(payload, sort_keys=True, default=str)
+                if encoded != last_payload:
+                    websocket_send_json(self.wfile, payload)
+                    last_payload = encoded
+                time.sleep(2)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def do_POST(self) -> None:
         if not self._auth():

@@ -7,11 +7,24 @@ import os
 import re
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_BENCHMARKS = ["MMLU", "MMLU-Pro", "BBH", "ARC-C", "TruthfulQA", "WinoGrande"]
+DEFAULT_BENCHMARKS = [
+    "MMLU",
+    "BBH",
+    "ARC-C",
+    "TruthfulQA",
+    "WinoGrande",
+    "GPQA",
+    "ARC-E",
+    "PIQA",
+    "HellaSwag",
+    "OpenBookQA",
+    "MATH-500",
+]
 DASHBOARD_URLS = [
     "https://us-east-1.hippius.com/teutonic-sn3/dashboard.json",
     "https://eu-central-1.hippius.com/teutonic-sn3/dashboard.json",
@@ -57,7 +70,7 @@ def read_json(path: Path, default: Any = None) -> Any:
 
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
     tmp.replace(path)
 
