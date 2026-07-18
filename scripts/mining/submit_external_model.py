@@ -12,9 +12,10 @@ What it does:
   4. uploads to Hippius Hub under the operator's namespace
   5. forms a v4 reveal commitment and submits it on chain
 
-Coldkey-prefix gate: the validator REJECTS any Hippius repo whose name does
-NOT contain the first 8 ss58 chars of the miner's coldkey. The repo name
-this script generates embeds the prefix automatically.
+Coldkey-token gate: the validator REJECTS any Hippius repo whose name does
+NOT contain the miner's coldkey token (first 5 + last 5 ss58 chars of the
+coldkey, concatenated). The repo name this script generates embeds the
+token automatically.
 
 Usage:
     HF_TOKEN=... python scripts/mining/submit_external_model.py \
@@ -148,7 +149,7 @@ def main():
     p.add_argument("--workdir", default="/tmp/qwen3-4b-base-stage",
                    help="Local staging dir (snapshot_download target)")
     p.add_argument("--suffix", default=None,
-                   help="Repo name suffix (default: <coldkey8>-<hfname>)")
+                   help="Repo name suffix (default: <coldkey5+5>-<hfname>)")
     p.add_argument("--dry-run", action="store_true",
                    help="Stop after upload — print payload, don't submit on chain")
     p.add_argument("--skip-download", action="store_true",
@@ -164,13 +165,14 @@ def main():
         sys.exit(1)
     log.info("targeting king %s @ %s", king_repo, king_digest[:24])
 
-    # Wallet — needed up front so we can compute the coldkey prefix for the repo name.
+    # Wallet — needed up front so we can compute the coldkey token for the repo name.
     wallet = bt.Wallet(name=args.wallet, hotkey=args.hotkey)
-    ck_prefix = wallet.coldkeypub.ss58_address[:8]
+    ck_ss58 = wallet.coldkeypub.ss58_address
+    ck_token = ck_ss58[:5] + ck_ss58[-5:]
     hk_ss58 = wallet.hotkey.ss58_address
-    log.info("wallet: cold=%s... hot=%s...", ck_prefix, hk_ss58[:8])
+    log.info("wallet: cold=%s (token %s) hot=%s...", ck_ss58, ck_token, hk_ss58[:8])
 
-    suffix = args.suffix or f"{ck_prefix}-{args.hf.rsplit('/', 1)[-1].replace('_', '-')}"
+    suffix = args.suffix or f"{ck_token}-{args.hf.rsplit('/', 1)[-1].replace('_', '-')}"
     # Docker registry repo names must be all-lowercase per the distribution spec.
     repo = f"{args.hippius_namespace}/{chain_config.NAME}-{suffix}".lower()
     log.info("target Hippius repo: %s", repo)

@@ -118,12 +118,14 @@ DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
 # Anti-impersonation: miners must include the first N ss58 chars of their
 # coldkey somewhere in their Hippius repo name. Two miners trying to claim the
-# same checkpoint would have to advertise different coldkey prefixes, so
+# same checkpoint would have to advertise different coldkey tokens, so
 # only the legit owner can submit a repo whose name embeds *their* coldkey.
 # (Also forces miners to host under their own Hippius namespace: the basename or
-# namespace must contain the prefix; case-insensitive substring check.)
-# 8 chars of ss58 ≈ 40 bits of entropy after the universal "5" prefix.
-COLDKEY_PREFIX_LEN = int(os.environ.get("TEUTONIC_COLDKEY_PREFIX_LEN", "8"))
+# namespace must contain the token; case-insensitive substring check.)
+# The token is first 5 + last 5 chars of the ss58 concatenated - 10 chars total,
+# and the tail chars carry the address checksum so it's hard to guess.
+COLDKEY_PREFIX_LEN = int(os.environ.get("TEUTONIC_COLDKEY_PREFIX_LEN", "5"))
+COLDKEY_SUFFIX_LEN = int(os.environ.get("TEUTONIC_COLDKEY_SUFFIX_LEN", "5"))
 
 # Production-safe exception for the Quasar competition. Most chains keep the
 # old policy: no auto_map and no Python files in challenger repos. Quasar
@@ -1463,15 +1465,16 @@ class State:
     def coldkey_for(self, hotkey: str) -> str | None:
         return self.hotkey_coldkey.get(hotkey) or None
 
-    def expected_coldkey_prefix(self, hotkey: str) -> str | None:
-        """First N chars of the miner's coldkey ss58, used to gate Hippius repo
-        names. Returns None when the metagraph hasn't surfaced this hotkey
-        yet — callers should treat that as "skip the check, retry later".
+    def expected_coldkey_token(self, hotkey: str) -> str | None:
+        """First 5 + last 5 chars of the miner's coldkey ss58 concatenated,
+        used to gate Hippius repo names. Returns None when the metagraph
+        hasn't surfaced this hotkey yet — callers should treat that as
+        "skip the check, retry later".
         """
         ck = self.coldkey_for(hotkey)
         if not ck:
             return None
-        return ck[:COLDKEY_PREFIX_LEN]
+        return ck[:COLDKEY_PREFIX_LEN] + ck[-COLDKEY_SUFFIX_LEN:]
 
     def _with_fresh_uid(self, entry):
         """Return a copy of `entry` whose `uid` and `coldkey` are re-derived
@@ -1830,15 +1833,16 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
                               "v4|repo|challenger_digest|author_hotkey")
         return
 
-    expected_ck_prefix = state.expected_coldkey_prefix(hotkey)
-    if expected_ck_prefix:
+    expected_ck_token = state.expected_coldkey_token(hotkey)
+    if expected_ck_token:
         # Case-insensitive substring match anywhere in the full repo (so the
-        # miner can put their coldkey prefix in the Hippius namespace OR the
+        # miner can put their coldkey token in the Hippius namespace OR the
         # model basename — whichever they prefer).
-        if expected_ck_prefix.lower() not in model_repo.lower():
-            reason = (f"Hippius repo '{model_repo}' must contain miner coldkey prefix "
-                      f"'{expected_ck_prefix}' (first {COLDKEY_PREFIX_LEN} chars "
-                      f"of the coldkey ss58); rename your Hippius namespace or model "
+        if expected_ck_token.lower() not in model_repo.lower():
+            reason = (f"Hippius repo '{model_repo}' must contain miner coldkey token "
+                      f"'{expected_ck_token}' (first {COLDKEY_PREFIX_LEN} + last "
+                      f"{COLDKEY_SUFFIX_LEN} chars of the coldkey ss58, concatenated); "
+                      f"rename your Hippius namespace or model "
                       f"to embed it, then re-reveal on chain")
             log.warning("rejecting %s (%s): %s", cid, model_repo, reason)
             state.failed_repos.add(model_key)

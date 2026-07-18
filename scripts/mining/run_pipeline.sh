@@ -9,7 +9,7 @@
 # 6. Write a status report to .arbos/outbox/.
 #
 # Usage:
-#   ./run_pipeline.sh start [--hotkey h0] [--upload-repo <namespace>/<chain.name>-<coldkey-prefix>-<tag>]
+#   ./run_pipeline.sh start [--hotkey h0] [--upload-repo <namespace>/<chain.name>-<coldkey-token>-<tag>]
 #   ./run_pipeline.sh tail
 #   ./run_pipeline.sh status
 #   ./run_pipeline.sh fetch        # pull verdict only
@@ -19,16 +19,18 @@
 # UPLOAD_REPO must match the active chain's repo_pattern (default
 # `^[^/]+/<chain.name>-.+$`).
 #
-# REQUIRED — coldkey prefix in HF repo name (since 2026-04-29):
-#   Your UPLOAD_REPO must contain the first 8 ss58 chars of YOUR coldkey
+# REQUIRED — coldkey token in HF repo name (token format since 2026-07-16):
+#   Your UPLOAD_REPO must contain YOUR coldkey token — the first 5 + last 5
+#   ss58 chars of your coldkey, concatenated into one 10-char string —
 #   somewhere (case-insensitive, in either the HF account or the model
-#   basename). Without that, the validator will reject your eval with
-#   `coldkey_required` — anti-impersonation gate. Find your coldkey ss58
-#   with `btcli wallet list` (column "ss58" under your coldkey block).
-#   Example: if your coldkey is `5DhAqMpd...` and the active chain is
+#   basename). The old first-8-chars prefix is no longer accepted. Without
+#   the token, the validator will reject your eval with `coldkey_required`
+#   — anti-impersonation gate. Find your coldkey ss58 with
+#   `btcli wallet list` (column "ss58" under your coldkey block).
+#   Example: if your coldkey is `5DhAq...9kXwZ` and the active chain is
 #   Teutonic-XXIV, valid UPLOAD_REPO names include
-#   `myaccount/Teutonic-XXIV-5DhAqMpd-v3` or
-#   `someaccount-5DhAqMpd/Teutonic-XXIV-mymodel`.
+#   `myaccount/Teutonic-XXIV-5DhAq9kXwZ-v3` or
+#   `someaccount-5DhAq9kXwZ/Teutonic-XXIV-mymodel`.
 set -euo pipefail
 
 cd "$(dirname "$0")/../../.."
@@ -48,8 +50,8 @@ LOG_REMOTE="$REMOTE_DIR/work/train.log"
 HOTKEY="${HOTKEY:-h0}"
 # Resolve the active chain name from chain.toml so the default UPLOAD_REPO
 # matches whatever king is live; override with
-# UPLOAD_REPO=<account>/<chain.name>-<your-coldkey-prefix>-<tag>
-# (must contain the first 8 chars of your coldkey ss58 — see header).
+# UPLOAD_REPO=<account>/<chain.name>-<your-coldkey-token>-<tag>
+# (must contain first 5 + last 5 chars of your coldkey ss58 — see header).
 CHAIN_NAME_DEFAULT="$(REPO_ROOT="$TEUTONIC_REPO_ROOT" python3 -c '
 import os, sys
 sys.path.insert(0, os.environ["REPO_ROOT"])
@@ -80,34 +82,36 @@ pull_file() {
   scp -q -o StrictHostKeyChecking=no "$REMOTE_HOST":"$src" "$dst"
 }
 
-verify_coldkey_prefix() {
-  # Exits non-zero if the wallet's coldkey prefix isn't in UPLOAD_REPO.
+verify_coldkey_token() {
+  # Exits non-zero if the wallet's coldkey token isn't in UPLOAD_REPO.
   # Runs locally where the wallet lives, before we burn any GPU/HF time.
   source "$ROOT/.venv/bin/activate" 2>/dev/null || true
   python3 - "$HOTKEY" "$UPLOAD_REPO" <<'PY'
 import sys
 import bittensor as bt
 HOTKEY, UPLOAD_REPO = sys.argv[1], sys.argv[2]
-PREFIX_LEN = 8
+PREFIX_LEN = 5
+SUFFIX_LEN = 5
 w = bt.wallet(name="teutonic", hotkey=HOTKEY)
 ck = w.coldkeypub.ss58_address
-prefix = ck[:PREFIX_LEN]
-if prefix.lower() not in UPLOAD_REPO.lower():
+token = ck[:PREFIX_LEN] + ck[-SUFFIX_LEN:]
+if token.lower() not in UPLOAD_REPO.lower():
     print(f"[pipeline] FATAL: UPLOAD_REPO='{UPLOAD_REPO}' does not contain "
-          f"your coldkey prefix '{prefix}' (first {PREFIX_LEN} chars of {ck}).",
+          f"your coldkey token '{token}' (first {PREFIX_LEN} + last "
+          f"{SUFFIX_LEN} chars of {ck}, concatenated).",
           file=sys.stderr)
     print(f"[pipeline] Validator will reject this with 'coldkey_required'. "
-          f"Rename your repo to embed '{prefix}' (case-insensitive substring "
+          f"Rename your repo to embed '{token}' (case-insensitive substring "
           f"anywhere in account or basename) and retry.", file=sys.stderr)
     sys.exit(7)
-print(f"[pipeline] coldkey gate ok: '{prefix}' is in UPLOAD_REPO='{UPLOAD_REPO}'")
+print(f"[pipeline] coldkey gate ok: '{token}' is in UPLOAD_REPO='{UPLOAD_REPO}'")
 PY
 }
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
   start)
-    verify_coldkey_prefix
+    verify_coldkey_token
     echo "[pipeline] syncing scripts to $REMOTE_HOST..."
     ssh_run "mkdir -p $REMOTE_DIR/bundle $REMOTE_DIR/work" >/dev/null
     push_file teutonic/scripts/mining/train_challenger.py "$REMOTE_DIR/train_challenger.py"

@@ -9,24 +9,26 @@ The OCI manifest digest is the immutable commitment to the file tree.
 
 Run this on the templar host where the wallet lives.
 
-IMPORTANT — coldkey gate (added 2026-04-29):
+IMPORTANT — coldkey gate (token format since 2026-07-16):
     The validator REJECTS any Hippius repo whose name does NOT contain the
-    first 8 ss58 chars of your **coldkey** (case-insensitive substring
-    match against the full "<account>/<basename>" string).
+    coldkey token: the first 5 + last 5 ss58 chars of your **coldkey**,
+    concatenated into one 10-char string (case-insensitive substring
+    match against the full "<account>/<basename>" string). The old
+    first-8-chars prefix format is no longer accepted.
 
     This stops anyone from re-revealing somebody else's Hippius URL under
     their own hotkey: only YOU know your coldkey, and an imposter who
     lifts your URL ends up advertising YOUR coldkey on chain — which is
     self-incriminating.
 
-    So an Hippius repo like:
-        my-team/<chain.name>-5DhAqMpd-v3
-                             ^^^^^^^^
-    works (matches my coldkey 5DhAqMpd...). Without that prefix, the
-    validator will record your eval as `coldkey_required` and skip it.
+    So for a coldkey 5DhAq...9kXwZ, an Hippius repo like:
+        my-team/<chain.name>-5DhAq9kXwZ-v3
+                             ^^^^^^^^^^
+    works. Without that token, the validator will record your eval as
+    `coldkey_required` and skip it.
 
     This script will refuse to broadcast a reveal whose repo doesn't
-    contain your coldkey prefix — fail fast locally rather than burn
+    contain your coldkey token — fail fast locally rather than burn
     a tx for nothing.
 """
 import argparse
@@ -44,9 +46,10 @@ logging.basicConfig(level=logging.INFO,
                     datefmt="%H:%M:%S")
 log = logging.getLogger("submit_challenger")
 
-# Must match validator.py's COLDKEY_PREFIX_LEN. If the validator side ever
-# changes this, miners need to update too.
-COLDKEY_PREFIX_LEN = 8
+# Must match validator.py's COLDKEY_PREFIX_LEN / COLDKEY_SUFFIX_LEN. If the
+# validator side ever changes these, miners need to update too.
+COLDKEY_PREFIX_LEN = 5
+COLDKEY_SUFFIX_LEN = 5
 
 
 def main():
@@ -81,25 +84,25 @@ def main():
     log.info("wallet hotkey: %s", wallet.hotkey.ss58_address)
 
     coldkey_ss58 = wallet.coldkeypub.ss58_address
-    expected_prefix = coldkey_ss58[:COLDKEY_PREFIX_LEN]
-    if expected_prefix.lower() not in repo.lower():
+    expected_token = coldkey_ss58[:COLDKEY_PREFIX_LEN] + coldkey_ss58[-COLDKEY_SUFFIX_LEN:]
+    if expected_token.lower() not in repo.lower():
         log.error(
-            "Hippius repo '%s' does NOT contain your coldkey prefix '%s' "
-            "(first %d chars of %s).\n"
+            "Hippius repo '%s' does NOT contain your coldkey token '%s' "
+            "(first %d + last %d chars of %s, concatenated).\n"
             "    The validator will reject this submission with "
             "`coldkey_required` and your tx will be wasted.\n"
             "    Rename your Hippius repo or Hippius namespace so its full id "
             "contains '%s' (case-insensitive substring) anywhere — e.g.\n"
             "        %s/<chain.name>-%s-v1\n"
             "    then re-upload and rerun this script.",
-            repo, expected_prefix, COLDKEY_PREFIX_LEN, coldkey_ss58,
-            expected_prefix,
+            repo, expected_token, COLDKEY_PREFIX_LEN, COLDKEY_SUFFIX_LEN, coldkey_ss58,
+            expected_token,
             repo.split("/", 1)[0] if "/" in repo else "<your-hippius-namespace>",
-            expected_prefix,
+            expected_token,
         )
         sys.exit(6)
-    log.info("coldkey gate ok: repo '%s' contains coldkey prefix '%s'",
-             repo, expected_prefix)
+    log.info("coldkey gate ok: repo '%s' contains coldkey token '%s'",
+             repo, expected_token)
 
     payload = build_reveal_v4(model_ref, wallet.hotkey.ss58_address)
     log.info("payload: %s", payload)
