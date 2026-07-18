@@ -20,14 +20,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 log = logging.getLogger("upload_king_to_hf")
+
+ROOT = Path(__file__).resolve().parents[1]
+ENCRYPTION_MANIFEST_NAME = "teutonic_encryption.json"
+DEFAULT_MODEL_DECRYPTION_KEY = ROOT / "keys" / "validator_model_decryption.key"
 
 DEFAULT_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teutonic/quasar_pair_models"))
 DEFAULT_RECORD_DIR = Path(os.environ.get("TEUTONIC_EVAL_RECORD_DIR", "/tmp/teutonic/quasar_pair_evals"))
@@ -206,13 +213,7 @@ def upload_to_hf(
     private: bool,
     dry_run: bool,
 ) -> dict:
-    from huggingface_hub import HfApi
-
-    api = HfApi(token=token)
-
     log.info("ensuring HF repo %s exists (private=%s) …", hf_repo, private)
-    if not dry_run:
-        api.create_repo(repo_id=hf_repo, repo_type="model", private=private, exist_ok=True)
 
     files = sorted(snapshot_dir.rglob("*"))
     file_count = sum(1 for f in files if f.is_file())
@@ -230,6 +231,10 @@ def upload_to_hf(
         log.info("[DRY RUN] skipping actual upload")
         return {"repo": hf_repo, "revision": revision, "dry_run": True}
 
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    api.create_repo(repo_id=hf_repo, repo_type="model", private=private, exist_ok=True)
     result = api.upload_folder(
         repo_id=hf_repo,
         repo_type="model",
@@ -246,6 +251,73 @@ def upload_to_hf(
         "commit": str(result),
         "snapshot": str(snapshot_dir),
     }
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def model_decryption_key() -> Path:
+    configured = os.environ.get("TEUTONIC_MODEL_DECRYPTION_KEY")
+    key = Path(configured).expanduser() if configured else DEFAULT_MODEL_DECRYPTION_KEY
+    key = key.resolve()
+    if not key.is_file() or not os.access(key, os.R_OK):
+        raise RuntimeError(
+            "encrypted king snapshot found, but no private key is available; "
+            "set TEUTONIC_MODEL_DECRYPTION_KEY or create keys/validator_model_decryption.key"
+        )
+    return key
+
+
+def load_encryption_manifest(snapshot: Path) -> dict | None:
+    manifest_path = snapshot / ENCRYPTION_MANIFEST_NAME
+    if not manifest_path.exists():
+        return None
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("scheme") != "age-x25519":
+        raise RuntimeError(f"unsupported model encryption scheme: {manifest.get('scheme')!r}")
+    if not manifest.get("files"):
+        raise RuntimeError(f"{ENCRYPTION_MANIFEST_NAME} has no encrypted files")
+    return manifest
+
+
+def decrypted_upload_snapshot(snapshot_dir: Path) -> Path:
+    manifest = load_encryption_manifest(snapshot_dir)
+    if manifest is None:
+        return snapshot_dir
+
+    age = shutil.which("age")
+    if age is None:
+        raise RuntimeError("encrypted king snapshot found, but `age` is not installed on PATH")
+    identity = model_decryption_key()
+    output = snapshot_dir.with_name(snapshot_dir.name + "-decrypted")
+    if output.exists():
+        shutil.rmtree(output)
+
+    encrypted = {item["path"]: item for item in manifest["files"]}
+    for src in sorted(p for p in snapshot_dir.rglob("*") if p.is_file()):
+        rel = str(src.relative_to(snapshot_dir)).replace("\\", "/")
+        if rel == ENCRYPTION_MANIFEST_NAME:
+            continue
+        dst = output / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if rel in encrypted:
+            subprocess.run([age, "-d", "-i", str(identity), "-o", str(dst), str(src)], check=True)
+            item = encrypted[rel]
+            if sha256_file(dst) != item.get("plain_sha256"):
+                raise RuntimeError(f"{rel}: plaintext sha256 mismatch after decrypt")
+            if dst.stat().st_size != int(item.get("plain_size", -1)):
+                raise RuntimeError(f"{rel}: plaintext size mismatch after decrypt")
+        elif src.name.endswith(".safetensors"):
+            raise RuntimeError(f"{rel}: .safetensors file is missing from {ENCRYPTION_MANIFEST_NAME}")
+        else:
+            shutil.copy2(src, dst)
+
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -342,8 +414,12 @@ def main() -> None:
         log.info("  king_repo   : %s", king_meta.get("king_repo", "?"))
         log.info("  king_digest : %s", king_meta.get("king_digest", "?"))
 
-    # Skip upload when king hasn't changed since last run
-    snapshot_str = str(snapshot_dir)
+    upload_snapshot_dir = decrypted_upload_snapshot(snapshot_dir)
+    if upload_snapshot_dir != snapshot_dir:
+        log.info("uploading decrypted king snapshot: %s", upload_snapshot_dir)
+
+    # Skip upload when the actual upload snapshot hasn't changed since last run.
+    snapshot_str = str(upload_snapshot_dir)
     try:
         last = last_uploaded_file.read_text().strip()
     except OSError:
@@ -382,7 +458,7 @@ def main() -> None:
             log.warning("no HF token found — upload may fail for private repos")
 
     result = upload_to_hf(
-        snapshot_dir=snapshot_dir,
+        snapshot_dir=upload_snapshot_dir,
         hf_repo=hf_repo,
         token=token,
         revision=args.hf_revision,
