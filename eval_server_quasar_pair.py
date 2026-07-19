@@ -111,7 +111,8 @@ MODEL_DECRYPTION_KEY_MODE = 0o600
 # Since LCB <= mu_hat, if that upper bound on mu_hat is below the threshold the
 # challenger cannot reach it regardless of the remaining samples.
 EVAL_EARLY_STOP = os.environ.get("EVAL_EARLY_STOP", "1") == "1"
-EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.1"))
+EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.4"))
+EVAL_EARLY_STOP_ADVANTAGE_QUANTILE = float(os.environ.get("EVAL_EARLY_STOP_ADVANTAGE_QUANTILE", "0.98"))
 DEFAULT_MODEL_DOWNLOAD_WORKERS = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_WORKERS", "4"))
 DEFAULT_S3_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRIES", "5"))
 DEFAULT_S3_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRY_BACKOFF_S", "20"))
@@ -1840,7 +1841,8 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             n_total = len(sequences)
             if (EVAL_EARLY_STOP and done < n_total
                     and done >= int(n_total * EVAL_EARLY_STOP_MIN_FRACTION)):
-                d_max = float(diff_so_far.max())
+                advantage_quantile = min(max(EVAL_EARLY_STOP_ADVANTAGE_QUANTILE, 0.0), 1.0)
+                d_max = float(np.quantile(diff_so_far, advantage_quantile))
                 remaining = n_total - done
                 mu_upper = (float(diff_so_far.sum()) + remaining * d_max) / n_total
                 if mu_upper < req.delta_threshold:
@@ -1856,8 +1858,8 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                     lcb_partial = float(np.quantile(es_boot, req.alpha))
                     eval_log.info(
                         "early stop at %d/%d seqs: best-case mu_hat=%.6f "
-                        "lcb_partial=%.6f < delta=%.6f",
-                        done, n_total, mu_upper, lcb_partial, req.delta_threshold,
+                        "lcb_partial=%.6f < delta=%.6f advantage_quantile=%.3f",
+                        done, n_total, mu_upper, lcb_partial, req.delta_threshold, advantage_quantile,
                     )
                     elapsed = time.time() - t0
                     early_verdict = {
@@ -1880,6 +1882,8 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                             f"best_case_mu_hat={mu_upper:.6f} < delta_threshold="
                             f"{req.delta_threshold:.6f} after {done}/{n_total} seqs"
                         ),
+                        "early_stop_advantage_quantile": advantage_quantile,
+                        "early_stop_assumed_remaining_advantage": round(d_max, 6),
                     }
                     early_verdict["source_scores"] = _compute_source_scores(
                         king_losses, challenger_losses,
@@ -2012,6 +2016,11 @@ async def health():
             "eval_n_cap": EVAL_N_CAP,
             "eval_bootstrap_b_cap": EVAL_BOOTSTRAP_B_CAP,
             "eval_max_runtime_s": EVAL_MAX_RUNTIME_S,
+        },
+        "early_stop": {
+            "enabled": EVAL_EARLY_STOP,
+            "min_fraction": EVAL_EARLY_STOP_MIN_FRACTION,
+            "advantage_quantile": EVAL_EARLY_STOP_ADVANTAGE_QUANTILE,
         },
         "download": {
             "retries": DEFAULT_MODEL_DOWNLOAD_RETRIES,

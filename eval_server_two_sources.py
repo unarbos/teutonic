@@ -92,6 +92,11 @@ async def health():
             "eval_bootstrap_b_cap": base.EVAL_BOOTSTRAP_B_CAP,
             "eval_max_runtime_s": base.EVAL_MAX_RUNTIME_S,
         },
+        "early_stop": {
+            "enabled": base.EVAL_EARLY_STOP,
+            "min_fraction": base.EVAL_EARLY_STOP_MIN_FRACTION,
+            "advantage_quantile": base.EVAL_EARLY_STOP_ADVANTAGE_QUANTILE,
+        },
         "encryption": {
             "manifest_name": base.MODEL_ENCRYPTION_MANIFEST_NAME,
             "age_available": base.shutil.which("age") is not None,
