@@ -32,6 +32,7 @@ import eval_server_quasar_pair as base
 import npy_sources  # noqa: F401 — registers monkey-patches on import
 from npy_sources import (
     DEFAULT_MANIFEST_URLS,
+    DEFAULT_SHARDS_PER_SOURCE,
     DEFAULT_SOURCE_WEIGHT_MAP,
     MultiSourceEvalRequest,
     URL_CACHE_DIR,
@@ -86,6 +87,7 @@ async def health():
             "n_public": base.DEFAULT_N_PUBLIC,
             "n_private": base.DEFAULT_N_PRIVATE,
             "n_bootstrap": base.DEFAULT_BOOTSTRAP_B,
+            "shards_per_source": DEFAULT_SHARDS_PER_SOURCE,
         },
         "caps": {
             "eval_n_cap": base.EVAL_N_CAP,

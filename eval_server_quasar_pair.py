@@ -81,8 +81,8 @@ DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
-DEFAULT_N_PUBLIC = int(os.environ.get("EVAL_N_PUBLIC", "1000"))
-DEFAULT_N_PRIVATE = int(os.environ.get("EVAL_N_PRIVATE", "1000"))
+DEFAULT_N_PUBLIC = int(os.environ.get("EVAL_N_PUBLIC", "20000"))
+DEFAULT_N_PRIVATE = int(os.environ.get("EVAL_N_PRIVATE", "0"))
 DEFAULT_N = int(os.environ.get("EVAL_N", str(DEFAULT_N_PUBLIC + DEFAULT_N_PRIVATE)))
 
 # Server-side caps. The validator can request a larger eval_n / n_bootstrap
@@ -112,7 +112,7 @@ MODEL_DECRYPTION_KEY_MODE = 0o600
 # challenger cannot reach it regardless of the remaining samples.
 EVAL_EARLY_STOP = os.environ.get("EVAL_EARLY_STOP", "1") == "1"
 EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.4"))
-EVAL_EARLY_STOP_ADVANTAGE_QUANTILE = float(os.environ.get("EVAL_EARLY_STOP_ADVANTAGE_QUANTILE", "0.98"))
+EVAL_EARLY_STOP_ADVANTAGE_QUANTILE = float(os.environ.get("EVAL_EARLY_STOP_ADVANTAGE_QUANTILE", "0.95"))
 DEFAULT_MODEL_DOWNLOAD_WORKERS = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_WORKERS", "4"))
 DEFAULT_S3_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRIES", "5"))
 DEFAULT_S3_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRY_BACKOFF_S", "20"))

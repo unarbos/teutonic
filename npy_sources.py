@@ -33,7 +33,8 @@ DEFAULT_MANIFEST_URLS: list[str] = (
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.2-quasar-10b/manifest.json",
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-cc-math-v1-4plus-mind-quasar-10b/manifest.json",
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json",
-        "https://s3.hippius.com/teutonic-sn3/dataset/pes2o-v3/manifest.json"
+        "https://s3.hippius.com/teutonic-sn3/dataset/pes2o-v3/manifest.json",
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openmathreasoning-quasar-10b/manifest.json"
     ]
 )
 
@@ -51,13 +52,14 @@ DEFAULT_SOURCE_WEIGHT_MAP: dict[str, float] = (
     if _raw_weight_map
     else {
         "automathtext-v2": 0.27,
-        "ultradata-math-l3": 0.12,
+        "ultradata-math-l3": 0.10,
         "finewebedu": 0.27,
-        "nemotron-specialized-v1.1": 0.03,
-        "nemotron-specialized-v1.2": 0.05,
-        "nemotron-cc-math": 0.06,
-        "openthoughts3-1.2m": 0.1,
-        "pes2o-v3": 0.1
+        "nemotron-specialized-v1.1": 0.01,
+        "nemotron-specialized-v1.2": 0.04,
+        "nemotron-cc-math": 0.05,
+        "openthoughts3-1.2m": 0.10,
+        "pes2o-v3": 0.10,
+        "openmathreasoning-quasar-10b": 0.06
     }
 )
 
@@ -71,6 +73,7 @@ DEFAULT_SOURCE_WEIGHTS: list[float] = (
 # before inference to prevent CUDA device-side assert from embedding OOB access.
 DEFAULT_VOCAB_SIZE: int = int(os.environ.get("TEUTONIC_VOCAB_SIZE", "248320"))
 DEFAULT_MAX_SEQS_PER_SHARD: int = int(os.environ.get("TEUTONIC_MAX_SEQS_PER_SHARD", "0"))
+DEFAULT_SHARDS_PER_SOURCE: int = int(os.environ.get("TEUTONIC_SHARDS_PER_SOURCE", "5"))
 URL_CACHE_DIR = Path(
     os.environ.get(
         "TEUTONIC_MULTI_SOURCE_CACHE_DIR",
@@ -99,6 +102,7 @@ class MultiSourceEvalRequest(base.EvalRequest):
     source_mix_policy: str = "balanced"
     source_weights: list[float] = Field(default_factory=lambda: list(DEFAULT_SOURCE_WEIGHTS))
     max_seqs_per_shard: int = DEFAULT_MAX_SEQS_PER_SHARD
+    shards_per_source: int = DEFAULT_SHARDS_PER_SOURCE
     vocab_size: int = DEFAULT_VOCAB_SIZE
 
 
@@ -356,6 +360,8 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
 
     if req.s3_max_shards > 0:
         refs_by_source = [(spec, refs[: req.s3_max_shards]) for spec, refs in refs_by_source]
+    if req.shards_per_source > 0:
+        refs_by_source = [(spec, refs[: req.shards_per_source]) for spec, refs in refs_by_source]
 
     if req.source_weights and len(req.source_weights) == len(refs_by_source):
         weights = req.source_weights
@@ -375,6 +381,7 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
                     "name": spec.name,
                     "kind": spec.kind,
                     "shards": len(refs),
+                    "target_shards": req.shards_per_source,
                     "weight": round(weights[idx], 4),
                     "target_sequences": targets[idx],
                 }
@@ -390,14 +397,14 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
         used_refs: list[str] = []
         used_files: list[str] = []
         np_rng = np.random.default_rng(source_seed(seed_value, spec.name))
-        for shard_ref in refs:
-            if len(source_sequences) >= target:
+        shard_targets = source_targets(target, len(refs))
+        for shard_target, shard_ref in zip(shard_targets, refs):
+            if shard_target <= 0 or len(source_sequences) >= target:
                 break
             local_path = materialize_shard(shard_ref, req, on_phase=on_phase)
             used_refs.append(shard_ref.ref)
             used_files.append(local_path)
-            remaining = target - len(source_sequences)
-            per_shard = min(remaining, req.max_seqs_per_shard) if req.max_seqs_per_shard > 0 else remaining
+            per_shard = min(shard_target, req.max_seqs_per_shard) if req.max_seqs_per_shard > 0 else shard_target
             # When vocab filtering is active, load with headroom so filtered-out
             # sequences don't leave us short.  The outer taken[:target] still caps
             # the final count; load_sequences_from_npy_shard clamps to shard size.
