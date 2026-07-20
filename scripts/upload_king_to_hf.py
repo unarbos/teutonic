@@ -6,7 +6,8 @@ Resolves the king snapshot in this order:
   2. GET <eval-server>/health        (live king_loaded tuple)
   3. Most recent eval JSON record    (completed-eval fallback)
 
-Then uploads the snapshot directory to HF using upload_folder().
+Then uploads the snapshot directory to HF using upload_folder(). It also
+uploads evaluated non-king challenger snapshots after a delay.
 
 Credentials needed:
   HF_TOKEN   — Hugging Face write token  (or --hf-token)
@@ -26,6 +27,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -39,7 +41,10 @@ DEFAULT_MODEL_DECRYPTION_KEY = ROOT / "keys" / "validator_model_decryption.key"
 DEFAULT_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teutonic/quasar_pair_models"))
 DEFAULT_RECORD_DIR = Path(os.environ.get("TEUTONIC_EVAL_RECORD_DIR", "/tmp/teutonic/quasar_pair_evals"))
 DEFAULT_EVAL_SERVER = os.environ.get("TEUTONIC_EVAL_SERVER", "http://localhost:9000")
-DEFAULT_HF_NAMESPACE = os.environ.get("HF_NAMESPACE", "huxdendrite")
+DEFAULT_HF_NAMESPACE = os.environ.get("HF_NAMESPACE", "dendriteholdings")
+DEFAULT_NON_KING_UPLOAD_DELAY_S = int(os.environ.get("TEUTONIC_NON_KING_UPLOAD_DELAY_S", str(6 * 60 * 60)))
+DEFAULT_NON_KING_MOVE_DELAY_S = int(os.environ.get("TEUTONIC_NON_KING_MOVE_DELAY_S", str(60 * 60)))
+DEFAULT_UPLOAD_STAGING_DIR = Path(os.environ.get("TEUTONIC_HF_UPLOAD_STAGING_DIR", "/models"))
 
 HF_TOKEN_ENV_NAMES = ("HF_TOKEN", "HUGGINGFACE_API_KEY", "HUGGING_FACE_HUB_TOKEN")
 
@@ -134,6 +139,15 @@ def _meta_from_snapshot_path(snapshot: Path, cache_dir: Path) -> dict:
         return {"king_repo": repo, "king_digest": digest}
     except Exception:
         return {}
+
+
+def derived_hf_repo(namespace: str, source_repo: str) -> str:
+    model_name = source_repo.split("/")[-1] if "/" in source_repo else source_repo
+    return f"{namespace}/{model_name}"
+
+
+def safe_dir_name(value: str) -> str:
+    return value.replace("/", "--").replace("\\", "--").replace(":", "-")
 
 
 def resolve_king(
@@ -285,16 +299,19 @@ def load_encryption_manifest(snapshot: Path) -> dict | None:
     return manifest
 
 
-def decrypted_upload_snapshot(snapshot_dir: Path) -> Path:
+def decrypted_upload_snapshot(snapshot_dir: Path, output_parent: Path | None = None) -> Path:
     manifest = load_encryption_manifest(snapshot_dir)
     if manifest is None:
         return snapshot_dir
 
     age = shutil.which("age")
     if age is None:
-        raise RuntimeError("encrypted king snapshot found, but `age` is not installed on PATH")
+        raise RuntimeError("encrypted model snapshot found, but `age` is not installed on PATH")
     identity = model_decryption_key()
-    output = snapshot_dir.with_name(snapshot_dir.name + "-decrypted")
+    if output_parent is None:
+        output = snapshot_dir.with_name(snapshot_dir.name + "-decrypted")
+    else:
+        output = output_parent / snapshot_dir.parent.name / f"{snapshot_dir.name}-decrypted"
     if output.exists():
         shutil.rmtree(output)
 
@@ -318,6 +335,116 @@ def decrypted_upload_snapshot(snapshot_dir: Path) -> Path:
             shutil.copy2(src, dst)
 
     return output
+
+
+def load_marker_set(path: Path) -> set[str]:
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return set()
+    return {str(item) for item in data} if isinstance(data, list) else set()
+
+
+def save_marker_set(path: Path, markers: set[str]) -> None:
+    path.write_text(json.dumps(sorted(markers), indent=2) + "\n")
+
+
+def staged_snapshot_path(staging_dir: Path, source_repo: str, digest: str) -> Path:
+    digest_part = safe_dir_name(digest or "latest")
+    return staging_dir / "non_king" / safe_dir_name(source_repo) / digest_part
+
+
+def stage_snapshot_for_upload(snapshot: Path, target: Path, dry_run: bool) -> Path:
+    snapshot = snapshot.resolve()
+    target = target.resolve()
+    if snapshot == target or target.is_dir():
+        return target
+    if dry_run:
+        log.info("[DRY RUN] would move non-king snapshot %s -> %s", snapshot, target)
+        return snapshot
+    target.parent.mkdir(parents=True, exist_ok=True)
+    log.info("moving non-king snapshot to upload staging: %s -> %s", snapshot, target)
+    shutil.move(str(snapshot), str(target))
+    return target
+
+
+def upload_non_king_models(
+    record_dir: Path,
+    cache_dir: Path,
+    current_king_snapshots: set[Path],
+    hf_namespace: str,
+    token: str,
+    revision: str,
+    private: bool,
+    dry_run: bool,
+    delay_s: int,
+    move_delay_s: int,
+    staging_dir: Path,
+) -> list[dict]:
+    marker_file = cache_dir / ".uploaded_non_king_snapshots.json"
+    uploaded = load_marker_set(marker_file)
+    now = time.time()
+    move_before_mtime = now - max(0, move_delay_s)
+    upload_before_mtime = now - max(0, delay_s)
+    current_king_snapshots = {p.resolve() for p in current_king_snapshots}
+    results = []
+
+    for record_file in sorted(record_dir.glob("*.json")):
+        record_mtime = record_file.stat().st_mtime
+        if record_mtime > move_before_mtime:
+            continue
+        try:
+            data = json.loads(record_file.read_text())
+            request = data.get("request") or {}
+            verdict = data.get("verdict") or {}
+            if verdict.get("accepted") or verdict.get("verdict") == "challenger":
+                continue
+            artifacts = verdict.get("model_artifacts") or {}
+            meta = artifacts.get("challenger") or {}
+            snapshot_path = meta.get("path") or ""
+            if not snapshot_path:
+                continue
+            snapshot = Path(snapshot_path).resolve()
+        except Exception as exc:
+            log.warning("skipping malformed eval record %s: %s", record_file.name, exc)
+            continue
+
+        source_repo = (
+            verdict.get("challenger_repo")
+            or request.get("challenger_repo")
+            or snapshot.parent.name.replace("--", "/")
+        )
+        digest = verdict.get("challenger_digest") or request.get("challenger_digest") or snapshot.name
+        marker = f"{source_repo}@{digest}"
+        target = staged_snapshot_path(staging_dir, source_repo, digest)
+        if not snapshot.is_dir() and target.is_dir():
+            snapshot = target.resolve()
+        if not snapshot.is_dir() or snapshot in current_king_snapshots or marker in uploaded:
+            continue
+
+        snapshot = stage_snapshot_for_upload(snapshot, target, dry_run)
+        if record_mtime > upload_before_mtime:
+            continue
+
+        upload_snapshot_dir = decrypted_upload_snapshot(snapshot, staging_dir / "decrypted")
+        if upload_snapshot_dir != snapshot:
+            log.info("uploading decrypted non-king snapshot: %s", upload_snapshot_dir)
+
+        result = upload_to_hf(
+            snapshot_dir=upload_snapshot_dir,
+            hf_repo=derived_hf_repo(hf_namespace, source_repo),
+            token=token,
+            revision=revision,
+            commit_message=f"Upload challenger model: {source_repo}@{digest}",
+            private=private,
+            dry_run=dry_run,
+        )
+        results.append(result)
+        if not dry_run:
+            uploaded.add(marker)
+            save_marker_set(marker_file, uploaded)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -393,12 +520,31 @@ def main() -> None:
         action="store_true",
         help="Resolve king and print what would be uploaded without uploading",
     )
+    parser.add_argument(
+        "--non-king-upload-delay-s",
+        type=int,
+        default=DEFAULT_NON_KING_UPLOAD_DELAY_S,
+        help="Upload non-king challenger snapshots only after this many seconds",
+    )
+    parser.add_argument(
+        "--non-king-move-delay-s",
+        type=int,
+        default=DEFAULT_NON_KING_MOVE_DELAY_S,
+        help="Move non-king challenger snapshots to upload staging only after this many seconds",
+    )
+    parser.add_argument(
+        "--upload-staging-dir",
+        type=Path,
+        default=DEFAULT_UPLOAD_STAGING_DIR,
+        help="Directory for staged/decrypted snapshots before HF upload",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
 
     cache_dir = args.cache_dir.resolve()
+    upload_staging_dir = args.upload_staging_dir.resolve()
     last_uploaded_file = cache_dir / ".last_uploaded_king"
 
     # Resolve king first so we can derive the repo name from it
@@ -414,7 +560,7 @@ def main() -> None:
         log.info("  king_repo   : %s", king_meta.get("king_repo", "?"))
         log.info("  king_digest : %s", king_meta.get("king_digest", "?"))
 
-    upload_snapshot_dir = decrypted_upload_snapshot(snapshot_dir)
+    upload_snapshot_dir = decrypted_upload_snapshot(snapshot_dir, upload_staging_dir / "decrypted")
     if upload_snapshot_dir != snapshot_dir:
         log.info("uploading decrypted king snapshot: %s", upload_snapshot_dir)
 
@@ -424,29 +570,27 @@ def main() -> None:
         last = last_uploaded_file.read_text().strip()
     except OSError:
         last = ""
+    king_result = None
     if last == snapshot_str and not args.snapshot:
         log.info("king unchanged since last upload (%s) — skipping", snapshot_str)
-        print(json.dumps({"status": "skipped", "reason": "king unchanged", "snapshot": snapshot_str}))
-        return
+        king_result = {"status": "skipped", "reason": "king unchanged", "snapshot": snapshot_str}
+    else:
+        # Derive HF repo name from king if not explicitly set
+        hf_repo = args.hf_repo
+        if not hf_repo:
+            raw = king_meta.get("king_repo") or snapshot_dir.parent.name.replace("--", "/")
+            hf_repo = derived_hf_repo(args.hf_namespace, raw)
+            log.info("--hf-repo not set, derived from king: %s -> %s", raw, hf_repo)
+        if not hf_repo:
+            parser.error("could not determine HF repo name — pass --hf-repo explicitly")
 
-    # Derive HF repo name from king if not explicitly set
-    hf_repo = args.hf_repo
-    if not hf_repo:
-        raw = king_meta.get("king_repo") or snapshot_dir.parent.name.replace("--", "/")
-        # Keep only the model-name part and prepend the configured namespace
-        model_name = raw.split("/")[-1] if "/" in raw else raw
-        hf_repo = f"{args.hf_namespace}/{model_name}"
-        log.info("--hf-repo not set, derived from king: %s -> %s", raw, hf_repo)
-    if not hf_repo:
-        parser.error("could not determine HF repo name — pass --hf-repo explicitly")
-
-    # Build commit message
-    commit_message = args.commit_message
-    if not commit_message:
-        king_repo = king_meta.get("king_repo") or snapshot_dir.parent.name.replace("--", "/")
-        king_digest = king_meta.get("king_digest") or snapshot_dir.name
-        commit_message = f"Upload king model: {king_repo}@{king_digest}"
-    log.info("commit message: %s", commit_message)
+        # Build commit message
+        commit_message = args.commit_message
+        if not commit_message:
+            king_repo = king_meta.get("king_repo") or snapshot_dir.parent.name.replace("--", "/")
+            king_digest = king_meta.get("king_digest") or snapshot_dir.name
+            commit_message = f"Upload king model: {king_repo}@{king_digest}"
+        log.info("commit message: %s", commit_message)
 
     # Resolve token (skip in dry-run so the script is usable without credentials)
     token = ""
@@ -457,24 +601,41 @@ def main() -> None:
         else:
             log.warning("no HF token found — upload may fail for private repos")
 
-    result = upload_to_hf(
-        snapshot_dir=upload_snapshot_dir,
-        hf_repo=hf_repo,
-        token=token,
-        revision=args.hf_revision,
-        commit_message=commit_message,
-        private=args.hf_private,
-        dry_run=args.dry_run,
-    )
+    if king_result is None:
+        king_result = upload_to_hf(
+            snapshot_dir=upload_snapshot_dir,
+            hf_repo=hf_repo,
+            token=token,
+            revision=args.hf_revision,
+            commit_message=commit_message,
+            private=args.hf_private,
+            dry_run=args.dry_run,
+        )
 
-    # Record successful upload so next run can detect no-change
-    if not args.dry_run:
+    # Record successful king upload so next run can detect no-change.
+    if not args.dry_run and king_result.get("status") != "skipped":
         try:
             last_uploaded_file.write_text(snapshot_str)
         except OSError as exc:
             log.warning("could not write %s: %s", last_uploaded_file, exc)
 
-    print(json.dumps(result, indent=2))
+    non_king_results = []
+    if not args.snapshot:
+        non_king_results = upload_non_king_models(
+            record_dir=args.record_dir.resolve(),
+            cache_dir=cache_dir,
+            current_king_snapshots={snapshot_dir, upload_snapshot_dir},
+            hf_namespace=args.hf_namespace,
+            token=token,
+            revision=args.hf_revision,
+            private=args.hf_private,
+            dry_run=args.dry_run,
+            delay_s=args.non_king_upload_delay_s,
+            move_delay_s=args.non_king_move_delay_s,
+            staging_dir=upload_staging_dir,
+        )
+
+    print(json.dumps({"king": king_result, "non_king": non_king_results}, indent=2))
 
 
 if __name__ == "__main__":
