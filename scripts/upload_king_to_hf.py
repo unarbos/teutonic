@@ -45,6 +45,7 @@ DEFAULT_HF_NAMESPACE = os.environ.get("HF_NAMESPACE", "dendriteholdings")
 DEFAULT_NON_KING_UPLOAD_DELAY_S = int(os.environ.get("TEUTONIC_NON_KING_UPLOAD_DELAY_S", str(6 * 60 * 60)))
 DEFAULT_NON_KING_MOVE_DELAY_S = int(os.environ.get("TEUTONIC_NON_KING_MOVE_DELAY_S", str(60 * 60)))
 DEFAULT_UPLOAD_STAGING_DIR = Path(os.environ.get("TEUTONIC_HF_UPLOAD_STAGING_DIR", "/models"))
+DEFAULT_DELETE_NON_KING_AFTER_UPLOAD = os.environ.get("TEUTONIC_DELETE_NON_KING_AFTER_UPLOAD", "1").lower() not in ("0", "false", "no")
 
 HF_TOKEN_ENV_NAMES = ("HF_TOKEN", "HUGGINGFACE_API_KEY", "HUGGING_FACE_HUB_TOKEN")
 
@@ -368,6 +369,15 @@ def stage_snapshot_for_upload(snapshot: Path, target: Path, dry_run: bool) -> Pa
     return target
 
 
+def delete_snapshot_dir(path: Path, dry_run: bool) -> None:
+    if dry_run:
+        log.info("[DRY RUN] would delete uploaded snapshot dir %s", path)
+        return
+    if path.is_dir():
+        log.info("deleting uploaded snapshot dir %s", path)
+        shutil.rmtree(path)
+
+
 def upload_non_king_models(
     record_dir: Path,
     cache_dir: Path,
@@ -380,6 +390,7 @@ def upload_non_king_models(
     delay_s: int,
     move_delay_s: int,
     staging_dir: Path,
+    delete_after_upload: bool,
 ) -> list[dict]:
     marker_file = cache_dir / ".uploaded_non_king_snapshots.json"
     uploaded = load_marker_set(marker_file)
@@ -443,6 +454,10 @@ def upload_non_king_models(
         if not dry_run:
             uploaded.add(marker)
             save_marker_set(marker_file, uploaded)
+        if delete_after_upload:
+            delete_snapshot_dir(upload_snapshot_dir, dry_run)
+            if upload_snapshot_dir != snapshot:
+                delete_snapshot_dir(snapshot, dry_run)
 
     return results
 
@@ -537,6 +552,12 @@ def main() -> None:
         type=Path,
         default=DEFAULT_UPLOAD_STAGING_DIR,
         help="Directory for staged/decrypted snapshots before HF upload",
+    )
+    parser.add_argument(
+        "--keep-non-king-after-upload",
+        action="store_true",
+        default=not DEFAULT_DELETE_NON_KING_AFTER_UPLOAD,
+        help="Keep staged non-king snapshots after successful upload",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
@@ -633,6 +654,7 @@ def main() -> None:
             delay_s=args.non_king_upload_delay_s,
             move_delay_s=args.non_king_move_delay_s,
             staging_dir=upload_staging_dir,
+            delete_after_upload=not args.keep_non_king_after_upload,
         )
 
     print(json.dumps({"king": king_result, "non_king": non_king_results}, indent=2))
