@@ -360,9 +360,6 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
 
     if req.s3_max_shards > 0:
         refs_by_source = [(spec, refs[: req.s3_max_shards]) for spec, refs in refs_by_source]
-    if req.shards_per_source > 0:
-        refs_by_source = [(spec, refs[: req.shards_per_source]) for spec, refs in refs_by_source]
-
     if req.source_weights and len(req.source_weights) == len(refs_by_source):
         weights = req.source_weights
     else:
@@ -397,13 +394,16 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
         used_refs: list[str] = []
         used_files: list[str] = []
         np_rng = np.random.default_rng(source_seed(seed_value, spec.name))
-        shard_targets = source_targets(target, len(refs))
-        for shard_target, shard_ref in zip(shard_targets, refs):
-            if shard_target <= 0 or len(source_sequences) >= target:
+        target_shards = min(req.shards_per_source, len(refs)) if req.shards_per_source > 0 else len(refs)
+        shard_targets = source_targets(target, target_shards)
+        for shard_idx, shard_ref in enumerate(refs):
+            if len(source_sequences) >= target:
                 break
             local_path = materialize_shard(shard_ref, req, on_phase=on_phase)
             used_refs.append(shard_ref.ref)
             used_files.append(local_path)
+            remaining = target - len(source_sequences)
+            shard_target = shard_targets[shard_idx] if shard_idx < target_shards else remaining
             per_shard = min(shard_target, req.max_seqs_per_shard) if req.max_seqs_per_shard > 0 else shard_target
             # When vocab filtering is active, load with headroom so filtered-out
             # sequences don't leave us short.  The outer taken[:target] still caps
