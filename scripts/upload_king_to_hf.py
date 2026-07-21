@@ -2,9 +2,9 @@
 """Upload the current king model snapshot to a Hugging Face repository.
 
 Resolves the king snapshot in this order:
-  1. MODEL_CACHE_DIR/.current_king  (written by eval server / write_king_ref.py)
-  2. GET <eval-server>/health        (live king_loaded tuple)
-  3. Most recent eval JSON record    (completed-eval fallback)
+  1. Most recent eval JSON record    (accepted challengers become king)
+  2. MODEL_CACHE_DIR/.current_king  (written by eval server / write_king_ref.py)
+  3. GET <eval-server>/health        (live king_loaded tuple fallback)
 
 Then uploads the snapshot directory to HF using upload_folder(). It also
 uploads evaluated non-king challenger snapshots after a delay.
@@ -122,9 +122,10 @@ def _king_from_records(record_dir: Path) -> tuple[str, str] | None:
         except Exception:
             continue
         verdict = data.get("verdict") or {}
-        p = (verdict.get("model_artifacts") or {}).get("king", {}).get("path", "")
+        artifact_name = "challenger" if verdict.get("accepted") else "king"
+        p = (verdict.get("model_artifacts") or {}).get(artifact_name, {}).get("path", "")
         if p and Path(p).exists():
-            return str(Path(p).resolve()), f"eval record ({record_file.name})"
+            return str(Path(p).resolve()), f"eval record ({record_file.name}, {artifact_name})"
     return None
 
 
@@ -163,9 +164,9 @@ def resolve_king(
 
     Resolution order:
       1. --snapshot CLI override
-      2. MODEL_CACHE_DIR/.current_king  (written by write_king_ref.py / eval server)
-      3. GET <eval-server>/health       (live king in GPU memory)
-      4. Newest eval JSON record        (completed-eval fallback)
+      2. Newest eval JSON record        (accepted challengers become king)
+      3. MODEL_CACHE_DIR/.current_king  (written by write_king_ref.py / eval server)
+      4. GET <eval-server>/health       (live king in GPU memory fallback)
     """
     if snapshot_override:
         p = Path(snapshot_override).resolve()
@@ -174,9 +175,9 @@ def resolve_king(
         return p, "CLI --snapshot override", _meta_from_snapshot_path(p, cache_dir)
 
     result = (
-        _king_from_ref_file(cache_dir)
+        _king_from_records(record_dir)
+        or _king_from_ref_file(cache_dir)
         or _king_from_server(eval_server, cache_dir)
-        or _king_from_records(record_dir)
     )
     if result is None:
         raise RuntimeError(

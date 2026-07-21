@@ -1652,7 +1652,38 @@ def ensure_king(req: EvalRequest, snapshot: str, config, config_source: str, dev
     _king_key = key
     _king_device = device
     _king_gpu_ids = effective_gpu_ids
+    write_current_king_ref(snapshot)
     return _king_model
+
+
+def write_current_king_ref(snapshot: str) -> None:
+    ref_file = MODEL_CACHE_DIR / ".current_king"
+    try:
+        ref_file.parent.mkdir(parents=True, exist_ok=True)
+        ref_file.write_text(str(Path(snapshot).resolve()))
+    except Exception:
+        log.warning("could not write current king ref %s", ref_file, exc_info=True)
+
+
+def promote_challenger_to_king(
+    req: EvalRequest,
+    challenger_model,
+    challenger_snapshot: str,
+    config_source: str,
+    device: str,
+    gpu_ids: list[int],
+    on_phase=None,
+) -> None:
+    global _king_model, _king_key, _king_device, _king_gpu_ids
+    repo = normalize_model_ref(req.challenger_repo)
+    _king_model = challenger_model
+    _king_key = (repo, req.challenger_digest or "latest", config_source)
+    _king_device = device
+    _king_gpu_ids = list(gpu_ids)
+    write_current_king_ref(challenger_snapshot)
+    log.info("promoted challenger to king: %s@%s", repo, req.challenger_digest or "latest")
+    if on_phase:
+        on_phase({"phase": "king_promoted", "repo": repo, "digest": req.challenger_digest or "latest"})
 
 
 def cleanup_model_cache() -> None:
@@ -1948,6 +1979,17 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             "wall_time_s": round(time.time() - t0, 1),
         })
         verdict["record_path"] = write_record(eval_id, {"request": req.model_dump(), "verdict": verdict})
+        if verdict.get("accepted"):
+            promote_challenger_to_king(
+                req,
+                challenger,
+                challenger_snapshot,
+                challenger_artifacts["source"],
+                challenger_device,
+                challenger_gpu_ids,
+                on_phase=on_phase,
+            )
+            challenger = None
         record["state"] = "completed"
         record["verdict"] = verdict
         events.put({"type": "verdict", "data": verdict})

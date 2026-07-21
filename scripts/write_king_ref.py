@@ -3,9 +3,8 @@
 Recover the current king snapshot path and write it to MODEL_CACHE_DIR/.current_king.
 
 Sources tried in order:
-  1. GET /health on the live eval server — returns the king currently in GPU memory
-     (primary: always accurate, even for in-progress evals)
-  2. Eval JSON records — fallback when the server is unreachable
+  1. Eval JSON records — completed accepted challengers are authoritative
+  2. GET /health on the live eval server — fallback when records are unavailable
 
 Run this once when the eval server was started before the .current_king file was
 introduced (or after the file was lost). After this, the eval server writes the
@@ -115,21 +114,22 @@ def king_path_from_records(record_dir: Path) -> tuple[str, Path] | None:
             continue
 
         verdict = data.get("verdict") or {}
-        king_path_str = (verdict.get("model_artifacts") or {}).get("king", {}).get("path", "")
+        artifact_name = "challenger" if verdict.get("accepted") else "king"
+        king_path_str = (verdict.get("model_artifacts") or {}).get(artifact_name, {}).get("path", "")
 
         if not king_path_str:
-            log.warning("skipping %s (no model_artifacts.king.path)", record_file.name)
+            log.warning("skipping %s (no model_artifacts.%s.path)", record_file.name, artifact_name)
             continue
 
         king_path = Path(king_path_str)
-        king_repo = verdict.get("king_repo", "?")
-        king_digest = verdict.get("king_digest", "latest")
+        king_repo = verdict.get(f"{artifact_name}_repo", "?")
+        king_digest = verdict.get(f"{artifact_name}_digest", "latest")
 
         if not king_path.exists():
             log.warning("skipping %s — snapshot no longer on disk: %s", record_file.name, king_path)
             continue
 
-        log.info("found king in %s", record_file.name)
+        log.info("found effective king in %s (%s)", record_file.name, artifact_name)
         log.info("  king_repo   : %s", king_repo)
         log.info("  king_digest : %s", king_digest or "latest")
         log.info("  snapshot    : %s", king_path)
@@ -161,24 +161,22 @@ def main() -> None:
     king_path: str | None = None
     source: str = ""
 
-    # --- Source 1: live server ---
-    if not args.no_server:
-        log.info("querying eval server %s …", args.eval_server)
-        king_path = king_path_from_server(args.eval_server, cache_dir)
-        if king_path:
-            source = f"live server ({args.eval_server}/health)"
-
-    # --- Source 2: records fallback ---
     if not king_path:
         record_dir = args.record_dir.resolve()
         if not record_dir.exists():
             log.error("record dir does not exist: %s", record_dir)
             raise SystemExit(1)
-        log.info("falling back to eval records in %s …", record_dir)
+        log.info("checking eval records in %s …", record_dir)
         result = king_path_from_records(record_dir)
         if result:
             king_path, record_file = result
             source = f"eval record ({record_file.name})"
+
+    if not king_path and not args.no_server:
+        log.info("falling back to eval server %s …", args.eval_server)
+        king_path = king_path_from_server(args.eval_server, cache_dir)
+        if king_path:
+            source = f"live server ({args.eval_server}/health)"
 
     if not king_path:
         log.error("could not determine current king from any source")
