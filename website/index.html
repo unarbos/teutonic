@@ -499,6 +499,11 @@ th:last-child, td:last-child { text-align: right; }
 .hist-detail { display: none; }
 .hist-detail.open { display: table-row; }
 .hist-detail > td { cursor: default !important; background: transparent !important; color: var(--ink) !important; }
+.hist-detail:hover td {
+    background: transparent;
+    color: var(--ink);
+    cursor: default;
+}
 .hist-detail-inner { padding: 8px 8px 10px 0; border-top: var(--border-faint); }
 .hist-ds-table { border-collapse: collapse; font-size: 11px; }
 .hist-ds-table th {
@@ -506,6 +511,11 @@ th:last-child, td:last-child { text-align: right; }
     border-bottom: var(--border-faint); background: transparent; position: static; text-align: left;
 }
 .hist-ds-table td { padding: 2px 10px 2px 0; border-bottom: none; white-space: nowrap; text-align: left; }
+.hist-detail .hist-ds-table tr:hover td {
+    background: transparent;
+    color: var(--ink);
+    cursor: default;
+}
 .hist-shard-toggle {
     background: none;
     border: 0;
@@ -514,6 +524,10 @@ th:last-child, td:last-child { text-align: right; }
     font: inherit;
     padding: 0;
     text-decoration: underline;
+}
+.hist-shard-toggle:hover, .hist-detail .hist-ds-table td.hist-shard-list:hover {
+    background: var(--ink);
+    color: var(--ink-inv);
 }
 .hist-shard-row { display: none; opacity: 0.72; }
 .hist-shard-row.open { display: table-row; }
