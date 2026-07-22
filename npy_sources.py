@@ -330,6 +330,13 @@ def materialize_shard(ref: ShardRef, req: MultiSourceEvalRequest, on_phase=None)
     return base.download_s3_shard(client, req, ref.ref.lstrip("/"), on_phase=on_phase)
 
 
+def public_shard_ref(ref: ShardRef, req: MultiSourceEvalRequest) -> str:
+    parsed = urlparse(ref.ref)
+    if parsed.scheme in ("http", "https", "s3"):
+        return ref.ref
+    return f"s3://{req.s3_bucket}/{ref.ref.lstrip('/')}"
+
+
 def static_source_weights(source_names: list[str]) -> list[float]:
     """Return fixed per-source weights by matching source names against DEFAULT_SOURCE_WEIGHT_MAP."""
     n = len(source_names)
@@ -400,7 +407,7 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
             if len(source_sequences) >= target:
                 break
             local_path = materialize_shard(shard_ref, req, on_phase=on_phase)
-            used_refs.append(shard_ref.ref)
+            used_refs.append(public_shard_ref(shard_ref, req))
             used_files.append(local_path)
             remaining = target - len(source_sequences)
             shard_target = shard_targets[shard_idx] if shard_idx < target_shards else remaining

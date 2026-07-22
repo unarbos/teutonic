@@ -1635,6 +1635,25 @@ def _compute_source_scores(
     return scores
 
 
+def _shards_used(dataset_meta: dict) -> list[dict]:
+    out = []
+    for source in dataset_meta.get("sources") or []:
+        refs = list(source.get("used_refs") or [])
+        if refs:
+            out.append({"source": source.get("name") or "dataset", "refs": refs})
+    used_keys = list(dataset_meta.get("used_keys") or [])
+    if used_keys:
+        bucket = dataset_meta.get("bucket") or ""
+        refs = [f"s3://{bucket}/{key}" if bucket and not str(key).startswith(("s3://", "http://", "https://")) else key for key in used_keys]
+        out.append({"source": dataset_meta.get("source") or "dataset", "refs": refs})
+    return out
+
+
+def _public_dataset_meta(dataset_meta: dict) -> dict:
+    meta = {"source": dataset_meta.get("source"), "shards_used": _shards_used(dataset_meta)}
+    return {k: v for k, v in meta.items() if v}
+
+
 def ensure_king(req: EvalRequest, snapshot: str, config, config_source: str, device: str, gpu_ids: list[int] | None = None, on_phase=None):
     global _king_model, _king_key, _king_device, _king_gpu_ids
     repo = normalize_model_ref(req.king_repo)
@@ -1783,6 +1802,7 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         sequences, dataset_meta = sample_eval_sequences(tokenizer, req, on_phase=on_phase)
         # Pop private key so it never reaches the verdict JSON or disk record.
         source_labels: list[str] | None = dataset_meta.pop("_source_labels", None)
+        public_dataset_meta = _public_dataset_meta(dataset_meta)
         check_eval_runtime(t0)
         on_phase({"phase": "dataset_sample_done", "digest": dataset_meta["digest"][:16]})
 
@@ -1939,7 +1959,8 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                             "tokenizer": tokenizer_meta,
                             "duplicate_check": duplicate_meta,
                         },
-                        "dataset": dataset_meta,
+                        "dataset": public_dataset_meta,
+                        "shards_used": public_dataset_meta.get("shards_used", []),
                         "dataset_source": req.dataset_source,
                         "wall_time_s": round(elapsed, 1),
                     })
@@ -1974,7 +1995,8 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                 "tokenizer": tokenizer_meta,
                 "duplicate_check": duplicate_meta,
             },
-            "dataset": dataset_meta,
+            "dataset": public_dataset_meta,
+            "shards_used": public_dataset_meta.get("shards_used", []),
             "dataset_source": req.dataset_source,
             "wall_time_s": round(time.time() - t0, 1),
         })

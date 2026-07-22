@@ -2151,6 +2151,9 @@ function render(d) {
             var repoLink = modelRepo(h) ? modelLink(modelRepo(h), modelDigest(h), repo) : repo;
             var uid = h.uid != null ? h.uid : "--";
             var hasScores = !isErr && h.source_scores && Object.keys(h.source_scores).length > 0;
+            var shardsUsed = h.shards_used || (h.dataset && h.dataset.shards_used) || [];
+            var hasShards = !isErr && shardsUsed.length > 0;
+            var hasDetails = hasScores || hasShards;
             var detailId = "hist-detail-" + idx;
 
             var verdictCell;
@@ -2172,10 +2175,10 @@ function render(d) {
             var ago = timeAgo(h.timestamp);
             var fullTs = h.timestamp ? new Date(h.timestamp).toUTCString() : "";
             if (!isErr && h.wall_time_s) ago += " (" + h.wall_time_s.toFixed(0) + "s)";
-            var caret = hasScores ? '<span class="hist-caret">►</span>' : '';
+            var caret = hasDetails ? '<span class="hist-caret">►</span>' : '';
 
             rows.push(
-                '<tr' + (hasScores ? ' class="hist-row-expandable" data-detail-id="' + detailId + '"' : '') + '>' +
+                '<tr' + (hasDetails ? ' class="hist-row-expandable" data-detail-id="' + detailId + '"' : '') + '>' +
                 '<td>' + uid + '</td>' +
                 '<td>' + repoLink + '</td>' +
                 '<td>' + hotkeyCell(h.hotkey, h.coldkey) + '</td>' +
@@ -2188,42 +2191,59 @@ function render(d) {
                 '</tr>'
             );
 
-            if (hasScores) {
+            if (hasDetails) {
                 var ss = h.source_scores;
-                var sNames = Object.keys(ss).sort();
-                var klVals2 = sNames.map(function(n) { return ss[n].avg_king_loss || 0; });
-                var klMin2 = Math.min.apply(null, klVals2);
-                var klMax2 = Math.max.apply(null, klVals2);
-                var klSpan2 = klMax2 - klMin2 || 0.001;
-                var innerRows = sNames.map(function(name) {
-                    var s = ss[name];
-                    var skl = s.avg_king_loss || 0;
-                    var scl = s.avg_challenger_loss || 0;
-                    var smu = s.mu_hat != null ? s.mu_hat : (skl - scl);
-                    var barW = Math.round(((skl - klMin2) / klSpan2) * 48 + 3);
-                    var muCls = smu > 0.0005 ? ' class="hist-ds-mu-pos"' : (smu < -0.0005 ? ' class="hist-ds-mu-neg"' : ' class="hist-ds-mu-neutral"');
-                    var muSign = smu >= 0 ? "+" : "";
-                    var monoL = "font-family:'Space Mono',monospace;text-align:left";
-                    return '<tr>' +
-                        '<td style="' + monoL + '">' + shortSourceName(name) + '</td>' +
-                        '<td style="' + monoL + '">' + skl.toFixed(4) + '</td>' +
-                        '<td style="' + monoL + '">' + scl.toFixed(4) + '</td>' +
-                        '<td' + muCls + ' style="' + monoL + '">' + muSign + smu.toFixed(5) + '</td>' +
-                        '<td style="' + monoL + '">' + (s.n_sequences || 0).toLocaleString() + '</td>' +
-                        '</tr>';
+                var scoresTable = "";
+                if (hasScores) {
+                    var sNames = Object.keys(ss).sort();
+                    var klVals2 = sNames.map(function(n) { return ss[n].avg_king_loss || 0; });
+                    var klMin2 = Math.min.apply(null, klVals2);
+                    var klMax2 = Math.max.apply(null, klVals2);
+                    var klSpan2 = klMax2 - klMin2 || 0.001;
+                    var innerRows = sNames.map(function(name) {
+                        var s = ss[name];
+                        var skl = s.avg_king_loss || 0;
+                        var scl = s.avg_challenger_loss || 0;
+                        var smu = s.mu_hat != null ? s.mu_hat : (skl - scl);
+                        var barW = Math.round(((skl - klMin2) / klSpan2) * 48 + 3);
+                        var muCls = smu > 0.0005 ? ' class="hist-ds-mu-pos"' : (smu < -0.0005 ? ' class="hist-ds-mu-neg"' : ' class="hist-ds-mu-neutral"');
+                        var muSign = smu >= 0 ? "+" : "";
+                        var monoL = "font-family:'Space Mono',monospace;text-align:left";
+                        return '<tr>' +
+                            '<td style="' + monoL + '">' + shortSourceName(name) + '</td>' +
+                            '<td style="' + monoL + '">' + skl.toFixed(4) + '</td>' +
+                            '<td style="' + monoL + '">' + scl.toFixed(4) + '</td>' +
+                            '<td' + muCls + ' style="' + monoL + '">' + muSign + smu.toFixed(5) + '</td>' +
+                            '<td style="' + monoL + '">' + (s.n_sequences || 0).toLocaleString() + '</td>' +
+                            '</tr>';
+                    }).join("");
+                    scoresTable = '<table class="hist-ds-table"><thead><tr>' +
+                        '<th style="min-width:140px">Dataset</th>' +
+                        '<th>King Loss</th><th>Chall Loss</th>' +
+                        '<th title="challenger advantage: positive = challenger had lower loss">Δ</th>' +
+                        '<th>N</th>' +
+                    '</tr></thead><tbody>' + innerRows + '</tbody></table>';
+                }
+                var shardRows = shardsUsed.map(function(group) {
+                    var refs = group.refs || [];
+                    return refs.map(function(ref) {
+                        return '<tr><td style="font-family:\'Space Mono\',monospace;text-align:left">' +
+                            shortSourceName(group.source || "dataset") +
+                            '</td><td style="font-family:\'Space Mono\',monospace;text-align:left">' +
+                            esc(ref) + '</td></tr>';
+                    }).join("");
                 }).join("");
+                var shardsTable = shardRows
+                    ? '<table class="hist-ds-table" style="margin-top:8px"><thead><tr><th style="min-width:140px">Source</th><th>Shard</th></tr></thead><tbody>' + shardRows + '</tbody></table>'
+                    : "";
                 var earlyNote = h.early_stopped
                     ? '<div style="font-size:10px;opacity:0.4;margin-top:5px;text-transform:uppercase;letter-spacing:0.04em">Early stop — ' + (h.n_sequences_evaluated || "?") + " / " + (h.n_sequences || "?") + " seqs evaluated</div>"
                     : "";
                 rows.push(
                     '<tr class="hist-detail" id="' + detailId + '">' +
                     '<td colspan="9"><div class="hist-detail-inner">' +
-                        '<table class="hist-ds-table"><thead><tr>' +
-                            '<th style="min-width:140px">Dataset</th>' +
-                            '<th>King Loss</th><th>Chall Loss</th>' +
-                            '<th title="challenger advantage: positive = challenger had lower loss">Δ</th>' +
-                            '<th>N</th>' +
-                        '</tr></thead><tbody>' + innerRows + '</tbody></table>' +
+                        scoresTable +
+                        shardsTable +
                         earlyNote +
                     '</div></td></tr>'
                 );
