@@ -34,7 +34,9 @@ DEFAULT_MANIFEST_URLS: list[str] = (
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-cc-math-v1-4plus-mind-quasar-10b/manifest.json",
         "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json",
         "https://s3.hippius.com/teutonic-sn3/dataset/pes2o-v3/manifest.json",
-        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openmathreasoning-quasar-10b/manifest.json"
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openmathreasoning-quasar-10b/manifest.json",
+        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/cosmopedia-wikihow-stories-quasar-10b/manifest.json",
+        "https://us-east-1.hippius.com/tokens-here/dataset/quasar-synth-v1/manifest.json"
     ]
 )
 
@@ -51,15 +53,17 @@ DEFAULT_SOURCE_WEIGHT_MAP: dict[str, float] = (
     }
     if _raw_weight_map
     else {
-        "automathtext-v2": 0.27,
+        "automathtext-v2": 0.23,
         "ultradata-math-l3": 0.10,
-        "finewebedu": 0.27,
+        "finewebedu": 0.26,
         "nemotron-specialized-v1.1": 0.01,
         "nemotron-specialized-v1.2": 0.04,
         "nemotron-cc-math": 0.05,
         "openthoughts3-1.2m": 0.10,
-        "pes2o-v3": 0.10,
-        "openmathreasoning-quasar-10b": 0.06
+        "pes2o-v3": 0.08,
+        "openmathreasoning-quasar-10b": 0.06,
+        "cosmopedia-wikihow-stories-quasar-10b": 0.05,
+        "quasar-synth-v1": 0.02
     }
 )
 
@@ -81,6 +85,12 @@ URL_CACHE_DIR = Path(
     )
 )
 MULTI_SOURCE_NAMES = {"multi", "multi_npy", "multi_source_npy", "two_sources"}
+MANIFEST_SHARD_URL_OVERRIDES: dict[tuple[str, str], str] = {
+    (
+        "https://us-east-1.hippius.com/tokens-here/dataset/quasar-synth-v1/manifest.json",
+        "dataset/quasar-synth-run/shards/shard_000000.npy",
+    ): "https://us-east-1.hippius.com/tokens-here/dataset/quasar-synth-v1/shards/shard_000000.npy",
+}
 
 # ---------------------------------------------------------------------------
 # Models
@@ -166,6 +176,10 @@ def normalize_manifest_ref(value: str, manifest: dict, manifest_ref: str) -> str
     key = value.lstrip("/")
     if shard_prefix and not key.startswith(f"{shard_prefix}/"):
         key = f"{shard_prefix}/{key}"
+    manifest_url = manifest_ref.split("?", 1)[0]
+    override = MANIFEST_SHARD_URL_OVERRIDES.get((manifest_url, key))
+    if override:
+        return override
     public_url = public_url_from_manifest_key(manifest_ref, key)
     return public_url or key
 
@@ -330,13 +344,6 @@ def materialize_shard(ref: ShardRef, req: MultiSourceEvalRequest, on_phase=None)
     return base.download_s3_shard(client, req, ref.ref.lstrip("/"), on_phase=on_phase)
 
 
-def public_shard_ref(ref: ShardRef, req: MultiSourceEvalRequest) -> str:
-    parsed = urlparse(ref.ref)
-    if parsed.scheme in ("http", "https", "s3"):
-        return ref.ref
-    return f"s3://{req.s3_bucket}/{ref.ref.lstrip('/')}"
-
-
 def static_source_weights(source_names: list[str]) -> list[float]:
     """Return fixed per-source weights by matching source names against DEFAULT_SOURCE_WEIGHT_MAP."""
     n = len(source_names)
@@ -407,7 +414,7 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
             if len(source_sequences) >= target:
                 break
             local_path = materialize_shard(shard_ref, req, on_phase=on_phase)
-            used_refs.append(public_shard_ref(shard_ref, req))
+            used_refs.append(shard_ref.ref)
             used_files.append(local_path)
             remaining = target - len(source_sequences)
             shard_target = shard_targets[shard_idx] if shard_idx < target_shards else remaining

@@ -10,6 +10,8 @@ Safety:
   - Directories newer than --min-age-hours are never touched (grace window)
   - Open file descriptors (/proc/*/fd) and memory-mapped files (/proc/*/maps) are
     detected, so any snapshot currently loaded by the eval server is skipped
+  - Pending king uploads from .pending_king_uploads.json are protected until the
+    HF upload worker marks them complete
   - --dry-run shows what would be deleted without removing anything
 
 Usage:
@@ -36,6 +38,7 @@ DEFAULT_MIN_AGE_H = float(os.environ.get("MODEL_CACHE_MIN_AGE_H", "3"))
 DEFAULT_MAX_AGE_DAYS = float(os.environ.get("MODEL_CACHE_MAX_AGE_DAYS", str(2 / 24)))
 DEFAULT_KEEP_RECENT = int(os.environ.get("MODEL_CACHE_KEEP_RECENT", "1"))
 DEFAULT_WATERMARK_GB = float(os.environ.get("MODEL_CACHE_HIGH_WATERMARK_GB", "500"))
+PENDING_KING_UPLOADS_NAME = ".pending_king_uploads.json"
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +144,23 @@ def read_king_ref(cache_dir: Path) -> str | None:
         return None
 
 
+def read_pending_king_uploads(cache_dir: Path) -> list[str]:
+    """Read snapshot paths that the HF upload worker has not completed yet."""
+    try:
+        data = json.loads((cache_dir / PENDING_KING_UPLOADS_NAME).read_text())
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    paths = []
+    for item in data:
+        if isinstance(item, dict):
+            snapshot = item.get("snapshot")
+            if isinstance(snapshot, str) and snapshot:
+                paths.append(snapshot)
+    return paths
+
+
 def fmt_gb(b: int | float) -> str:
     return f"{b / 1e9:.2f} GB"
 
@@ -185,8 +205,14 @@ def run_cleanup(
     else:
         log.info("no .current_king ref found (eval server not running or king not yet loaded)")
 
+    pending_king_uploads = read_pending_king_uploads(cache_dir)
+    for pending_path in pending_king_uploads:
+        active_dirs.add(str(Path(pending_path).resolve()))
+    if pending_king_uploads:
+        log.info("%d pending king upload snapshot(s) protected", len(pending_king_uploads))
+
     if active_dirs:
-        log.info("%d snapshot dir(s) protected (in-use or current king):", len(active_dirs))
+        log.info("%d snapshot dir(s) protected (in-use, current king, or pending upload):", len(active_dirs))
         for d in sorted(active_dirs):
             log.info("  protected: %s", d)
     else:
