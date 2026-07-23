@@ -1,6 +1,7 @@
-// PM2 config for periodic Teutonic maintenance jobs.
-// All jobs use cron_restart + autorestart:false so PM2 fires them on schedule
-// and does NOT restart them immediately after they exit.
+// PM2 config for Teutonic maintenance jobs.
+// Short maintenance jobs use cron_restart + autorestart:false.
+// The Hugging Face upload worker stays alive so cron ticks cannot interrupt
+// large in-flight uploads.
 //
 // Start:  pm2 start ecosystem.cleanup.config.js
 // Reload: pm2 reload ecosystem.cleanup.config.js
@@ -17,19 +18,31 @@ module.exports = {
     log_date_format: "YYYY-MM-DD HH:mm:ss",
     env: { PYTHONUNBUFFERED: "1" },
   }, {
-    // Uploads king to HF only when it has changed (checks every 5 minutes)
+    // Uploads king/non-king snapshots to HF. Runs continuously so a large upload
+    // is never killed by the next 5-minute schedule tick.
     name: "teutonic-upload-king",
     script: "scripts/upload_king_to_hf.py",
+    args: "--loop",
     interpreter: "/root/teutonic/.venv/bin/python",
     cwd: "/root/teutonic",
-    cron_restart: "*/5 * * * *",
+    autorestart: true,
+    log_date_format: "YYYY-MM-DD HH:mm:ss",
+    env: { PYTHONUNBUFFERED: "1" },
+  }, {
+    // Purges stale model snapshots every 30 minutes
+    name: "teutonic-model-cache-cleanup",
+    script: "scripts/cleanup_model_cache.py",
+    interpreter: "/root/teutonic/.venv/bin/python",
+    cwd: "/root/teutonic",
+    cron_restart: "*/30 * * * *",
     autorestart: false,
     log_date_format: "YYYY-MM-DD HH:mm:ss",
     env: { PYTHONUNBUFFERED: "1" },
   }, {
-    // Purges stale model snapshots and shard files every 30 minutes
-    name: "teutonic-model-cache-cleanup",
-    script: "scripts/cleanup_model_cache.py",
+    // Purges fineweb-edu shard cache files older than 3 hours, every 30 minutes
+    name: "teutonic-shard-cache-cleanup",
+    script: "scripts/cleanup_shard_cache.py",
+    args: "--max-age-hours 3",
     interpreter: "/root/teutonic/.venv/bin/python",
     cwd: "/root/teutonic",
     cron_restart: "*/30 * * * *",

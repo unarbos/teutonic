@@ -6,8 +6,13 @@ Resolves the king snapshot in this order:
   2. MODEL_CACHE_DIR/.current_king  (written by eval server / write_king_ref.py)
   3. GET <eval-server>/health        (live king_loaded tuple fallback)
 
-Then uploads the snapshot directory to HF using upload_folder(). It also
-uploads evaluated non-king challenger snapshots after a delay.
+Then uploads king snapshots to HF using upload_folder(). In --loop mode it stays
+alive, sleeps between passes, and never relies on PM2 cron_restart, so a large
+upload is not killed by the next schedule tick.
+
+Accepted challengers are tracked by repo@digest, so a short-lived king is still
+uploaded after a newer challenger takes the crown. Evaluated non-king
+challenger snapshots are uploaded after the configured delay.
 
 Credentials needed:
   HF_TOKEN   — Hugging Face write token  (or --hf-token)
@@ -30,6 +35,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger("upload_king_to_hf")
@@ -42,10 +48,13 @@ DEFAULT_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teuton
 DEFAULT_RECORD_DIR = Path(os.environ.get("TEUTONIC_EVAL_RECORD_DIR", "/tmp/teutonic/quasar_pair_evals"))
 DEFAULT_EVAL_SERVER = os.environ.get("TEUTONIC_EVAL_SERVER", "http://localhost:9000")
 DEFAULT_HF_NAMESPACE = os.environ.get("HF_NAMESPACE", "dendriteholdings")
-DEFAULT_NON_KING_UPLOAD_DELAY_S = int(os.environ.get("TEUTONIC_NON_KING_UPLOAD_DELAY_S", str(2 * 60 * 60)))
-DEFAULT_NON_KING_MOVE_DELAY_S = int(os.environ.get("TEUTONIC_NON_KING_MOVE_DELAY_S", str(60 * 60)))
+DEFAULT_NON_KING_UPLOAD_DELAY_S = int(os.environ.get("TEUTONIC_NON_KING_UPLOAD_DELAY_S", "0"))
+DEFAULT_NON_KING_MOVE_DELAY_S = int(os.environ.get("TEUTONIC_NON_KING_MOVE_DELAY_S", "0"))
 DEFAULT_UPLOAD_STAGING_DIR = Path(os.environ.get("TEUTONIC_HF_UPLOAD_STAGING_DIR", "/models"))
 DEFAULT_DELETE_NON_KING_AFTER_UPLOAD = os.environ.get("TEUTONIC_DELETE_NON_KING_AFTER_UPLOAD", "1").lower() not in ("0", "false", "no")
+DEFAULT_LOOP_INTERVAL_S = int(os.environ.get("TEUTONIC_UPLOAD_LOOP_INTERVAL_S", "300"))
+KING_UPLOAD_MARKERS_NAME = ".uploaded_king_snapshots.json"
+PENDING_KING_UPLOADS_NAME = ".pending_king_uploads.json"
 
 HF_TOKEN_ENV_NAMES = ("HF_TOKEN", "HUGGINGFACE_API_KEY", "HUGGING_FACE_HUB_TOKEN")
 
@@ -64,6 +73,21 @@ UPLOAD_ALLOW_PATTERNS = [
 ]
 
 
+@dataclass(frozen=True)
+class KingCandidate:
+    snapshot: Path
+    source: str
+    repo: str
+    digest: str
+
+    @property
+    def marker(self) -> str:
+        return snapshot_marker(self.repo, self.digest)
+
+    def meta(self) -> dict:
+        return {"king_repo": self.repo, "king_digest": self.digest}
+
+
 def setup_logging(verbose: bool = False) -> None:
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -76,19 +100,30 @@ def setup_logging(verbose: bool = False) -> None:
 # King resolution (same sources as write_king_ref.py)
 # ---------------------------------------------------------------------------
 
-def _king_from_ref_file(cache_dir: Path) -> tuple[str, str] | None:
-    """Read snapshot path from .current_king. Returns (snapshot_path, source)."""
+def snapshot_marker(repo: str, digest: str) -> str:
+    return f"{repo or '?'}@{digest or 'latest'}"
+
+
+def _king_from_ref_file(cache_dir: Path) -> KingCandidate | None:
+    """Read snapshot path from .current_king."""
     try:
         p = (cache_dir / ".current_king").read_text().strip()
         if p and Path(p).exists():
-            return p, ".current_king file"
+            snapshot = Path(p).resolve()
+            meta = _meta_from_snapshot_path(snapshot, cache_dir)
+            return KingCandidate(
+                snapshot=snapshot,
+                source=".current_king file",
+                repo=meta.get("king_repo", ""),
+                digest=meta.get("king_digest", ""),
+            )
     except OSError:
         pass
     return None
 
 
-def _king_from_server(server_url: str, cache_dir: Path) -> tuple[str, str] | None:
-    """Query /health. Returns (snapshot_path, source)."""
+def _king_from_server(server_url: str, cache_dir: Path) -> KingCandidate | None:
+    """Query /health."""
     url = server_url.rstrip("/") + "/health"
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
@@ -108,13 +143,49 @@ def _king_from_server(server_url: str, cache_dir: Path) -> tuple[str, str] | Non
     digest_dir = digest.replace(":", "-") if digest and digest != "latest" else "latest"
     snapshot = cache_dir / repo.replace("/", "--") / digest_dir
     if snapshot.exists():
-        return str(snapshot.resolve()), f"eval server ({url})"
+        return KingCandidate(
+            snapshot=snapshot.resolve(),
+            source=f"eval server ({url})",
+            repo=repo,
+            digest=digest or "latest",
+        )
     log.warning("king from server does not exist on disk: %s", snapshot)
     return None
 
 
-def _king_from_records(record_dir: Path) -> tuple[str, str] | None:
-    """Scan eval records newest-first. Returns (snapshot_path, source)."""
+def _king_candidate_from_record(record_file: Path, data: dict, artifact_name: str) -> KingCandidate | None:
+    request = data.get("request") or {}
+    verdict = data.get("verdict") or {}
+    artifacts = verdict.get("model_artifacts") or {}
+    artifact = artifacts.get(artifact_name) or {}
+    snapshot_path = artifact.get("path") or ""
+    if not snapshot_path:
+        return None
+    snapshot = Path(snapshot_path)
+    if not snapshot.exists():
+        return None
+
+    repo = (
+        verdict.get(f"{artifact_name}_repo")
+        or request.get(f"{artifact_name}_repo")
+        or snapshot.parent.name.replace("--", "/")
+    )
+    digest = (
+        verdict.get(f"{artifact_name}_digest")
+        or request.get(f"{artifact_name}_digest")
+        or snapshot.name.replace("-", ":", 1)
+        or "latest"
+    )
+    return KingCandidate(
+        snapshot=snapshot.resolve(),
+        source=f"eval record ({record_file.name}, {artifact_name})",
+        repo=repo,
+        digest=digest,
+    )
+
+
+def _king_from_records(record_dir: Path) -> KingCandidate | None:
+    """Scan eval records newest-first."""
     records = sorted(record_dir.glob("*.json"), reverse=True)
     for record_file in records:
         try:
@@ -123,10 +194,27 @@ def _king_from_records(record_dir: Path) -> tuple[str, str] | None:
             continue
         verdict = data.get("verdict") or {}
         artifact_name = "challenger" if verdict.get("accepted") else "king"
-        p = (verdict.get("model_artifacts") or {}).get(artifact_name, {}).get("path", "")
-        if p and Path(p).exists():
-            return str(Path(p).resolve()), f"eval record ({record_file.name}, {artifact_name})"
+        candidate = _king_candidate_from_record(record_file, data, artifact_name)
+        if candidate:
+            return candidate
     return None
+
+
+def accepted_king_candidates_from_records(record_dir: Path) -> list[KingCandidate]:
+    """Return accepted challengers with local snapshots, deduped by repo@digest."""
+    candidates: dict[str, KingCandidate] = {}
+    for record_file in sorted(record_dir.glob("*.json")):
+        try:
+            data = json.loads(record_file.read_text())
+        except Exception:
+            continue
+        verdict = data.get("verdict") or {}
+        if not verdict.get("accepted"):
+            continue
+        candidate = _king_candidate_from_record(record_file, data, "challenger")
+        if candidate:
+            candidates[candidate.marker] = candidate
+    return list(candidates.values())
 
 
 def _meta_from_snapshot_path(snapshot: Path, cache_dir: Path) -> dict:
@@ -157,10 +245,9 @@ def resolve_king(
     record_dir: Path,
     eval_server: str,
     snapshot_override: str | None,
-) -> tuple[Path, str, dict]:
+) -> KingCandidate:
     """
-    Return (snapshot_dir, source_description, king_meta).
-    king_meta contains repo/digest info derived from the snapshot path.
+    Return the current king candidate.
 
     Resolution order:
       1. --snapshot CLI override
@@ -172,7 +259,13 @@ def resolve_king(
         p = Path(snapshot_override).resolve()
         if not p.exists():
             raise FileNotFoundError(f"--snapshot path does not exist: {p}")
-        return p, "CLI --snapshot override", _meta_from_snapshot_path(p, cache_dir)
+        meta = _meta_from_snapshot_path(p, cache_dir)
+        return KingCandidate(
+            snapshot=p,
+            source="CLI --snapshot override",
+            repo=meta.get("king_repo", ""),
+            digest=meta.get("king_digest", ""),
+        )
 
     result = (
         _king_from_records(record_dir)
@@ -184,9 +277,7 @@ def resolve_king(
             "could not determine current king snapshot. "
             "Run write_king_ref.py first, or use --snapshot to specify the directory."
         )
-    snapshot_path, source = result
-    p = Path(snapshot_path)
-    return p, source, _meta_from_snapshot_path(p, cache_dir)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +439,115 @@ def load_marker_set(path: Path) -> set[str]:
 
 
 def save_marker_set(path: Path, markers: set[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(sorted(markers), indent=2) + "\n")
+
+
+def save_pending_king_uploads(path: Path, candidates: list[KingCandidate], uploaded: set[str], dry_run: bool) -> None:
+    pending = [
+        {
+            "repo": candidate.repo,
+            "digest": candidate.digest,
+            "marker": candidate.marker,
+            "snapshot": str(candidate.snapshot),
+            "source": candidate.source,
+        }
+        for candidate in candidates
+        if candidate.marker not in uploaded and candidate.snapshot.is_dir()
+    ]
+    if dry_run:
+        log.info("[DRY RUN] would write %d pending king upload(s) to %s", len(pending), path)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(pending, indent=2) + "\n")
+
+
+def ordered_king_candidates(current: KingCandidate, accepted: list[KingCandidate], snapshot_override: bool) -> list[KingCandidate]:
+    if snapshot_override:
+        return [current]
+    ordered = [current]
+    seen = {current.marker}
+    for candidate in accepted:
+        if candidate.marker in seen:
+            continue
+        ordered.append(candidate)
+        seen.add(candidate.marker)
+    return ordered
+
+
+def upload_king_candidate(
+    candidate: KingCandidate,
+    explicit_hf_repo: str,
+    hf_namespace: str,
+    token: str,
+    revision: str,
+    private: bool,
+    dry_run: bool,
+    staging_dir: Path,
+    last_uploaded_file: Path,
+    uploaded_markers_file: Path,
+    uploaded_markers: set[str],
+    commit_message_override: str,
+    snapshot_override: bool,
+) -> tuple[dict, Path]:
+    log.info("king snapshot: %s  (source: %s)", candidate.snapshot, candidate.source)
+    log.info("  king_repo   : %s", candidate.repo or "?")
+    log.info("  king_digest : %s", candidate.digest or "latest")
+
+    upload_snapshot_dir = decrypted_upload_snapshot(candidate.snapshot, staging_dir / "decrypted")
+    if upload_snapshot_dir != candidate.snapshot:
+        log.info("uploading decrypted king snapshot: %s", upload_snapshot_dir)
+
+    snapshot_str = str(upload_snapshot_dir)
+    try:
+        last = last_uploaded_file.read_text().strip()
+    except OSError:
+        last = ""
+
+    if candidate.marker in uploaded_markers and not snapshot_override:
+        log.info("king already uploaded (%s) — skipping", candidate.marker)
+        return {"status": "skipped", "reason": "king marker uploaded", "marker": candidate.marker}, upload_snapshot_dir
+
+    if last == snapshot_str and not snapshot_override:
+        log.info("king unchanged since last upload (%s) — skipping", snapshot_str)
+        if not dry_run:
+            uploaded_markers.add(candidate.marker)
+            save_marker_set(uploaded_markers_file, uploaded_markers)
+        return {"status": "skipped", "reason": "king unchanged", "snapshot": snapshot_str}, upload_snapshot_dir
+
+    hf_repo = explicit_hf_repo if snapshot_override else ""
+    if not hf_repo:
+        raw = candidate.repo or candidate.snapshot.parent.name.replace("--", "/")
+        hf_repo = derived_hf_repo(hf_namespace, raw)
+        log.info("--hf-repo not set, derived from king: %s -> %s", raw, hf_repo)
+    if not hf_repo:
+        raise RuntimeError("could not determine HF repo name — pass --hf-repo explicitly")
+
+    commit_message = commit_message_override
+    if not commit_message:
+        commit_message = f"Upload king model: {candidate.repo or '?'}@{candidate.digest or 'latest'}"
+    log.info("commit message: %s", commit_message)
+
+    result = upload_to_hf(
+        snapshot_dir=upload_snapshot_dir,
+        hf_repo=hf_repo,
+        token=token,
+        revision=revision,
+        commit_message=commit_message,
+        private=private,
+        dry_run=dry_run,
+    )
+    result["marker"] = candidate.marker
+
+    if not dry_run:
+        uploaded_markers.add(candidate.marker)
+        save_marker_set(uploaded_markers_file, uploaded_markers)
+        try:
+            last_uploaded_file.write_text(snapshot_str)
+        except OSError as exc:
+            log.warning("could not write %s: %s", last_uploaded_file, exc)
+
+    return result, upload_snapshot_dir
 
 
 def staged_snapshot_path(staging_dir: Path, source_repo: str, digest: str) -> Path:
@@ -467,7 +666,7 @@ def upload_non_king_models(
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Upload the current king model snapshot to Hugging Face.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -560,61 +759,41 @@ def main() -> None:
         default=not DEFAULT_DELETE_NON_KING_AFTER_UPLOAD,
         help="Keep staged non-king snapshots after successful upload",
     )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Run forever, sleeping between upload passes. Use this under PM2 instead of cron_restart.",
+    )
+    parser.add_argument(
+        "--interval-s",
+        type=int,
+        default=DEFAULT_LOOP_INTERVAL_S,
+        help="Seconds to sleep between upload passes in --loop mode",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    setup_logging(args.verbose)
 
+def run_once(args: argparse.Namespace) -> dict:
     cache_dir = args.cache_dir.resolve()
+    record_dir = args.record_dir.resolve()
     upload_staging_dir = args.upload_staging_dir.resolve()
     last_uploaded_file = cache_dir / ".last_uploaded_king"
+    uploaded_markers_file = cache_dir / KING_UPLOAD_MARKERS_NAME
+    pending_uploads_file = cache_dir / PENDING_KING_UPLOADS_NAME
+    uploaded_king_markers = load_marker_set(uploaded_markers_file)
 
-    # Resolve king first so we can derive the repo name from it
     log.info("resolving current king …")
-    snapshot_dir, source, king_meta = resolve_king(
+    current = resolve_king(
         cache_dir=cache_dir,
-        record_dir=args.record_dir.resolve(),
+        record_dir=record_dir,
         eval_server=args.eval_server,
         snapshot_override=args.snapshot or None,
     )
-    log.info("king snapshot: %s  (source: %s)", snapshot_dir, source)
-    if king_meta:
-        log.info("  king_repo   : %s", king_meta.get("king_repo", "?"))
-        log.info("  king_digest : %s", king_meta.get("king_digest", "?"))
+    accepted = accepted_king_candidates_from_records(record_dir) if not args.snapshot else []
+    king_candidates = ordered_king_candidates(current, accepted, bool(args.snapshot))
+    save_pending_king_uploads(pending_uploads_file, king_candidates, uploaded_king_markers, args.dry_run)
 
-    upload_snapshot_dir = decrypted_upload_snapshot(snapshot_dir, upload_staging_dir / "decrypted")
-    if upload_snapshot_dir != snapshot_dir:
-        log.info("uploading decrypted king snapshot: %s", upload_snapshot_dir)
-
-    # Skip upload when the actual upload snapshot hasn't changed since last run.
-    snapshot_str = str(upload_snapshot_dir)
-    try:
-        last = last_uploaded_file.read_text().strip()
-    except OSError:
-        last = ""
-    king_result = None
-    if last == snapshot_str and not args.snapshot:
-        log.info("king unchanged since last upload (%s) — skipping", snapshot_str)
-        king_result = {"status": "skipped", "reason": "king unchanged", "snapshot": snapshot_str}
-    else:
-        # Derive HF repo name from king if not explicitly set
-        hf_repo = args.hf_repo
-        if not hf_repo:
-            raw = king_meta.get("king_repo") or snapshot_dir.parent.name.replace("--", "/")
-            hf_repo = derived_hf_repo(args.hf_namespace, raw)
-            log.info("--hf-repo not set, derived from king: %s -> %s", raw, hf_repo)
-        if not hf_repo:
-            parser.error("could not determine HF repo name — pass --hf-repo explicitly")
-
-        # Build commit message
-        commit_message = args.commit_message
-        if not commit_message:
-            king_repo = king_meta.get("king_repo") or snapshot_dir.parent.name.replace("--", "/")
-            king_digest = king_meta.get("king_digest") or snapshot_dir.name
-            commit_message = f"Upload king model: {king_repo}@{king_digest}"
-        log.info("commit message: %s", commit_message)
-
-    # Resolve token (skip in dry-run so the script is usable without credentials)
     token = ""
     if not args.dry_run:
         token = hf_token(args.hf_token) or ""
@@ -623,30 +802,42 @@ def main() -> None:
         else:
             log.warning("no HF token found — upload may fail for private repos")
 
-    if king_result is None:
-        king_result = upload_to_hf(
-            snapshot_dir=upload_snapshot_dir,
-            hf_repo=hf_repo,
-            token=token,
-            revision=args.hf_revision,
-            commit_message=commit_message,
-            private=args.hf_private,
-            dry_run=args.dry_run,
-        )
-
-    # Record successful king upload so next run can detect no-change.
-    if not args.dry_run and king_result.get("status") != "skipped":
+    king_results = []
+    king_snapshot_dirs: set[Path] = set()
+    had_failure = False
+    for candidate in king_candidates:
         try:
-            last_uploaded_file.write_text(snapshot_str)
-        except OSError as exc:
-            log.warning("could not write %s: %s", last_uploaded_file, exc)
+            result, upload_snapshot_dir = upload_king_candidate(
+                candidate=candidate,
+                explicit_hf_repo=args.hf_repo,
+                hf_namespace=args.hf_namespace,
+                token=token,
+                revision=args.hf_revision,
+                private=args.hf_private,
+                dry_run=args.dry_run,
+                staging_dir=upload_staging_dir,
+                last_uploaded_file=last_uploaded_file,
+                uploaded_markers_file=uploaded_markers_file,
+                uploaded_markers=uploaded_king_markers,
+                commit_message_override=args.commit_message,
+                snapshot_override=bool(args.snapshot),
+            )
+            king_results.append(result)
+            king_snapshot_dirs.update({candidate.snapshot, upload_snapshot_dir})
+            save_pending_king_uploads(pending_uploads_file, king_candidates, uploaded_king_markers, args.dry_run)
+        except Exception as exc:
+            had_failure = True
+            log.exception("king upload failed for %s", candidate.marker)
+            king_results.append({"status": "failed", "marker": candidate.marker, "error": str(exc)})
+            if args.snapshot:
+                break
 
     non_king_results = []
     if not args.snapshot:
         non_king_results = upload_non_king_models(
-            record_dir=args.record_dir.resolve(),
+            record_dir=record_dir,
             cache_dir=cache_dir,
-            current_king_snapshots={snapshot_dir, upload_snapshot_dir},
+            current_king_snapshots=king_snapshot_dirs,
             hf_namespace=args.hf_namespace,
             token=token,
             revision=args.hf_revision,
@@ -658,7 +849,32 @@ def main() -> None:
             delete_after_upload=not args.keep_non_king_after_upload,
         )
 
-    print(json.dumps({"king": king_result, "non_king": non_king_results}, indent=2))
+    result = {"king": king_results, "non_king": non_king_results}
+    if had_failure:
+        result["status"] = "failed"
+    print(json.dumps(result, indent=2))
+    return result
+
+
+def main() -> None:
+    args = parse_args()
+    setup_logging(args.verbose)
+
+    if not args.loop:
+        result = run_once(args)
+        raise SystemExit(1 if result.get("status") == "failed" else 0)
+
+    interval_s = max(1, args.interval_s)
+    log.info("starting upload worker loop (interval=%ss)", interval_s)
+    while True:
+        try:
+            run_once(args)
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            log.exception("upload pass failed")
+        log.info("sleeping %ss before next upload pass", interval_s)
+        time.sleep(interval_s)
 
 
 if __name__ == "__main__":

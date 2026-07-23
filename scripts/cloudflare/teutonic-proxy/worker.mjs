@@ -1,5 +1,5 @@
 // Cloudflare Worker bound to teutonic.ai and www.teutonic.ai.
-// Reverse-proxies every request to the Hippius S3 bucket where the
+// Reverse-proxies every request to the Cloudflare R2 bucket where the
 // validator writes dashboard.json and where the dashboard html lives.
 //
 // Account: 00523074f51300584834607253cae0fa
@@ -7,7 +7,8 @@
 // Worker:  teutonic-proxy
 // Deploy:  scripts/cloudflare/deploy.sh
 //
-// IMPORTANT: Hippius is buggy in two ways that this worker compensates for:
+// IMPORTANT: The old Hippius origin was buggy in two ways that this worker
+// compensates for if similar storage metadata issues recur:
 //   1) Last-Modified is a static timestamp that never updates on PUT, so a
 //      browser's If-Modified-Since revalidation always returns 304 and the
 //      browser keeps showing whatever HTML body it cached the first time.
@@ -17,7 +18,7 @@
 // way out, drop Last-Modified on the way back, and rewrite Cache-Control to
 // no-cache so browsers always revalidate via ETag (which IS correct).
 
-const ORIGIN = "https://s3.hippius.com/teutonic-sn3";
+const ORIGIN = "https://pub-e2009eec1ca9488699de6263f40bb7e7.r2.dev";
 
 // Content types that drive the live dashboard. These must always reflect
 // the current bytes in the bucket, so we disable every layer of caching.

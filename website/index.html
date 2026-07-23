@@ -496,14 +496,9 @@ th:last-child, td:last-child { text-align: right; }
     vertical-align: middle;
 }
 .hist-caret.open { transform: rotate(90deg); opacity: 0.7; }
-.hist-detail { display: none; }
+.hist-detail { display: none; pointer-events: none; }
 .hist-detail.open { display: table-row; }
 .hist-detail > td { cursor: default !important; background: transparent !important; color: var(--ink) !important; }
-.hist-detail:hover td {
-    background: transparent;
-    color: var(--ink);
-    cursor: default;
-}
 .hist-detail-inner { padding: 8px 8px 10px 0; border-top: var(--border-faint); }
 .hist-ds-table { border-collapse: collapse; font-size: 11px; }
 .hist-ds-table th {
@@ -511,31 +506,6 @@ th:last-child, td:last-child { text-align: right; }
     border-bottom: var(--border-faint); background: transparent; position: static; text-align: left;
 }
 .hist-ds-table td { padding: 2px 10px 2px 0; border-bottom: none; white-space: nowrap; text-align: left; }
-.hist-detail .hist-ds-table tr:hover td {
-    background: transparent;
-    color: var(--ink);
-    cursor: default;
-}
-.hist-shard-toggle {
-    background: none;
-    border: 0;
-    color: inherit;
-    cursor: pointer;
-    font: inherit;
-    padding: 0;
-    text-decoration: underline;
-}
-.hist-shard-toggle:hover, .hist-detail .hist-ds-table td.hist-shard-list:hover {
-    background: var(--ink);
-    color: var(--ink-inv);
-}
-.hist-shard-row { display: none; opacity: 0.72; }
-.hist-shard-row.open { display: table-row; }
-.hist-shard-list {
-    font-family: 'Space Mono', monospace;
-    white-space: normal;
-    word-break: break-all;
-}
 .hist-ds-mu-pos { color: #2a2; }
 .hist-ds-mu-neg { color: #c55; }
 .hist-ds-mu-neutral { opacity: 0.5; }
@@ -772,16 +742,24 @@ th:last-child, td:last-child { text-align: right; }
 
 <script>
 var STORAGE_ENDPOINTS = [
-    "https://us-east-1.hippius.com/teutonic-sn3",
-    "https://eu-central-1.hippius.com/teutonic-sn3",
-    "https://s3.hippius.com/teutonic-sn3"
+    ""
 ];
 var DATASET_MANIFEST_KEY = "dataset/all-datasets.manifest.json";
 var DATA_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/dashboard.json"; });
 var HTML_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/index.html"; });
-var DATASET_MANIFEST_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/" + DATASET_MANIFEST_KEY; });
-var BENCH_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/king-benchmark-daily/all-kings/latest.json"; });
-var BENCH_INDEX_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/king-benchmark-daily/all-kings/index.json"; });
+var DATASET_MANIFEST_ENDPOINTS = [
+    "https://s3.hippius.com/teutonic-sn3/" + DATASET_MANIFEST_KEY
+];
+var BENCH_ENDPOINTS = [
+    "https://us-east-1.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/latest.json",
+    "https://eu-central-1.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/latest.json",
+    "https://s3.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/latest.json"
+];
+var BENCH_INDEX_ENDPOINTS = [
+    "https://us-east-1.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/index.json",
+    "https://eu-central-1.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/index.json",
+    "https://s3.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/index.json"
+];
 var BENCHMARK_ORDER = [
     { name: "MMLU", task: "mmlu", fewshot: 0 },
     { name: "BBH", task: "leaderboard_bbh", fewshot: 3 },
@@ -2181,9 +2159,6 @@ function render(d) {
             var repoLink = modelRepo(h) ? modelLink(modelRepo(h), modelDigest(h), repo) : repo;
             var uid = h.uid != null ? h.uid : "--";
             var hasScores = !isErr && h.source_scores && Object.keys(h.source_scores).length > 0;
-            var shardsUsed = h.shards_used || (h.dataset && h.dataset.shards_used) || [];
-            var hasShards = !isErr && shardsUsed.length > 0;
-            var hasDetails = hasScores || hasShards;
             var detailId = "hist-detail-" + idx;
 
             var verdictCell;
@@ -2205,10 +2180,10 @@ function render(d) {
             var ago = timeAgo(h.timestamp);
             var fullTs = h.timestamp ? new Date(h.timestamp).toUTCString() : "";
             if (!isErr && h.wall_time_s) ago += " (" + h.wall_time_s.toFixed(0) + "s)";
-            var caret = hasDetails ? '<span class="hist-caret">►</span>' : '';
+            var caret = hasScores ? '<span class="hist-caret">►</span>' : '';
 
             rows.push(
-                '<tr' + (hasDetails ? ' class="hist-row-expandable" data-detail-id="' + detailId + '"' : '') + '>' +
+                '<tr' + (hasScores ? ' class="hist-row-expandable" data-detail-id="' + detailId + '"' : '') + '>' +
                 '<td>' + uid + '</td>' +
                 '<td>' + repoLink + '</td>' +
                 '<td>' + hotkeyCell(h.hotkey, h.coldkey) + '</td>' +
@@ -2221,72 +2196,42 @@ function render(d) {
                 '</tr>'
             );
 
-            if (hasDetails) {
+            if (hasScores) {
                 var ss = h.source_scores;
-                var shardRefsBySource = {};
-                shardsUsed.forEach(function(group) {
-                    shardRefsBySource[group.source || "dataset"] = group.refs || [];
-                });
-                function shardListRow(id, refs, colspan) {
-                    if (!refs.length) return "";
-                    return '<tr class="hist-shard-row" id="' + id + '"><td></td><td colspan="' + colspan + '" class="hist-shard-list">' +
-                        refs.map(esc).join("<br>") + '</td></tr>';
-                }
-                var scoresTable = "";
-                if (hasScores) {
-                    var sNames = Object.keys(ss).sort();
-                    var klVals2 = sNames.map(function(n) { return ss[n].avg_king_loss || 0; });
-                    var klMin2 = Math.min.apply(null, klVals2);
-                    var klMax2 = Math.max.apply(null, klVals2);
-                    var klSpan2 = klMax2 - klMin2 || 0.001;
-                    var innerRows = sNames.map(function(name, sourceIdx) {
-                        var s = ss[name];
-                        var skl = s.avg_king_loss || 0;
-                        var scl = s.avg_challenger_loss || 0;
-                        var smu = s.mu_hat != null ? s.mu_hat : (skl - scl);
-                        var barW = Math.round(((skl - klMin2) / klSpan2) * 48 + 3);
-                        var muCls = smu > 0.0005 ? ' class="hist-ds-mu-pos"' : (smu < -0.0005 ? ' class="hist-ds-mu-neg"' : ' class="hist-ds-mu-neutral"');
-                        var muSign = smu >= 0 ? "+" : "";
-                        var monoL = "font-family:'Space Mono',monospace;text-align:left";
-                        var refs = shardRefsBySource[name] || [];
-                        var shardId = detailId + "-shards-" + sourceIdx;
-                        var nameHtml = refs.length
-                            ? '<button type="button" class="hist-shard-toggle" data-shard-target="' + shardId + '">' + shortSourceName(name) + '</button>'
-                            : shortSourceName(name);
-                        return '<tr>' +
-                            '<td style="' + monoL + '">' + nameHtml + '</td>' +
-                            '<td style="' + monoL + '">' + skl.toFixed(4) + '</td>' +
-                            '<td style="' + monoL + '">' + scl.toFixed(4) + '</td>' +
-                            '<td' + muCls + ' style="' + monoL + '">' + muSign + smu.toFixed(5) + '</td>' +
-                            '<td style="' + monoL + '">' + (s.n_sequences || 0).toLocaleString() + '</td>' +
-                            '</tr>' + shardListRow(shardId, refs, 4);
-                    }).join("");
-                    scoresTable = '<table class="hist-ds-table"><thead><tr>' +
-                        '<th style="min-width:140px">Dataset</th>' +
-                        '<th>King Loss</th><th>Chall Loss</th>' +
-                        '<th title="challenger advantage: positive = challenger had lower loss">Δ</th>' +
-                        '<th>N</th>' +
-                    '</tr></thead><tbody>' + innerRows + '</tbody></table>';
-                }
-                var shardOnlyRows = hasScores ? "" : shardsUsed.map(function(group, groupIdx) {
-                    var refs = group.refs || [];
-                    var shardId = detailId + "-shards-only-" + groupIdx;
-                    return '<tr><td style="font-family:\'Space Mono\',monospace;text-align:left">' +
-                        '<button type="button" class="hist-shard-toggle" data-shard-target="' + shardId + '">' +
-                        shortSourceName(group.source || "dataset") + '</button></td><td>' + refs.length + '</td></tr>' +
-                        shardListRow(shardId, refs, 1);
+                var sNames = Object.keys(ss).sort();
+                var klVals2 = sNames.map(function(n) { return ss[n].avg_king_loss || 0; });
+                var klMin2 = Math.min.apply(null, klVals2);
+                var klMax2 = Math.max.apply(null, klVals2);
+                var klSpan2 = klMax2 - klMin2 || 0.001;
+                var innerRows = sNames.map(function(name) {
+                    var s = ss[name];
+                    var skl = s.avg_king_loss || 0;
+                    var scl = s.avg_challenger_loss || 0;
+                    var smu = s.mu_hat != null ? s.mu_hat : (skl - scl);
+                    var barW = Math.round(((skl - klMin2) / klSpan2) * 48 + 3);
+                    var muCls = smu > 0.0005 ? ' class="hist-ds-mu-pos"' : (smu < -0.0005 ? ' class="hist-ds-mu-neg"' : ' class="hist-ds-mu-neutral"');
+                    var muSign = smu >= 0 ? "+" : "";
+                    var monoL = "font-family:'Space Mono',monospace;text-align:left";
+                    return '<tr>' +
+                        '<td style="' + monoL + '">' + shortSourceName(name) + '</td>' +
+                        '<td style="' + monoL + '">' + skl.toFixed(4) + '</td>' +
+                        '<td style="' + monoL + '">' + scl.toFixed(4) + '</td>' +
+                        '<td' + muCls + ' style="' + monoL + '">' + muSign + smu.toFixed(5) + '</td>' +
+                        '<td style="' + monoL + '">' + (s.n_sequences || 0).toLocaleString() + '</td>' +
+                        '</tr>';
                 }).join("");
-                var shardsTable = shardOnlyRows
-                    ? '<table class="hist-ds-table"><thead><tr><th style="min-width:140px">Dataset</th><th>Shards</th></tr></thead><tbody>' + shardOnlyRows + '</tbody></table>'
-                    : "";
                 var earlyNote = h.early_stopped
                     ? '<div style="font-size:10px;opacity:0.4;margin-top:5px;text-transform:uppercase;letter-spacing:0.04em">Early stop — ' + (h.n_sequences_evaluated || "?") + " / " + (h.n_sequences || "?") + " seqs evaluated</div>"
                     : "";
                 rows.push(
                     '<tr class="hist-detail" id="' + detailId + '">' +
                     '<td colspan="9"><div class="hist-detail-inner">' +
-                        scoresTable +
-                        shardsTable +
+                        '<table class="hist-ds-table"><thead><tr>' +
+                            '<th style="min-width:140px">Dataset</th>' +
+                            '<th>King Loss</th><th>Chall Loss</th>' +
+                            '<th title="challenger advantage: positive = challenger had lower loss">Δ</th>' +
+                            '<th>N</th>' +
+                        '</tr></thead><tbody>' + innerRows + '</tbody></table>' +
                         earlyNote +
                     '</div></td></tr>'
                 );
@@ -2497,14 +2442,6 @@ if (historyErrorsToggle) {
 
 (function initHistExpand() {
     document.getElementById("hist").addEventListener("click", function(e) {
-        var toggle = e.target && e.target.closest ? e.target.closest(".hist-shard-toggle") : null;
-        if (toggle) {
-            e.preventDefault();
-            e.stopPropagation();
-            var shardRow = document.getElementById(toggle.getAttribute("data-shard-target"));
-            if (shardRow) shardRow.classList.toggle("open");
-            return;
-        }
         var row = e.target;
         while (row && row.tagName !== "TR") row = row.parentElement;
         if (!row || !row.classList.contains("hist-row-expandable")) return;
