@@ -505,29 +505,18 @@ def materialize_model(repo_or_url: str, digest: str = "", on_phase=None, allow_e
 
     def download_once() -> str:
         target.mkdir(parents=True, exist_ok=True)
-        # if repo_or_url.startswith("http") and "huggingface.co" in repo_or_url:
-        #     from huggingface_hub import snapshot_download
+        if (repo_or_url.startswith(("http://", "https://")) and "huggingface.co" in repo_or_url) or digest.startswith("hf:"):
+            from huggingface_hub import snapshot_download
 
-        #     revision = digest[3:] if digest.startswith("hf:") else (digest or None)
-        #     return snapshot_download(
-        #         repo_id=repo,
-        #         revision=revision,
-        #         local_dir=str(target),
-        #         allow_patterns=MODEL_ALLOW_PATTERNS,
-        #         max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
-        #         token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
-        #     )
-        # if digest.startswith("hf:"):
-        #     from huggingface_hub import snapshot_download
-
-        #     return snapshot_download(
-        #         repo_id=repo,
-        #         revision=digest[3:],
-        #         local_dir=str(target),
-        #         allow_patterns=MODEL_ALLOW_PATTERNS,
-        #         max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
-        #         token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
-        #     )
+            revision = digest[3:] if digest.startswith("hf:") else (digest or None)
+            return snapshot_download(
+                repo_id=repo,
+                revision=revision,
+                local_dir=str(target),
+                allow_patterns=MODEL_ALLOW_PATTERNS,
+                max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
+                token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
+            )
 
         from hippius_hub import snapshot_download
         from model_store import get_hub_token
