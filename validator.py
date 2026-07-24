@@ -62,7 +62,7 @@ EVAL_N = int(os.environ.get("TEUTONIC_EVAL_N", "5000"))
 # whole-corpus-overfit defense is then disabled (public-only mode).
 EVAL_N_PRIVATE = int(os.environ.get("TEUTONIC_EVAL_N_PRIVATE", str(EVAL_N // 2)))
 EVAL_N_PUBLIC = int(os.environ.get("TEUTONIC_EVAL_N_PUBLIC", str(EVAL_N - EVAL_N_PRIVATE)))
-EVAL_N_PUBLIC = 20000
+EVAL_N_PUBLIC = 25000
 EVAL_ALPHA = 0.001
 SEQ_LEN = 2048
 POLL_INTERVAL = 30
@@ -925,14 +925,6 @@ import re
 _SAFETENSORS_SHARD_RE = re.compile(r"^model-\d{5}-of-\d{5}\.safetensors$")
 
 
-def _verdict_shards_used(verdict: dict) -> list[dict]:
-    shards = verdict.get("shards_used")
-    if shards:
-        return shards
-    dataset = verdict.get("dataset") if isinstance(verdict.get("dataset"), dict) else {}
-    return dataset.get("shards_used") or []
-
-
 def _decode_commitment_pair(pair):
     """Return (hotkey_ss58, [(block, payload), ...]) for one RevealedCommitments row.
 
@@ -1417,14 +1409,6 @@ class State:
             entry["king_timestamp_source"] = verdict["king_timestamp_source"]
         if verdict.get("source_scores"):
             entry["source_scores"] = verdict["source_scores"]
-        shards_used = _verdict_shards_used(verdict)
-        if shards_used:
-            dataset = verdict.get("dataset") if isinstance(verdict.get("dataset"), dict) else {}
-            entry["shards_used"] = shards_used
-            entry["dataset"] = {
-                "source": verdict.get("dataset_source") or dataset.get("source"),
-                "shards_used": shards_used,
-            }
         if verdict.get("early_stopped"):
             entry["early_stopped"] = True
             entry["n_sequences"] = verdict.get("n_sequences")

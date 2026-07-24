@@ -788,6 +788,7 @@ var _benchHistoryOpen = localStorage.getItem("benchHistoryOpen") === "1";
 var _benchHistoryPage = Number(localStorage.getItem("benchHistoryPage") || 0);
 var _benchHistoryPageSize = Number(localStorage.getItem("benchHistoryPageSize") || 5);
 if ([5, 10, 25, 50].indexOf(_benchHistoryPageSize) === -1) _benchHistoryPageSize = 5;
+var _benchHistoryShowErrors = false;
 var _historyShowErrors = false;
 var _chartMode = localStorage.getItem("chartMode") || "ppl";
 var _smoothMode = localStorage.getItem("smoothMode") || "lowess";
@@ -1525,6 +1526,13 @@ function benchmarkHistoryChronological(rows) {
     });
 }
 
+function benchmarkHistoryHasError(result) {
+    var benchRows = completeBenchmarkRows(result, { missingStatus: "not_run" });
+    return benchRows.some(function(b) {
+        return (b.status || "not_run") !== "completed" || benchmarkScoreValue(b) == null;
+    });
+}
+
 function renderBenchmarkSparks(rows) {
     var ordered = benchmarkHistoryChronological(rows || []);
     var cards = BENCHMARK_ORDER.map(function(spec) {
@@ -1585,8 +1593,11 @@ function renderBenchmarkHistory() {
     if (toggle) toggle.textContent = _benchHistoryOpen ? "Hide History" : "History";
     if (!_benchHistoryOpen) return;
     var rows = benchmarkHistoryRows();
+    var errorCount = rows.filter(benchmarkHistoryHasError).length;
+    if (!_benchHistoryShowErrors) rows = rows.filter(function(result) { return !benchmarkHistoryHasError(result); });
     if (!rows.length) {
-        panel.innerHTML = renderBenchmarkSparks([]) + '<div class="bench-history-empty">No benchmark history yet</div>';
+        var errorsButton = errorCount ? '<div class="bench-history-pager"><button type="button" data-bench-errors>Show Errors</button></div>' : "";
+        panel.innerHTML = renderBenchmarkSparks([]) + errorsButton + '<div class="bench-history-empty">' + (errorCount ? "No complete benchmark history rows yet" : "No benchmark history yet") + '</div>';
         return;
     }
     var pageSize = _benchHistoryPageSize || 5;
@@ -1599,7 +1610,7 @@ function renderBenchmarkHistory() {
         '<div class="bench-history-pager-left"><button type="button" data-bench-page="prev"' + (_benchHistoryPage <= 0 ? ' disabled' : '') + '>Prev</button>' +
         '<span>Page ' + esc(_benchHistoryPage + 1) + ' / ' + esc(pageCount) + ' · ' + esc(rows.length) + ' kings</span>' +
         '<button type="button" data-bench-page="next"' + (_benchHistoryPage >= pageCount - 1 ? ' disabled' : '') + '>Next</button></div>' +
-        '<label class="bench-history-pager-right">Rows <select data-bench-page-size>' + [5, 10, 25, 50].map(function(n) { return '<option value="' + n + '"' + (n === pageSize ? ' selected' : '') + '>' + n + '</option>'; }).join("") + '</select></label>' +
+        '<div class="bench-history-pager-right"><button type="button" data-bench-errors>' + (_benchHistoryShowErrors ? "Hide Errors" : "Show Errors") + '</button><label>Rows <select data-bench-page-size>' + [5, 10, 25, 50].map(function(n) { return '<option value="' + n + '"' + (n === pageSize ? ' selected' : '') + '>' + n + '</option>'; }).join("") + '</select></label></div>' +
         '</div>';
     var head = '<thead><tr><th>King</th><th>Model</th>' + BENCHMARK_ORDER.map(function(b) { return '<th>' + esc(b.name) + '</th>'; }).join("") + '</tr></thead>';
     var body = visibleRows.map(function(result) {
@@ -2414,6 +2425,14 @@ if (benchHistoryToggle) {
 var benchHistoryPanel = document.getElementById("bench-history");
 if (benchHistoryPanel) {
     benchHistoryPanel.addEventListener("click", function(ev) {
+        var errorsBtn = ev.target && ev.target.closest ? ev.target.closest("[data-bench-errors]") : null;
+        if (errorsBtn) {
+            _benchHistoryShowErrors = !_benchHistoryShowErrors;
+            _benchHistoryPage = 0;
+            localStorage.setItem("benchHistoryPage", "0");
+            renderBenchmarkHistory();
+            return;
+        }
         var btn = ev.target && ev.target.closest ? ev.target.closest("[data-bench-page]") : null;
         if (!btn || btn.disabled) return;
         var direction = btn.getAttribute("data-bench-page");
