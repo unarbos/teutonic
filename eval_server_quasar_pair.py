@@ -151,6 +151,10 @@ _king_device = ""
 _king_gpu_ids: list[int] = []
 
 
+class EncryptedModelRejected(RuntimeError):
+    pass
+
+
 class EvalRequest(BaseModel):
     king_repo: str
     challenger_repo: str
@@ -409,7 +413,7 @@ def decrypt_model_snapshot(snapshot_dir: str, on_phase=None, allow_encrypted: bo
     if manifest is None:
         return str(snapshot)
     if not allow_encrypted:
-        raise RuntimeError("encrypted model snapshots are no longer accepted")
+        raise EncryptedModelRejected("encrypted model snapshots are no longer accepted")
 
     output = decrypted_snapshot_path(snapshot)
     if decrypted_snapshot_is_current(output, manifest):
@@ -558,6 +562,8 @@ def materialize_model(repo_or_url: str, digest: str = "", on_phase=None, allow_e
                 raise RuntimeError(f"downloaded snapshot is incomplete: {path}")
             path = decrypt_model_snapshot(path, on_phase=on_phase, allow_encrypted=allow_encrypted)
             break
+        except EncryptedModelRejected:
+            raise
         except Exception as exc:
             last_exc = exc
             log.warning(
