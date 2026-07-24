@@ -613,6 +613,11 @@ def validate_custom_code_policy(
 def _parse_registry_timestamp(ts: str | None):
     if not ts:
         return None
+    if isinstance(ts, datetime):
+        dt = ts
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except Exception:
@@ -639,22 +644,103 @@ def _first_registry_timestamp(candidates: list[tuple[str, str | None]]) -> tuple
     return None, None
 
 
-def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
-    """Fetch OCI manifest and registry-observed timestamp metadata.
+def _normal_blob_digest(value: str | None) -> str:
+    return (value or "").lower().removeprefix("sha256:")
 
-    Returns None when the check cannot be performed (HF refs, network error,
-    manifest absent) so callers can fail open rather than blocking valid submissions.
+
+def _trusted_timestamp_source(source: str | None) -> bool:
+    return bool(source) and not str(source).startswith("untrusted:")
+
+
+def _copy_info_from_siblings(siblings, timestamp_candidates: list[tuple[str, object]]) -> dict | None:
+    safetensor_layers: dict[str, str] = {}
+    safetensor_dates = []
+    for item in siblings or []:
+        title = getattr(item, "path", "") or getattr(item, "rfilename", "")
+        if not title.endswith(".safetensors"):
+            continue
+        lfs = getattr(item, "lfs", None)
+        digest = getattr(lfs, "sha256", None) or getattr(item, "blob_id", None)
+        if digest:
+            safetensor_layers[title] = _normal_blob_digest(digest)
+        last_commit = getattr(item, "last_commit", None)
+        dt = _parse_registry_timestamp(getattr(last_commit, "date", None))
+        if dt is not None:
+            safetensor_dates.append(dt)
+
+    if safetensor_dates:
+        timestamp_candidates.insert(0, ("untrusted:huggingface_safetensor.last_commit", max(safetensor_dates)))
+    committed_at, timestamp_source = _first_registry_timestamp(timestamp_candidates)
+    return {
+        "safetensor_layers": safetensor_layers,
+        "committed_at": committed_at,
+        "timestamp_source": timestamp_source,
+    }
+
+
+def _fetch_hf_model_info(repo_id: str, hf_digest: str) -> dict | None:
+    try:
+        from huggingface_hub import HfApi
+
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY")
+        api = HfApi(token=token)
+        revision = hf_digest[3:]
+        siblings = list(api.list_repo_tree(repo_id, recursive=True, expand=True, revision=revision))
+        return _copy_info_from_siblings(siblings, [])
+    except Exception:
+        log.debug("could not fetch HF info for %s@%s (copy check skipped)",
+                  repo_id, hf_digest[:19], exc_info=True)
+        return None
+
+
+def _fetch_hippius_model_info(repo_id: str, oci_digest: str) -> dict | None:
+    try:
+        import hippius_hub
+
+        token = _resolve_hub_token(f"copy-check model info {repo_id}")
+        for revision in (oci_digest, "main"):
+            try:
+                info = hippius_hub.model_info(
+                    repo_id,
+                    revision=revision,
+                    files_metadata=True,
+                    token=token,
+                )
+                break
+            except Exception:
+                if revision != "main":
+                    continue
+                raise
+        if _normal_blob_digest(getattr(info, "sha", "")) != _normal_blob_digest(oci_digest):
+            return None
+
+        timestamp_candidates = [
+            ("hippius_model.created_at", getattr(info, "created_at", None)),
+            ("hippius_model.last_modified", getattr(info, "last_modified", None)),
+        ]
+        return _copy_info_from_siblings(getattr(info, "siblings", None), timestamp_candidates)
+    except Exception:
+        log.debug("could not fetch Hippius model info for %s@%s (copy check skipped)",
+                  repo_id, oci_digest[:19], exc_info=True)
+        return None
+
+
+def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
+    """Fetch model file digests and server-observed timestamp metadata.
+
+    Returns None when the check cannot be performed, so callers can fail open
+    rather than blocking valid submissions.
 
     Return shape::
 
         {
-            "safetensor_layers": {"model-00001-of-00004.safetensors": "sha256:...", ...},
+            "safetensor_layers": {"model-00001-of-00004.safetensors": "...", ...},
             "committed_at": "2026-06-08T15:45:59.489795+00:00",   # may be None
             "timestamp_source": "harbor_artifact.push_time",      # may be None
         }
     """
     if oci_digest.startswith("hf:"):
-        return None
+        return _fetch_hf_model_info(repo_id, oci_digest)
     try:
         from hippius_hub._harbor import harbor_get_artifact, split_repo_id
         from hippius_hub._oci import manifest_url, oci_headers
@@ -677,7 +763,7 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
             timeout=httpx.Timeout(15.0),
         )
         if resp.status_code == 404:
-            return None
+            return _fetch_hippius_model_info(repo_id, oci_digest)
         resp.raise_for_status()
         manifest = resp.json()
 
@@ -685,7 +771,7 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
         for layer in manifest.get("layers", []):
             title = layer.get("annotations", {}).get("org.opencontainers.image.title", "")
             if title.endswith(".safetensors") and "digest" in layer:
-                safetensor_layers[title] = layer["digest"]
+                safetensor_layers[title] = _normal_blob_digest(layer["digest"])
 
         artifact = None
         auth_header = resolve_auth_header(raw_token)
@@ -717,7 +803,7 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
     except Exception:
         log.debug("could not fetch OCI info for %s@%s (copy check skipped)",
                   repo_id, oci_digest[:19], exc_info=True)
-        return None
+        return _fetch_hippius_model_info(repo_id, oci_digest)
 
 
 def check_model_copy(
@@ -785,7 +871,7 @@ def check_model_copy(
     king_dt = _parse_registry_timestamp(king_ts)
 
     base_reason = (
-        f"all {n} .safetensors layers have identical OCI digests; "
+        f"all {n} .safetensors layers have identical blob digests; "
         f"challenger pushed_at={challenger_ts} source={challenger_source}, "
         f"king pushed_at={king_ts} source={king_source}"
     )
@@ -798,13 +884,16 @@ def check_model_copy(
     }
 
     # Fail-safe: once weights are proven identical, never crown an "earlier"
-    # model unless both timestamps came from registry/server metadata. Client
-    # annotations such as org.opencontainers.image.created are intentionally
-    # excluded by _fetch_model_oci_info because a miner can backdate them.
-    if challenger_dt is None or king_dt is None or not challenger_source or not king_source:
+    # model unless the challenger proving originality has a trusted timestamp.
+    # HF dates are still recorded, but only as the later-side comparison.
+    if (
+        challenger_dt is None
+        or king_dt is None
+        or not _trusted_timestamp_source(challenger_source)
+    ):
         return {
             "action": "reject",
-            "reason": f"model is a copy of the king (registry timestamps unavailable): {base_reason}",
+            "reason": f"model is a copy of the king (trusted challenger timestamp unavailable): {base_reason}",
             **result_meta,
         }
 
@@ -1004,8 +1093,6 @@ def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys):
             # in their reveal — log and trust the chain key.
             log.warning("v4 author_hotkey %s mismatches chain key %s; trusting chain",
                         author_hotkey[:16], hotkey[:16])
-        if ref.immutable_ref in completed_repos:
-            continue
         new.append({
             "hotkey": hotkey,
             "block": block,
@@ -1133,6 +1220,10 @@ def _age_seconds(ts: str | None) -> float | None:
 
 def _model_key(repo: str, digest: str = "") -> str:
     return f"{repo}@{digest}" if digest else repo
+
+
+def _completed_digests(completed_repos: set[str]) -> set[str]:
+    return {item.split("@", 1)[1] for item in completed_repos if "@" in item}
 
 
 class State:
@@ -1263,6 +1354,22 @@ class State:
         if hotkey and hotkey in self.seen:
             log.info("skipping enqueue: hotkey %s already used its 1-eval slot "
                      "(must re-register for another shot)", hotkey[:16])
+            return None
+        if digest and digest in _completed_digests(self.completed_repos):
+            cid = self.next_id()
+            entry = {"challenge_id": cid, **reveal, "queued_at": _now(), "retry_count": int(reveal.get("retry_count", 0))}
+            entry.pop("reeval", None)
+            reason = f"model digest {digest[:19]} was already submitted/evaluated before"
+            log.warning("rejecting %s: %s", cid, reason)
+            if hotkey:
+                self.seen.add(hotkey)
+            if repo:
+                self.completed_repos.add(model_key)
+            self.failed_repos.add(model_key)
+            self.record_failure(entry, "digest_already_completed", reason)
+            if not defer_flush:
+                self.flush()
+                self.flush_dashboard(force=True)
             return None
         for existing in self.queue:
             if existing.get("model_repo") == repo:
