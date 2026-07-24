@@ -403,12 +403,13 @@ def decrypted_snapshot_is_current(output: Path, manifest: dict) -> bool:
     return True
 
 
-def decrypt_model_snapshot(snapshot_dir: str, on_phase=None) -> str:
+def decrypt_model_snapshot(snapshot_dir: str, on_phase=None, allow_encrypted: bool = False) -> str:
     snapshot = Path(snapshot_dir).resolve()
     manifest = load_encryption_manifest(snapshot)
     if manifest is None:
         return str(snapshot)
-    raise RuntimeError("encrypted model snapshots are no longer accepted")
+    if not allow_encrypted:
+        raise RuntimeError("encrypted model snapshots are no longer accepted")
 
     output = decrypted_snapshot_path(snapshot)
     if decrypted_snapshot_is_current(output, manifest):
@@ -482,16 +483,16 @@ def reject_duplicate_safetensors(king_snapshot: str, challenger_snapshot: str, o
     return meta
 
 
-def materialize_model(repo_or_url: str, digest: str = "", on_phase=None) -> str:
+def materialize_model(repo_or_url: str, digest: str = "", on_phase=None, allow_encrypted: bool = False) -> str:
     """Download or reuse a model snapshot from local path, HF, or Hippius."""
     repo = normalize_model_ref(repo_or_url)
     local = Path(repo)
     if local.exists():
-        return decrypt_model_snapshot(str(local.resolve()), on_phase=on_phase)
+        return decrypt_model_snapshot(str(local.resolve()), on_phase=on_phase, allow_encrypted=allow_encrypted)
 
     target = MODEL_CACHE_DIR / repo.replace("/", "--") / (digest.replace(":", "-") if digest else "latest")
     if target.exists() and snapshot_has_required_files(target):
-        return decrypt_model_snapshot(str(target), on_phase=on_phase)
+        return decrypt_model_snapshot(str(target), on_phase=on_phase, allow_encrypted=allow_encrypted)
     if target.exists():
         shutil.rmtree(target)
 
@@ -555,7 +556,7 @@ def materialize_model(repo_or_url: str, digest: str = "", on_phase=None) -> str:
             path = download_once()
             if not snapshot_has_required_files(Path(path)):
                 raise RuntimeError(f"downloaded snapshot is incomplete: {path}")
-            path = decrypt_model_snapshot(path, on_phase=on_phase)
+            path = decrypt_model_snapshot(path, on_phase=on_phase, allow_encrypted=allow_encrypted)
             break
         except Exception as exc:
             last_exc = exc
@@ -1774,7 +1775,7 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         patch_triton_autotuner_thread_safety()
 
         check_eval_runtime(t0)
-        king_snapshot = materialize_model(req.king_repo, req.king_digest, on_phase=on_phase)
+        king_snapshot = materialize_model(req.king_repo, req.king_digest, on_phase=on_phase, allow_encrypted=True)
         check_eval_runtime(t0)
         challenger_snapshot = materialize_model(req.challenger_repo, req.challenger_digest, on_phase=on_phase)
         check_eval_runtime(t0)
