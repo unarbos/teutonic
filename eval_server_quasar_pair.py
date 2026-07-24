@@ -408,6 +408,7 @@ def decrypt_model_snapshot(snapshot_dir: str, on_phase=None) -> str:
     manifest = load_encryption_manifest(snapshot)
     if manifest is None:
         return str(snapshot)
+    raise RuntimeError("encrypted model snapshots are no longer accepted")
 
     output = decrypted_snapshot_path(snapshot)
     if decrypted_snapshot_is_current(output, manifest):

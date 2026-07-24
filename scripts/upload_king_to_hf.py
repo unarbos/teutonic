@@ -396,6 +396,7 @@ def decrypted_upload_snapshot(snapshot_dir: Path, output_parent: Path | None = N
     manifest = load_encryption_manifest(snapshot_dir)
     if manifest is None:
         return snapshot_dir
+    raise RuntimeError("encrypted model snapshots are no longer accepted for upload")
 
     age = shutil.which("age")
     if age is None:
@@ -560,13 +561,7 @@ def stage_snapshot_for_upload(snapshot: Path, target: Path, dry_run: bool) -> Pa
     target = target.resolve()
     if snapshot == target or target.is_dir():
         return target
-    if dry_run:
-        log.info("[DRY RUN] would move non-king snapshot %s -> %s", snapshot, target)
-        return snapshot
-    target.parent.mkdir(parents=True, exist_ok=True)
-    log.info("moving non-king snapshot to upload staging: %s -> %s", snapshot, target)
-    shutil.move(str(snapshot), str(target))
-    return target
+    return snapshot
 
 
 def delete_snapshot_dir(path: Path, dry_run: bool) -> None:
@@ -833,21 +828,6 @@ def run_once(args: argparse.Namespace) -> dict:
                 break
 
     non_king_results = []
-    if not args.snapshot:
-        non_king_results = upload_non_king_models(
-            record_dir=record_dir,
-            cache_dir=cache_dir,
-            current_king_snapshots=king_snapshot_dirs,
-            hf_namespace=args.hf_namespace,
-            token=token,
-            revision=args.hf_revision,
-            private=args.hf_private,
-            dry_run=args.dry_run,
-            delay_s=args.non_king_upload_delay_s,
-            move_delay_s=args.non_king_move_delay_s,
-            staging_dir=upload_staging_dir,
-            delete_after_upload=not args.keep_non_king_after_upload,
-        )
 
     result = {"king": king_results, "non_king": non_king_results}
     if had_failure:
