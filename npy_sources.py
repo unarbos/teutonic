@@ -344,6 +344,30 @@ def materialize_shard(ref: ShardRef, req: MultiSourceEvalRequest, on_phase=None)
     return base.download_s3_shard(client, req, ref.ref.lstrip("/"), on_phase=on_phase)
 
 
+def can_redownload_shard(ref: ShardRef) -> bool:
+    parsed = urlparse(ref.ref)
+    return parsed.scheme in ("http", "https", "s3") or not Path(ref.ref).exists()
+
+
+def load_materialized_shard_with_retry(
+    ref: ShardRef,
+    req: MultiSourceEvalRequest,
+    rng: np.random.Generator,
+    limit: int | None,
+    on_phase=None,
+) -> tuple[str, list[list[int]]]:
+    local_path = materialize_shard(ref, req, on_phase=on_phase)
+    try:
+        return local_path, base.load_sequences_from_npy_shard(local_path, req, rng, limit)
+    except Exception as exc:
+        if not base.is_truncated_npy_error(exc) or not can_redownload_shard(ref):
+            raise
+        log.warning("cached npy shard is truncated; deleting and redownloading: %s", local_path)
+        Path(local_path).unlink(missing_ok=True)
+        local_path = materialize_shard(ref, req, on_phase=on_phase)
+        return local_path, base.load_sequences_from_npy_shard(local_path, req, rng, limit)
+
+
 def static_source_weights(source_names: list[str]) -> list[float]:
     """Return fixed per-source weights by matching source names against DEFAULT_SOURCE_WEIGHT_MAP."""
     n = len(source_names)
@@ -413,9 +437,6 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
         for shard_idx, shard_ref in enumerate(refs):
             if len(source_sequences) >= target:
                 break
-            local_path = materialize_shard(shard_ref, req, on_phase=on_phase)
-            used_refs.append(shard_ref.ref)
-            used_files.append(local_path)
             remaining = target - len(source_sequences)
             shard_target = shard_targets[shard_idx] if shard_idx < target_shards else remaining
             per_shard = min(shard_target, req.max_seqs_per_shard) if req.max_seqs_per_shard > 0 else shard_target
@@ -423,7 +444,11 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
             # sequences don't leave us short.  The outer taken[:target] still caps
             # the final count; load_sequences_from_npy_shard clamps to shard size.
             load_limit = (int(per_shard * 1.5) + 8) if req.vocab_size > 0 else per_shard
-            loaded = base.load_sequences_from_npy_shard(local_path, req, np_rng, load_limit)
+            local_path, loaded = load_materialized_shard_with_retry(
+                shard_ref, req, np_rng, load_limit, on_phase=on_phase
+            )
+            used_refs.append(shard_ref.ref)
+            used_files.append(local_path)
             if req.vocab_size > 0:
                 valid = [seq for seq in loaded if max(seq) < req.vocab_size]
                 n_dropped = len(loaded) - len(valid)

@@ -1361,6 +1361,10 @@ def download_s3_shard(client, req: EvalRequest, key: str, on_phase=None) -> str:
     return str(target)
 
 
+def is_truncated_npy_error(exc: BaseException) -> bool:
+    return isinstance(exc, ValueError) and "mmap length is greater than file size" in str(exc)
+
+
 def read_npy_header(path: str) -> tuple[int, dict]:
     with open(path, "rb") as f:
         raw = f.read(1024)
@@ -1418,6 +1422,20 @@ def load_sequences_from_npy_shard(
         out.append(arr[start : start + req.seq_len].astype(np.int64, copy=False).tolist())
     _ = data_offset
     return out
+
+
+def load_s3_npy_shard_with_retry(client, req: EvalRequest, key: str, rng: np.random.Generator,
+                                 limit: int | None = None, on_phase=None) -> tuple[str, list[list[int]]]:
+    local_path = download_s3_shard(client, req, key, on_phase=on_phase)
+    try:
+        return local_path, load_sequences_from_npy_shard(local_path, req, rng, limit)
+    except Exception as exc:
+        if not is_truncated_npy_error(exc):
+            raise
+        log.warning("cached npy shard is truncated; deleting and redownloading: %s", local_path)
+        Path(local_path).unlink(missing_ok=True)
+        local_path = download_s3_shard(client, req, key, on_phase=on_phase)
+        return local_path, load_sequences_from_npy_shard(local_path, req, rng, limit)
 
 
 def sample_packed_sequences(files: list[str], tokenizer, req: EvalRequest, *, shuffle_files: bool = True) -> tuple[list[list[int]], dict]:
@@ -1506,11 +1524,13 @@ def sample_packed_sequences_from_s3(tokenizer, req: EvalRequest, on_phase=None) 
     np_rng = np.random.default_rng(seed_value)
 
     for key in keys:
-        local_path = download_s3_shard(client, req, key, on_phase=on_phase)
+        remaining = req.n - len(sequences)
+        local_path, loaded = load_s3_npy_shard_with_retry(
+            client, req, key, np_rng, remaining, on_phase=on_phase
+        )
         used_keys.append(key)
         used_files.append(local_path)
-        remaining = req.n - len(sequences)
-        for seq in load_sequences_from_npy_shard(local_path, req, np_rng, remaining):
+        for seq in loaded:
             sequences.append(seq)
             if len(sequences) >= req.n:
                 digest = hashlib.sha256(np.asarray(sequences, dtype=np.int64).tobytes()).hexdigest()
