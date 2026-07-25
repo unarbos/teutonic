@@ -524,6 +524,19 @@ def _download_code_files(ref: ModelRef, files: set[str]) -> Path:
 
     allow_patterns = sorted(files)
 
+    if ref.digest.startswith("hf:"):
+        from huggingface_hub import snapshot_download as hf_snapshot_download
+
+        hf_snapshot_download(
+            repo_id=ref.repo,
+            revision=ref.digest[3:],
+            local_dir=str(target),
+            allow_patterns=allow_patterns,
+            max_workers=4,
+            token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
+        )
+        return target
+
     from hippius_hub import snapshot_download
 
     snapshot_download(
