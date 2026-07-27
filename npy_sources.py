@@ -26,17 +26,17 @@ DEFAULT_MANIFEST_URLS: list[str] = (
     [u.strip() for u in _raw_manifest_urls.split(",") if u.strip()]
     if _raw_manifest_urls
     else [
-        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
-        "https://us-east-1.hippius.com/teutonic-sn3/dataset/ultradata-math-l3-quasar-10b/manifest.json",
-        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
-        # "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.1-quasar-10b/manifest.json",
-        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.2-quasar-10b/manifest.json",
-        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/nemotron-cc-math-v1-4plus-mind-quasar-10b/manifest.json",
-        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json",
+        "https://s3.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
+        "https://s3.hippius.com/teutonic-sn3/dataset/ultradata-math-l3-quasar-10b/manifest.json",
+        "https://s3.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
+        # "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.1-quasar-10b/manifest.json",
+        "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.2-quasar-10b/manifest.json",
+        "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-cc-math-v1-4plus-mind-quasar-10b/manifest.json",
+        "https://s3.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json",
         "https://s3.hippius.com/teutonic-sn3/dataset/pes2o-v3/manifest.json",
-        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/openmathreasoning-quasar-10b/manifest.json",
-        "https://eu-central-1.hippius.com/teutonic-sn3/dataset/cosmopedia-wikihow-stories-quasar-10b/manifest.json",
-        "https://us-east-1.hippius.com/dendrite-teutonic/dataset/dendrite-synth-run/manifest.json"
+        "https://s3.hippius.com/teutonic-sn3/dataset/openmathreasoning-quasar-10b/manifest.json",
+        "https://s3.hippius.com/teutonic-sn3/dataset/cosmopedia-wikihow-stories-quasar-10b/manifest.json",
+        "https://s3.hippius.com/dendrite-teutonic/dataset/dendrite-synth-run/manifest.json"
     ]
 )
 
@@ -87,9 +87,9 @@ URL_CACHE_DIR = Path(
 MULTI_SOURCE_NAMES = {"multi", "multi_npy", "multi_source_npy", "two_sources"}
 MANIFEST_SHARD_URL_OVERRIDES: dict[tuple[str, str], str] = {
     (
-        "https://us-east-1.hippius.com/tokens-here/dataset/quasar-synth-v1/manifest.json",
+        "https://s3.hippius.com/tokens-here/dataset/quasar-synth-v1/manifest.json",
         "dataset/quasar-synth-run/shards/shard_000000.npy",
-    ): "https://us-east-1.hippius.com/tokens-here/dataset/quasar-synth-v1/shards/shard_000000.npy",
+    ): "https://s3.hippius.com/tokens-here/dataset/quasar-synth-v1/shards/shard_000000.npy",
 }
 
 # ---------------------------------------------------------------------------
