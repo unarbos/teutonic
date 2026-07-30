@@ -347,6 +347,83 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def safetensors_digest_from_file_digests(file_digests: dict[str, str]) -> str:
+    if not file_digests:
+        raise FileNotFoundError("no .safetensors file digests found")
+    h = hashlib.sha256()
+    for name, digest in sorted(file_digests.items()):
+        digest = digest.lower().removeprefix("sha256:")
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError(f"{name}: invalid SHA-256 digest {digest!r}")
+        h.update(name.encode("utf-8"))
+        h.update(b"\0")
+        h.update(bytes.fromhex(digest))
+    return h.hexdigest()
+
+
+def remote_snapshot_safetensors_digest(
+    repo_or_url: str,
+    revision: str = "",
+    on_phase=None,
+) -> str | None:
+    repo = normalize_model_ref(repo_or_url)
+    if not repo or Path(repo).exists():
+        return None
+    if on_phase:
+        on_phase({"phase": "remote_safetensors_check_start", "repo": repo})
+    try:
+        if revision.startswith("hf:") or (
+            repo_or_url.startswith(("http://", "https://")) and "huggingface.co" in repo_or_url
+        ):
+            from huggingface_hub import HfApi
+
+            api = HfApi(token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"))
+            siblings = api.list_repo_tree(
+                repo,
+                recursive=True,
+                expand=True,
+                revision=revision[3:] if revision.startswith("hf:") else (revision or None),
+            )
+        else:
+            import hippius_hub
+
+            from model_store import get_hub_token
+
+            info = hippius_hub.model_info(
+                repo,
+                revision=revision or "main",
+                files_metadata=True,
+                token=get_hub_token(),
+            )
+            siblings = info.siblings
+
+        file_digests = {}
+        for item in siblings:
+            name = getattr(item, "path", "") or getattr(item, "rfilename", "")
+            if "/" in name.strip("/") or not name.endswith(".safetensors"):
+                continue
+            lfs = getattr(item, "lfs", None)
+            digest = getattr(lfs, "sha256", None) or getattr(item, "blob_id", None)
+            if not digest:
+                raise ValueError(f"{name}: hub did not provide a content SHA-256")
+            file_digests[name] = digest
+        digest = safetensors_digest_from_file_digests(file_digests)
+    except Exception as exc:
+        log.warning(
+            "remote safetensors SHA metadata unavailable for %s@%s; falling back to local check: %s",
+            repo,
+            revision or "latest",
+            exc,
+        )
+        if on_phase:
+            on_phase({"phase": "remote_safetensors_check_fallback", "repo": repo})
+        return None
+
+    if on_phase:
+        on_phase({"phase": "remote_safetensors_check_done", "sha256": digest[:16]})
+    return digest
+
+
 def model_decryption_key() -> Path:
     configured = os.environ.get("TEUTONIC_MODEL_DECRYPTION_KEY")
     key = Path(configured).expanduser() if configured else DEFAULT_MODEL_DECRYPTION_KEY
@@ -465,14 +542,9 @@ def snapshot_safetensors_digest(snapshot_dir: str) -> str:
     shard_names = snapshot_safetensor_names(snapshot_dir)
     if not shard_names:
         raise FileNotFoundError(f"no .safetensors files found in {snapshot_dir}")
-    h = hashlib.sha256()
-    for shard_name in shard_names:
-        h.update(shard_name.encode("utf-8"))
-        h.update(b"\0")
-        with (path / shard_name).open("rb") as f:
-            while chunk := f.read(1024 * 1024):
-                h.update(chunk)
-    return h.hexdigest()
+    return safetensors_digest_from_file_digests(
+        {shard_name: sha256_file(path / shard_name) for shard_name in shard_names}
+    )
 
 
 def reject_duplicate_safetensors(king_snapshot: str, challenger_snapshot: str, on_phase=None) -> dict:
@@ -1826,13 +1898,36 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         patch_triton_autotuner_thread_safety()
 
         check_eval_runtime(t0)
+        remote_challenger_digest = remote_snapshot_safetensors_digest(
+            req.challenger_repo,
+            req.challenger_digest,
+            on_phase=on_phase,
+        )
+        if remote_challenger_digest:
+            reject_reused_safetensors(remote_challenger_digest, on_phase=on_phase)
+        check_eval_runtime(t0)
         king_snapshot = materialize_model(req.king_repo, req.king_digest, on_phase=on_phase, allow_encrypted=True)
         check_eval_runtime(t0)
         challenger_snapshot = materialize_model(req.challenger_repo, req.challenger_digest, on_phase=on_phase)
         check_eval_runtime(t0)
         duplicate_meta = reject_duplicate_safetensors(king_snapshot, challenger_snapshot, on_phase=on_phase)
+        local_challenger_digest = duplicate_meta["challenger_safetensors_sha256"]
+        if remote_challenger_digest and remote_challenger_digest != local_challenger_digest:
+            log.warning(
+                "remote/local challenger safetensors SHA mismatch for %s@%s: %s != %s",
+                normalize_model_ref(req.challenger_repo),
+                req.challenger_digest or "latest",
+                remote_challenger_digest,
+                local_challenger_digest,
+            )
+        duplicate_meta["remote_challenger_safetensors_sha256"] = remote_challenger_digest
+        duplicate_meta["remote_challenger_safetensors_sha256_matches_local"] = (
+            remote_challenger_digest == local_challenger_digest
+            if remote_challenger_digest
+            else None
+        )
         duplicate_meta.update(
-            reject_reused_safetensors(duplicate_meta["challenger_safetensors_sha256"], on_phase=on_phase)
+            reject_reused_safetensors(local_challenger_digest, on_phase=on_phase)
         )
         check_eval_runtime(t0)
         king_config, king_artifacts = load_model_config(king_snapshot, req, "king", on_phase=on_phase)
