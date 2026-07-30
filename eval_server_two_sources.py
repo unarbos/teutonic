@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
     base.setup_logging()
     base.MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     base.EVAL_RECORD_DIR.mkdir(parents=True, exist_ok=True)
+    base.COMPLETED_SAFETENSORS_SHA_FILE.touch(exist_ok=True)
     base.SHARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     URL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     base.ensure_model_decryption_key_permissions()
@@ -74,6 +75,10 @@ async def health():
         "cache_dir": str(base.MODEL_CACHE_DIR),
         "shard_cache_dir": str(base.SHARD_CACHE_DIR),
         "url_cache_dir": str(URL_CACHE_DIR),
+        "safetensors_reuse": {
+            "history_file": str(base.COMPLETED_SAFETENSORS_SHA_FILE),
+            "max_completed_evals": base.MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA,
+        },
         "default_sources": [
             {"name": _manifest_source_name(url), "kind": "manifest", "value": url}
             for url in DEFAULT_MANIFEST_URLS
@@ -117,6 +122,7 @@ async def start_eval(req: MultiSourceEvalRequest):
         "progress": {},
         "verdict": None,
         "error": None,
+        "reason": None,
         "request": req.model_dump(),
         "events": Queue(),
         "created_at": time.time(),
@@ -136,6 +142,7 @@ async def get_eval(eval_id: str):
         "progress": rec["progress"],
         "verdict": rec["verdict"],
         "error": rec["error"],
+        "reason": rec["reason"],
     }
 
 
@@ -153,7 +160,10 @@ async def stream_eval(eval_id: str):
             except Empty:
                 await asyncio.sleep(0.5)
                 if rec["state"] in ("completed", "failed") and event_q.empty():
-                    final = rec["verdict"] or {"error": rec.get("error")}
+                    final = rec["verdict"] or {
+                        "error": rec.get("error"),
+                        "reason": rec.get("reason") or rec.get("error"),
+                    }
                     final_type = "verdict" if rec["state"] == "completed" else "error"
                     yield f"data: {json.dumps({'type': final_type, 'data': final})}\n\n"
                     break

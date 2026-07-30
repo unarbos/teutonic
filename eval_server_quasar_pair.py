@@ -58,6 +58,13 @@ eval_log = logging.getLogger("eval_torch")
 
 MODEL_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teutonic/quasar_pair_models"))
 EVAL_RECORD_DIR = Path(os.environ.get("TEUTONIC_EVAL_RECORD_DIR", "/tmp/teutonic/quasar_pair_evals"))
+COMPLETED_SAFETENSORS_SHA_FILE = Path(
+    os.environ.get(
+        "TEUTONIC_COMPLETED_SAFETENSORS_SHA_FILE",
+        _repo_root / "completed_safetensors_sha256.txt",
+    )
+)
+MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA = 3
 SHARD_CACHE_DIR = Path(
     os.environ.get(
         "TEUTONIC_SHARD_CACHE_DIR",
@@ -111,7 +118,7 @@ MODEL_DECRYPTION_KEY_MODE = 0o600
 # Since LCB <= mu_hat, if that upper bound on mu_hat is below the threshold the
 # challenger cannot reach it regardless of the remaining samples.
 EVAL_EARLY_STOP = os.environ.get("EVAL_EARLY_STOP", "1") == "1"
-EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.4"))
+EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.2"))
 EVAL_EARLY_STOP_ADVANTAGE_QUANTILE = float(os.environ.get("EVAL_EARLY_STOP_ADVANTAGE_QUANTILE", "0.95"))
 DEFAULT_MODEL_DOWNLOAD_WORKERS = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_WORKERS", "4"))
 DEFAULT_S3_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRIES", "5"))
@@ -485,6 +492,35 @@ def reject_duplicate_safetensors(king_snapshot: str, challenger_snapshot: str, o
     if on_phase:
         on_phase({"phase": "duplicate_check_done", **{k: v[:16] for k, v in meta.items()}})
     return meta
+
+
+def completed_safetensors_sha_uses(digest: str) -> int:
+    if not COMPLETED_SAFETENSORS_SHA_FILE.exists():
+        return 0
+    with COMPLETED_SAFETENSORS_SHA_FILE.open() as f:
+        return sum(line.strip() == digest for line in f)
+
+
+def reject_reused_safetensors(digest: str, on_phase=None) -> dict:
+    uses = completed_safetensors_sha_uses(digest)
+    if uses >= MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA:
+        raise RuntimeError(
+            f"challenger safetensors SHA-256 {digest} has already completed {uses} evals; "
+            f"maximum allowed is {MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA}"
+        )
+    meta = {
+        "challenger_safetensors_prior_completed_evals": uses,
+        "challenger_safetensors_max_completed_evals": MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA,
+    }
+    if on_phase:
+        on_phase({"phase": "safetensors_reuse_check_done", **meta})
+    return meta
+
+
+def record_completed_safetensors_sha(digest: str) -> None:
+    COMPLETED_SAFETENSORS_SHA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with COMPLETED_SAFETENSORS_SHA_FILE.open("a") as f:
+        f.write(f"{digest}\n")
 
 
 def materialize_model(repo_or_url: str, digest: str = "", on_phase=None, allow_encrypted: bool = False) -> str:
@@ -1795,6 +1831,9 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         challenger_snapshot = materialize_model(req.challenger_repo, req.challenger_digest, on_phase=on_phase)
         check_eval_runtime(t0)
         duplicate_meta = reject_duplicate_safetensors(king_snapshot, challenger_snapshot, on_phase=on_phase)
+        duplicate_meta.update(
+            reject_reused_safetensors(duplicate_meta["challenger_safetensors_sha256"], on_phase=on_phase)
+        )
         check_eval_runtime(t0)
         king_config, king_artifacts = load_model_config(king_snapshot, req, "king", on_phase=on_phase)
         challenger_config, challenger_artifacts = load_model_config(
@@ -1984,6 +2023,7 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                     early_verdict["record_path"] = write_record(
                         eval_id, {"request": req.model_dump(), "verdict": early_verdict}
                     )
+                    record_completed_safetensors_sha(duplicate_meta["challenger_safetensors_sha256"])
                     record["state"] = "completed"
                     record["verdict"] = early_verdict
                     events.put({"type": "verdict", "data": early_verdict})
@@ -2029,14 +2069,17 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                 on_phase=on_phase,
             )
             challenger = None
+        record_completed_safetensors_sha(duplicate_meta["challenger_safetensors_sha256"])
         record["state"] = "completed"
         record["verdict"] = verdict
         events.put({"type": "verdict", "data": verdict})
     except Exception as exc:
         log.exception("eval %s failed", eval_id)
+        reason = str(exc)
         record["state"] = "failed"
-        record["error"] = str(exc)
-        events.put({"type": "error", "data": {"error": str(exc)}})
+        record["error"] = reason
+        record["reason"] = reason
+        events.put({"type": "error", "data": {"error": reason, "reason": reason}})
     finally:
         heartbeat_stop.set()
         if _eval_pool is not None:
@@ -2057,6 +2100,7 @@ async def lifespan(app: FastAPI):
     setup_logging()
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     EVAL_RECORD_DIR.mkdir(parents=True, exist_ok=True)
+    COMPLETED_SAFETENSORS_SHA_FILE.touch(exist_ok=True)
     SHARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     ensure_model_decryption_key_permissions()
     _gpu_ids = parse_gpu_ids()
@@ -2084,6 +2128,10 @@ async def health():
         "cache_dir": str(MODEL_CACHE_DIR),
         "shard_cache_dir": str(SHARD_CACHE_DIR),
         "record_dir": str(EVAL_RECORD_DIR),
+        "safetensors_reuse": {
+            "history_file": str(COMPLETED_SAFETENSORS_SHA_FILE),
+            "max_completed_evals": MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA,
+        },
         "defaults": {
             "batch_size": DEFAULT_BATCH_SIZE,
             "alpha": DEFAULT_ALPHA,
@@ -2129,6 +2177,7 @@ async def start_eval(req: EvalRequest):
         "progress": {},
         "verdict": None,
         "error": None,
+        "reason": None,
         "request": req.model_dump(),
         "events": Queue(),
         "created_at": time.time(),
@@ -2148,6 +2197,7 @@ async def get_eval(eval_id: str):
         "progress": rec["progress"],
         "verdict": rec["verdict"],
         "error": rec["error"],
+        "reason": rec["reason"],
     }
 
 
@@ -2165,7 +2215,10 @@ async def stream_eval(eval_id: str):
             except Empty:
                 await asyncio.sleep(0.5)
                 if rec["state"] in ("completed", "failed") and event_q.empty():
-                    final = rec["verdict"] or {"error": rec.get("error")}
+                    final = rec["verdict"] or {
+                        "error": rec.get("error"),
+                        "reason": rec.get("reason") or rec.get("error"),
+                    }
                     final_type = "verdict" if rec["state"] == "completed" else "error"
                     yield f"data: {json.dumps({'type': final_type, 'data': final})}\n\n"
                     break
