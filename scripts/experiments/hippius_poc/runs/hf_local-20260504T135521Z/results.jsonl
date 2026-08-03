@@ -1,5 +1,0 @@
-{"variant":"baseline_w16","bytes":49746884540,"seconds":137.504,"mbps":345.03,"extra":{"workers":16,"hf_transfer":0}}
-{"variant":"hf_transfer_w4","bytes":49746884540,"seconds":136.686,"mbps":347.09,"extra":{"workers":4,"hf_transfer":1}}
-{"variant":"hf_transfer_w8","bytes":49746884540,"seconds":136.194,"mbps":348.34,"extra":{"workers":8,"hf_transfer":1}}
-{"variant":"hf_transfer_w16","bytes":49746884540,"seconds":136.499,"mbps":347.57,"extra":{"workers":16,"hf_transfer":1}}
-{"variant":"aria2c_x16","bytes":49746884540,"seconds":199.500,"mbps":237.81,"extra":{"connections":16,"split":16,"chunk":"64M"}}

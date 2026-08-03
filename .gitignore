@@ -59,6 +59,4 @@ models/
 tunnel.sh
 /completed_safetensors_sha256.txt
 
-keys/validator_model_decryption.key
-
 scripts/king_benchmark_service/repair-backups

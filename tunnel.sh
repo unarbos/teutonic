@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-# Eval-server SSH tunnel. Targets the 8xB200 pod at 95.133.252.200:10099
-# (Teutonic-LXXX migrated 2026-05-11 after the previous .33:10299 pod went
-# offline). Each B200 has 180 GiB HBM — comfortable for the 153 GiB bf16
-# LXXX king sharded across 4 GPUs (~38 GiB/GPU weights + room for activations).
-# Per-GPU shard budget tuned to 120 GiB (vs B300's 240) for activation headroom.
-# Previous pods: B200 95.133.252.33:10299 (2026-05-08 to 2026-05-11);
-#                B300 95.133.252.44:10310 (LXXX cutover);
-#                Lium B200 95.133.252.200:10100 (Quasar 24B chain).
+# Forward the validator host's port 9000 to the remote 8xB200 eval service.
 exec ssh -N \
   -L 9000:localhost:9000 \
   -p 10099 \

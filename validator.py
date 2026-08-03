@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Teutonic validator — single-file king-of-the-hill evaluator.
+"""Teutonic validator — king-of-the-hill evaluation coordinator.
 
 Polls Bittensor chain for challenger submissions, dispatches evaluations
-to a remote eval server (eval_server.py on a GPU box), manages king
+to the GPU eval service, manages king
 lifecycle on Hippius Hub, persists all state to R2.
 """
 import asyncio
@@ -23,60 +23,37 @@ import boto3
 import httpx
 from botocore.config import Config as BotoConfig
 
-# Make the repo root importable regardless of cwd / how the script is invoked
-# (PM2 runs from the repo root; ad-hoc ssh-and-run from any cwd should also
-# work). chain_config + the vendored archs/ tree sit next to validator.py.
 _repo_root = os.path.dirname(os.path.abspath(__file__))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-# Register the active vendored arch with AutoConfig / AutoModelForCausalLM so
-# downstream transformers dispatch (config inspection, model loading) resolves the
-# king checkpoint without trust_remote_code. Most chains still reject auto_map
-# and *.py uploads; the Quasar competition has a narrow hash-checked exception
-# in validate_challenger_config for the two required local code files. The arch
-# module is selected by chain.toml -> [arch].module.
+# Register the architecture selected by chain.toml without trust_remote_code.
 import chain_config  # noqa: E402
 from model_store import (  # noqa: E402
     DIGEST_RE,
     ModelRef,
     list_remote_files,
-    list_snapshot_files,
     materialize_model,
     parse_reveal_v4,
     parse_reveal_v3,
     snapshot_size,
     _resolve_hub_token,
 )
-from startup_policy import should_seed_king  # noqa: E402
 
 chain_config.load_arch()
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-EVAL_N = int(os.environ.get("TEUTONIC_EVAL_N", "5000"))
-# Public + private split per §6.1. Default 50/50 of EVAL_N. Operators without
-# a populated private holdout pool should set TEUTONIC_EVAL_N_PRIVATE=0; the
-# whole-corpus-overfit defense is then disabled (public-only mode).
-EVAL_N_PRIVATE = int(os.environ.get("TEUTONIC_EVAL_N_PRIVATE", str(EVAL_N // 2)))
-EVAL_N_PUBLIC = int(os.environ.get("TEUTONIC_EVAL_N_PUBLIC", str(EVAL_N - EVAL_N_PRIVATE)))
-EVAL_N_PUBLIC = 25000
+EVAL_N = int(os.environ.get("TEUTONIC_EVAL_N", "25000"))
 EVAL_ALPHA = 0.001
+EVAL_DELTA_THRESHOLD = 0.0015
+EVAL_BOOTSTRAP_SAMPLES = 10_000
 SEQ_LEN = 2048
 POLL_INTERVAL = 30
 WEIGHT_INTERVAL = 300
 NETUID = int(os.environ.get("TEUTONIC_NETUID", "3"))
 MIN_SUBMISSION_BLOCK = int(os.environ.get("TEUTONIC_MIN_SUBMISSION_BLOCK", "8377970"))
 
-# Weight policy: equal-share across the current king plus up to four prior
-# distinct kings that are still registered. If none are available, fall back to
-# BURN_UID (default 0 = subnet-owner burn slot) so emission still leaves the
-# subnet rather than stalling.
 BURN_UID = int(os.environ.get("TEUTONIC_BURN_UID", "0"))
 
-# Watchdogs / anti-stuckness safeguards.
 TICK_WARN_AFTER = int(os.environ.get("TEUTONIC_TICK_WARN_AFTER", "120"))
 TICK_RESTART_AFTER = int(os.environ.get("TEUTONIC_TICK_RESTART_AFTER", "2700"))
 STREAM_IDLE_WARN_AFTER = int(os.environ.get("TEUTONIC_STREAM_IDLE_WARN_AFTER", "180"))
@@ -87,10 +64,7 @@ MAX_CONSECUTIVE_TICK_ERRORS = int(os.environ.get("TEUTONIC_MAX_CONSECUTIVE_TICK_
 NETWORK = os.environ.get("TEUTONIC_NETWORK", "finney")
 SEED_REPO = os.environ.get("TEUTONIC_SEED_REPO", chain_config.SEED_REPO)
 SEED_DIGEST = os.environ.get("TEUTONIC_SEED_DIGEST", getattr(chain_config, "SEED_DIGEST", ""))
-# NOTE: TEUTONIC_FORCE_SEED_KING is intentionally ignored here. PM2 can keep stale env vars across restarts, and honoring this flag would reseed the king on every validator boot. Re-enable only with a one-shot startup policy.
-FORCE_SEED_KING = False
 EVAL_SERVER_URL = os.environ.get("TEUTONIC_EVAL_SERVER", "http://localhost:9000")
-EVAL_DATASET_MODE = os.environ.get("TEUTONIC_EVAL_DATASET_MODE", "")
 WALLET_NAME = os.environ.get("BT_WALLET_NAME", "teutonic")
 WALLET_HOTKEY = os.environ.get("BT_WALLET_HOTKEY", "default")
 
@@ -106,32 +80,16 @@ HIPPIUS_BUCKET = os.environ.get("TEUTONIC_HIPPIUS_BUCKET", "teutonic-sn3")
 HIPPIUS_ACCESS_KEY = os.environ.get("TEUTONIC_HIPPIUS_ACCESS_KEY", "")
 HIPPIUS_SECRET_KEY = os.environ.get("TEUTONIC_HIPPIUS_SECRET_KEY", "")
 
-DS_ENDPOINT = os.environ.get("TEUTONIC_DS_ENDPOINT", "")
-DS_BUCKET = os.environ.get("TEUTONIC_DS_BUCKET", "")
-DS_ACCESS_KEY = os.environ.get("TEUTONIC_DS_ACCESS_KEY", "")
-DS_SECRET_KEY = os.environ.get("TEUTONIC_DS_SECRET_KEY", "")
-
 TMC_API_KEY = os.environ.get("TMC_API_KEY", "")
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
-# Anti-impersonation: miners must include the first N ss58 chars of their
-# coldkey somewhere in their Hippius repo name. Two miners trying to claim the
-# same checkpoint would have to advertise different coldkey tokens, so
-# only the legit owner can submit a repo whose name embeds *their* coldkey.
-# (Also forces miners to host under their own Hippius namespace: the basename or
-# namespace must contain the token; case-insensitive substring check.)
-# The token is first 5 + last 5 chars of the ss58 concatenated - 10 chars total,
-# and the tail chars carry the address checksum so it's hard to guess.
+# Miner repositories must contain a token derived from the owner's coldkey.
 COLDKEY_PREFIX_LEN = int(os.environ.get("TEUTONIC_COLDKEY_PREFIX_LEN", "5"))
 COLDKEY_SUFFIX_LEN = int(os.environ.get("TEUTONIC_COLDKEY_SUFFIX_LEN", "5"))
 
-# Production-safe exception for the Quasar competition. Most chains keep the
-# old policy: no auto_map and no Python files in challenger repos. Quasar
-# Qwen3.5 snapshots are self-contained, so they need two local code files.
-# They are accepted only when they are byte-for-byte identical to the current
-# king's code files and auto_map points exactly at those local classes.
+# Quasar permits only these hash-matched local model files.
 CUSTOM_CODE_POLICY = os.environ.get("TEUTONIC_CUSTOM_CODE_POLICY", "").strip().lower()
 QUASAR_CODE_POLICY_ENV = os.environ.get("TEUTONIC_ALLOW_QUASAR_CUSTOM_CODE", "").lower() in (
     "1",
@@ -147,10 +105,6 @@ QUASAR_EXPECTED_AUTO_MAP = {
     "AutoConfig": "configuration_qwen3_5.QuasarConfig",
     "AutoModelForCausalLM": "modeling_qwen3_5.QuasarForCausalLM",
 }
-
-# Trainability and reparam-symmetry defenses run on the eval server's /eval
-# (validate_challenger_sanity + the on-GPU trainability_probe); see DESIGN.md
-# §7 for the threat model.
 
 TMC_BASE = "https://api.taomarketcap.com/public/v1"
 
@@ -172,31 +126,17 @@ class _EvalInnerError(Exception):
         self.original = original
 
 
-# Bittensor emits one block every 12 seconds. Used to convert per-block
-# emission rates from `meta.emission` into per-hour rates for the dashboard.
 BLOCKS_PER_HOUR = 300
 
-# Dashboard/Hippius writes are non-critical presentation updates. Keep them
-# off the hot path and fail open when the public endpoint is degraded.
 DASHBOARD_FLUSH_MIN_INTERVAL = float(os.environ.get("TEUTONIC_DASHBOARD_FLUSH_MIN_INTERVAL", "5"))
 HIPPIUS_COOLDOWN_SECONDS = int(os.environ.get("TEUTONIC_HIPPIUS_COOLDOWN_SECONDS", "300"))
 S3_CONNECT_TIMEOUT = int(os.environ.get("TEUTONIC_S3_CONNECT_TIMEOUT", "5"))
 S3_READ_TIMEOUT = int(os.environ.get("TEUTONIC_S3_READ_TIMEOUT", "15"))
 S3_MAX_ATTEMPTS = int(os.environ.get("TEUTONIC_S3_MAX_ATTEMPTS", "3"))
 
-# Number of most-recent kings that share equal weight and appear in the Reigns table.
 KING_CHAIN_SIZE = int(os.environ.get("TEUTONIC_KING_CHAIN_SIZE", "5"))
 
-# Transient infra-side failures should not lose queue priority. If an eval
-# fails because the eval server/stream/watchdog got wedged, requeue the same
-# challenge at the front a bounded number of times before falling back to a
-# normal recorded failure.
 MAX_TRANSIENT_EVAL_RETRIES = int(os.environ.get("TEUTONIC_MAX_TRANSIENT_EVAL_RETRIES", "3"))
-
-
-# ---------------------------------------------------------------------------
-# TaoMarketCap
-# ---------------------------------------------------------------------------
 
 async def fetch_tmc_data() -> dict | None:
     """Fetch TAO price and SN3 alpha price from TMC public API."""
@@ -237,10 +177,6 @@ async def fetch_tmc_data() -> dict | None:
     except Exception:
         log.warning("TMC fetch failed", exc_info=True)
         return None
-
-# ---------------------------------------------------------------------------
-# Discord notifications
-# ---------------------------------------------------------------------------
 
 async def notify_new_king(king_info: dict, verdict: dict | None = None):
     """Post a message to Discord when a new king is crowned."""
@@ -300,16 +236,8 @@ async def notify_new_king(king_info: dict, verdict: dict | None = None):
         log.warning("discord notification error", exc_info=True)
 
 
-# ---------------------------------------------------------------------------
-# R2
-# ---------------------------------------------------------------------------
-
 class R2:
     def __init__(self):
-        # Hippius is currently flaky on long-lived reads — bound every S3
-        # call so a single hung connection cannot wedge the validator's
-        # main async loop for minutes. Startup reads several state keys
-        # serially, so keep retry budgets short and operator-tunable.
         _s3_cfg = dict(
             connect_timeout=S3_CONNECT_TIMEOUT,
             read_timeout=S3_READ_TIMEOUT,
@@ -335,24 +263,6 @@ class R2:
             )
         else:
             self._hippius = None
-
-        if DS_ACCESS_KEY and DS_SECRET_KEY and DS_ENDPOINT:
-            self._ds_client = boto3.client(
-                "s3", endpoint_url=DS_ENDPOINT,
-                aws_access_key_id=DS_ACCESS_KEY,
-                aws_secret_access_key=DS_SECRET_KEY,
-                region_name="decentralized",
-                config=BotoConfig(
-                    signature_version="s3v4",
-                    s3={"addressing_style": "path"},
-                    **_s3_cfg,
-                ),
-            )
-            self._ds_bucket = DS_BUCKET
-            log.info("dataset store: %s bucket=%s", DS_ENDPOINT, DS_BUCKET)
-        else:
-            self._ds_client = None
-            self._ds_bucket = None
 
     def _hippius_available(self):
         if not self._hippius:
@@ -383,7 +293,6 @@ class R2:
                     ContentType=content_type,
                     **extra,
                 )
-                # Also mirror successful Hippius dashboard writes to R2.
             except Exception as exc:
                 self._mark_hippius_failure(key, exc)
 
@@ -433,23 +342,6 @@ class R2:
         except Exception as exc:
             log.warning("R2 get failed: %s (%.1fs): %s", key, time.monotonic() - started, exc)
             return None
-
-    def ds_get(self, key):
-        """Read JSON from the dataset store (Hippius), falling back to R2."""
-        if self._ds_client:
-            try:
-                return json.loads(
-                    self._ds_client.get_object(
-                        Bucket=self._ds_bucket, Key=key
-                    )["Body"].read()
-                )
-            except Exception:
-                pass
-        return self.get(key)
-
-# ---------------------------------------------------------------------------
-# Challenger validation
-# ---------------------------------------------------------------------------
 
 _king_config: dict | None = None
 _king_config_key: str | None = None
@@ -933,12 +825,10 @@ def _fetch_tensor_fingerprint(
             def _blob_url(shard_file: str) -> str | None:
                 return f"{base}/{shard_file}"
 
-        # Resolve weight_map if not pre-fetched
         weight_map = _weight_map if _weight_map is not None else _fetch_weight_map(info)
         if not weight_map:
             return None
 
-        # Group sampled tensors by shard
         shard_to_tensors: dict[str, list[str]] = {}
         for tname in tensor_names:
             shard = weight_map.get(tname)
@@ -1043,7 +933,6 @@ def _check_tensor_copy(
         sample_n, len(all_tensors), _COPY_CHECK_SAMPLE_BYTES,
     )
 
-    # King fingerprint reuses the already-fetched weight_map to save a round-trip
     king_fp  = _fetch_tensor_fingerprint(king_info,       sampled, _weight_map=king_weight_map)
     chall_fp = _fetch_tensor_fingerprint(challenger_info, sampled)
 
@@ -1067,7 +956,6 @@ def _check_tensor_copy(
         )
         return None
 
-    # All sampled tensors are byte-identical — apply trusted-timestamp arbitration
     n_chall_shards   = len(challenger_info["safetensor_layers"])
     n_king_shards    = len(king_info["safetensor_layers"])
     challenger_ts    = challenger_info.get("committed_at")
@@ -1168,7 +1056,6 @@ def check_model_copy(
     king_layers = king_info["safetensor_layers"]
 
     if not challenger_layers or len(challenger_layers) != len(king_layers):
-        # Shard counts differ — may still be an identical model re-sharded.
         return _check_tensor_copy(
             challenger_info, king_info, challenger_digest, king_digest,
         )
@@ -1180,7 +1067,6 @@ def check_model_copy(
     if mismatches:
         return None
 
-    # Weights are identical; decide by registry-observed timestamp only.
     n = len(challenger_layers)
     challenger_ts = challenger_info.get("committed_at")
     king_ts = king_info.get("committed_at")
@@ -1251,15 +1137,9 @@ def validate_challenger_config(model_repo: str, challenger_digest: str,
 
     try:
         ref = ModelRef(model_repo, challenger_digest)
-        # config-only fetch: pulls just config.json + tokenizer + index, not the
-        # ~8GB safetensors. The eval server downloads the full snapshot when it
-        # actually loads the model. Without this the validator's local disk
-        # fills after ~50 challengers (Qwen3-4B is 8GB; no eviction logic).
         snapshot = materialize_model(ref, max_workers=4, config_only=True)
         with open(os.path.join(snapshot, "config.json")) as f:
             challenger_cfg = json.load(f)
-        # Snapshot lists only the config-only subset, so use the remote
-        # manifest/file-tree to verify safetensors are actually in the repo.
         repo_files = list_remote_files(ref)
     except Exception as e:
         return f"cannot materialize Hippius model snapshot: {e}"
@@ -1276,10 +1156,6 @@ def validate_challenger_config(model_repo: str, challenger_digest: str,
         "tie_word_embeddings", "rope_theta", "max_position_embeddings",
         "max_seq_len",
     )
-    # Per-key compare: absent-in-king must mean absent-in-challenger too. A
-    # missing key on the king side previously short-circuited the check (so
-    # challengers could declare e.g. rope_scaling=YARN against a king that
-    # had no rope_scaling field), allowing silent arch divergence.
     _SENTINEL = object()
     for key in _generic_lock + chain_config.EXTRA_LOCK_KEYS:
         king_val = king_cfg.get(key, _SENTINEL)
@@ -1322,10 +1198,6 @@ def validate_challenger_config(model_repo: str, challenger_digest: str,
                     f"(check for fp32 weights, duplicated shards, or extra optimizer state)")
 
     return None
-
-# ---------------------------------------------------------------------------
-# Chain
-# ---------------------------------------------------------------------------
 
 import re
 _SAFETENSORS_SHARD_RE = re.compile(r"^model-\d{5}-of-\d{5}\.safetensors$")
@@ -1413,9 +1285,6 @@ def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys):
                         hotkey[:16], block, legacy_king_digest[:19])
             continue
         if author_hotkey != hotkey:
-            # Chain side is the source of truth (commit-reveal keys reveals by
-            # signer). Payload mismatch means the miner stuffed the wrong ss58
-            # in their reveal — log and trust the chain key.
             log.warning("v4 author_hotkey %s mismatches chain key %s; trusting chain",
                         author_hotkey[:16], hotkey[:16])
         new.append({
@@ -1450,7 +1319,6 @@ async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
     if not force and current_block - state.last_weight_block < WEIGHT_INTERVAL:
         return False
 
-    # Collect up to KING_CHAIN_SIZE distinct hotkeys: current king first, then past kings.
     all_king_hks: list[str] = []
     king_hotkey = (state.king or {}).get("hotkey", "")
     if king_hotkey:
@@ -1487,9 +1355,7 @@ async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
         log.exception("failed to set weights")
         return False
     if not resp.success:
-        # bt's internal rate-limit guard returns success=False with no message
-        # when blocks_since_last_update <= weights_rate_limit. Treat as no-op
-        # and advance last_weight_block so we don't hammer every tick.
+        # Bittensor reports rate limiting as an empty failure.
         if not resp.message:
             log.info("set_weights rate-limited (no-op); advancing last_weight_block")
             state.last_weight_block = current_block
@@ -1505,17 +1371,6 @@ async def maybe_set_weights(subtensor, wallet, state, *, force: bool = False,
         log.exception("failed to flush state after weight set")
     return True
 
-
-# TODO: operator must enable Yuma3 liquid alpha for this subnet via the
-# subnet-owner `sudo_set_liquid_alpha_enabled` extrinsic (admin_utils pallet).
-# Validators do not hold this privilege. §9 specifies liquid alpha enabled with
-# default settings — there is nothing for the validator process to do here, but
-# leaving the marker so the deploy checklist surfaces it.
-
-
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
@@ -1670,12 +1525,7 @@ class State:
         if king_hotkey and hotkey == king_hotkey:
             log.info("skipping enqueue: hotkey %s is the current king", hotkey[:16])
             return None
-        # 1-hotkey-1-eval: this is the policy gate. `scan_reveals` already
-        # filters by `seen` at the chain-intake layer; this is the
-        # belt-and-suspenders check for any direct enqueue path. A hotkey
-        # that's already been enqueued (whether the eval succeeded, failed,
-        # or was lost to a validator crash) cannot submit again — the miner
-        # must register a fresh hotkey on subnet.
+        # Each registered hotkey gets one evaluation.
         if hotkey and hotkey in self.seen:
             log.info("skipping enqueue: hotkey %s already used its 1-eval slot "
                      "(must re-register for another shot)", hotkey[:16])
@@ -1708,12 +1558,6 @@ class State:
         entry.pop("reeval", None)
         self.queue.append(entry)
         self.stats["queued"] += 1
-        # Burn the hotkey now (at enqueue, not at verdict). Per policy this
-        # is intentional: one reveal = one shot. If the validator crashes
-        # between enqueue and verdict the eval is lost and the miner must
-        # register a fresh hotkey to retry. Mirroring the burn into
-        # `completed_repos` keeps the per-repo idempotency check effective
-        # in case a hotkey is somehow ever revived (operator override).
         if hotkey:
             self.seen.add(hotkey)
         if repo:
@@ -1773,18 +1617,13 @@ class State:
         self.evaluated_repos.clear()
         prev_repo = self.king.get("model_repo") if self.king else ""
         if displace_in_place:
-            # crown_earlier: the displaced king had identical weights — it is a copy,
-            # not a prior champion.  Don't push it to king_chain; the challenger is
-            # the original author and simply reclaims the same king slot.
-            # Also evict any chain entries that share the displaced OCI digest so a
-            # miner cannot accumulate multiple slots via repeated crown_earlier events.
+            # Identical earlier weights reclaim the existing reign slot.
             displaced_digest = self.king.get("king_digest", "")
             if displaced_digest:
                 self.king_chain = [
                     e for e in self.king_chain
                     if e.get("king_digest") != displaced_digest
                 ]
-            # Inherit the existing reign number — this is the same slot, not a new one.
             reign = self.king.get("reign_number", 0) if self.king else 1
         else:
             reign = self.king.get("reign_number", 0) + (0 if challenge_id == "seed" else 1)
@@ -1805,9 +1644,6 @@ class State:
         self.flush_dashboard(force=True)
 
     def record_verdict(self, verdict, challenger_repo, hotkey):
-        # Probe-rejected verdicts (eval_server.py probe-fail path) lack the
-        # full bootstrap-test fields (avg_*_loss / wall_time_s / timestamp).
-        # Default everything so a partial verdict still records cleanly.
         king_loss = verdict.get("avg_king_loss", 0)
         chall_loss = verdict.get("avg_challenger_loss", 0)
         delta = verdict.get("delta", verdict.get("delta_threshold", 0))
@@ -1932,16 +1768,10 @@ class State:
         hk = entry.get("hotkey") if isinstance(entry, dict) else None
         if not hk:
             return entry
-        # Prefer freshly resolved coldkey; fall back to the persisted value
-        # only if the hotkey has been deregistered out of the metagraph.
         ck = self.coldkey_for(hk) or entry.get("coldkey")
         return {**entry, "uid": self.uid_map.get(hk), "coldkey": ck}
 
     def flush_dashboard(self, *, force: bool = False):
-        # Dashboard flush is presentational: it MUST NEVER raise into the main
-        # eval loop. A Hippius/R2 outage here used to propagate up through
-        # process_challenge and get logged as `eval failed:` even though the
-        # eval verdict had already been recorded. Catch absolutely everything.
         try:
             now_monotonic = _monotonic_now()
             last_flush = getattr(self, "_last_dashboard_flush_monotonic", 0.0)
@@ -1955,7 +1785,6 @@ class State:
             alpha_usd = float(mkt.get("sn3_alpha_price_usd") or 0.0)
             sn3_alpha_per_block = float(mkt.get("sn3_alpha_per_block") or 0.0)
             
-            # Compute equal-share payout across all registered kings in the chain.
             all_king_hks: list[str] = []
             if self.king:
                 all_king_hks.append(self.king.get("hotkey", ""))
@@ -1992,9 +1821,6 @@ class State:
                 king_payout = None
 
 
-            # Build king_chain for dashboard: current king first, then past kings.
-            # Field names follow the schema: model_repo, king_revision (mapped from
-            # internal model_repo / king_digest), plus per-king payout fields.
             def _chain_entry(e, hk):
                 registered = hk in self.uid_map
                 aw = equal_alpha if registered else None
@@ -2112,26 +1938,8 @@ class State:
         self.watchdog["restart_requested"] = False
         self.watchdog["restart_reason"] = ""
 
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 async def _stream_events_with_idle_watchdog(stream, state, cid):
-    # IMPORTANT: bind the iterator ONCE outside the loop. httpx's aiter_lines()
-    # returns iterators that share the underlying stream — calling it more than
-    # once on the same response raises StreamConsumed on subsequent iterators.
-    #
-    # We also must NOT cancel the in-flight __anext__() on a healthcheck
-    # timeout: cancelling httpx's read mid-flight closes the underlying
-    # iterator, so the *next* __anext__() returns StopAsyncIteration and the
-    # validator misreports "eval stream ended without verdict".
-    #
-    # Instead, we keep a single long-lived task per __anext__() call and only
-    # spawn a new one once the previous resolved. asyncio.wait() with a
-    # timeout does NOT cancel pending tasks (unlike wait_for), so the read
-    # task survives across multiple healthcheck windows.
+    # Keep one pending read alive; cancelling it closes httpx's stream.
     line_iter = stream.aiter_lines()
     last_event_monotonic = _monotonic_now()
     warned = False
@@ -2174,28 +1982,9 @@ async def _stream_events_with_idle_watchdog(stream, state, cid):
 
 
 def _is_transient_eval_error(exc: Exception | str) -> tuple[bool, str]:
-    # asyncio.CancelledError fires when the validator itself is shutting down
-    # (SIGINT/SIGTERM from `pm2 restart`, deploys, etc.). The eval is still
-    # running on the eval server, and the miner did nothing wrong, so this
-    # should re-queue rather than record a permanent failure in duel history.
-    # str(CancelledError()) is "" so the marker scan below would mis-classify
-    # it as fatal — short-circuit on type instead.
     if isinstance(exc, asyncio.CancelledError):
         return True, "validator_cancelled"
     text = str(exc).lower()
-    # Eval-server-reported failures are categorically PERMANENT for that model:
-    # the eval-server already gave it a full prefetch budget / GPU window, so
-    # retrying just burns another 30-min budget on the same dead CDN (or the
-    # same OOM, or the same rejected config). Caught by the explicit
-    # "prefetch ... exceeded ... (likely stuck CDN)" string the eval-server
-    # raises, plus any error structured as `eval server error: {...}` coming
-    # via the SSE error event. Genuine infra hiccups (network reset, stream
-    # truncation, CancelledError above) still match the remaining
-    # transient_markers below and are retried as today. Pre-2026-05-13 these
-    # both fell into the "eval server error" wildcard marker and got 3 retry
-    # attempts each — observed live with jenny08311 v5.13 (2026-05-12, ~90
-    # min wasted) and ClarenceDan A5518/A5519 (2026-05-13, ~3 hours wasted
-    # back-to-back).
     if ("stuck cdn" in text) or ("prefetch" in text and "exceeded" in text):
         return False, "prefetch_exhausted"
     if (
@@ -2221,9 +2010,6 @@ def _is_transient_eval_error(exc: Exception | str) -> tuple[bool, str]:
         "streamconsumed",
         "streamclosed",
         "streamerror",
-        # Eval-server SSE stream getting truncated (eval-server restart, tunnel
-        # blip, k8s pod cycle). These are infrastructure and should never go
-        # in the miner's duel-history as a permanent failure.
         "peer closed connection",
         "incomplete chunked",
         "incompleteread",
@@ -2265,8 +2051,6 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         log.info("skipping %s: repo %s already evaluated this cycle", cid, model_repo)
         return
 
-    # Any queued entry that still carries a king digest predates the v4 fork.
-    # Drop it rather than evaluating a payload shape we no longer accept.
     legacy_king_digest = (entry.get("king_digest_at_reveal") or "").strip()
     if legacy_king_digest:
         log.warning("rejecting %s: legacy reveal pinned king %s", cid, legacy_king_digest[:19])
@@ -2278,9 +2062,6 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
 
     expected_ck_token = state.expected_coldkey_token(hotkey)
     if expected_ck_token:
-        # Case-insensitive substring match anywhere in the full repo (so the
-        # miner can put their coldkey token in the Hippius namespace OR the
-        # model basename — whichever they prefer).
         if expected_ck_token.lower() not in model_repo.lower():
             reason = (f"Hippius repo '{model_repo}' must contain miner coldkey token "
                       f"'{expected_ck_token}' (first {COLDKEY_PREFIX_LEN} + last "
@@ -2292,26 +2073,12 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             state.record_failure(entry, "coldkey_required", reason)
             return
     else:
-        # Metagraph hasn't surfaced this hotkey's coldkey yet (fresh
-        # registration, refresh_uid_map staleness). Skip the check and let
-        # the next tick retry — we don't want to penalize miners for our
-        # own metagraph latency.
         log.info("%s: coldkey for %s not in metagraph yet, skipping coldkey check",
                  cid, hotkey[:16])
 
     _ = check_stale  # parameter retained for back-compat; v4 removed stale-parent binding
 
-    # Pin to the OCI digest that the miner committed on-chain. Every reveal
-    # entry MUST have a `model_digest` field; `scan_reveals` rejects everything
-    # else at the chain-intake layer. We still verify the committed digest
-    # exists on Hippius Hub (catches typos / forged commits); a missing digest is
-    # a `digest_not_found`
-    # failure rather than the legacy "fall back to HEAD" behavior.
-    #
-    # NOTE: any in-flight queue entry from before the fork lacks `model_digest`
-    # — those were purged from R2 state at deploy time so they shouldn't
-    # exist; if one slips through we fail it explicitly rather than silently
-    # falling back to a mutable tag (which would re-open the exploit).
+    # Never fall back from the committed immutable digest to a mutable tag.
     challenger_digest = entry.get("model_digest", "").strip()
     if not challenger_digest:
         log.warning("eval %s: legacy queue entry without committed digest "
@@ -2406,7 +2173,6 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
                 "challenger_timestamp_source": copy_result.get("challenger_timestamp_source"),
                 "king_timestamp_source": copy_result.get("king_timestamp_source"),
             }
-            # Increment before set_king (which flushes), matching the normal eval path.
             state.stats["accepted"] += 1
             state.record_verdict(synthetic_verdict, model_repo, hotkey)
             state.set_king(hotkey, model_repo, dethrone_block,
@@ -2440,11 +2206,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         state.record_failure(entry, "config_rejected", rejection)
         return
 
-    # §6.1 + §10: holdout seed material is `block_hash_at_reveal || hotkey`,
-    # so the pinned block_hash MUST be the reveal-commit block's hash (which
-    # an external auditor can fetch from the chain) — NOT the eval-time block,
-    # which is arbitrary minutes/hours later. Use the entry's reveal block;
-    # only fall back to the eval block if scan didn't capture one.
+    # Sampling is bound to the reveal block, not the later evaluation block.
     eval_block = _safe_block(subtensor)
     try:
         eval_block = subtensor.block
@@ -2457,34 +2219,12 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
     except Exception:
         pass
 
-    if EVAL_DATASET_MODE.lower() in {"raw", "raw_hippius", "fineweb", "fineweb_edu"}:
-        state.set_phase("dataset_raw", challenge_id=cid, notes="using raw Hippius dataset")
-        shard_key = "raw:hippius:fineweb-edu"
-    else:
-        state.set_phase("dataset_manifest", challenge_id=cid, notes="fetching dataset manifest")
-        manifest = None
-        manifest_attempts = 4
-        for attempt in range(manifest_attempts):
-            manifest = r2.ds_get("dataset/v2/manifest.json")
-            if not manifest:
-                manifest = r2.get("dataset/v1/manifest.json")
-            if manifest:
-                break
-            if attempt < manifest_attempts - 1:
-                backoff = 2 ** attempt
-                log.warning("manifest fetch failed (attempt %d/%d), retrying in %ds",
-                            attempt + 1, manifest_attempts, backoff)
-                await asyncio.sleep(backoff)
-        if not manifest:
-            log.error("no dataset manifest after %d attempts; re-queuing %s",
-                      manifest_attempts, cid)
-            state.queue.insert(0, entry)
-            state.flush()
-            return
-        n_shards = manifest["total_shards"]
-        seed_mat = f"{block_hash}:{hotkey}".encode()
-        shard_idx = int.from_bytes(hashlib.blake2b(seed_mat, digest_size=8).digest(), "little") % n_shards
-        shard_key = manifest["shards"][shard_idx]["key"]
+    state.set_phase(
+        "dataset_multi_source",
+        challenge_id=cid,
+        notes="eval server selects the configured multi-source sample",
+    )
+    shard_key = "multi_source_npy"
 
     king_repo = state.king.get("model_repo", SEED_REPO)
     king_digest = state.king.get("king_digest", "")
@@ -2520,10 +2260,9 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "shard_key": shard_key,
             "king_digest": king_digest,
             "challenger_digest": challenger_digest,
-            "delta_threshold": 0.0015,
-            "n_public": EVAL_N_PUBLIC,
-            "n_private": EVAL_N_PRIVATE,
-            "n_bootstrap": 10_000,
+            "delta_threshold": EVAL_DELTA_THRESHOLD,
+            "n": EVAL_N,
+            "n_bootstrap": EVAL_BOOTSTRAP_SAMPLES,
             "alpha": EVAL_ALPHA,
             "seq_len": SEQ_LEN,
         }
@@ -2659,8 +2398,6 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
 
 
 async def main():
-    args = parse_args()
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -2684,10 +2421,7 @@ async def main():
     subtensor = bt.Subtensor(network=NETWORK)
     log.info("startup: subtensor connected")
 
-    # §9: commit-reveal weights is the single load-bearing defense against
-    # parallel-validator weight-copying. If SN3 doesn't have CR enabled,
-    # set_weights silently degrades to unencrypted set_mechanism_weights and
-    # the design's trust assumption is gone. Refuse to start.
+    # Refuse to publish unencrypted weights.
     if not subtensor.commit_reveal_enabled(NETUID):
         log.error("commit-reveal NOT enabled on netuid %d. "
                   "Run sudo_set_commit_reveal_weights_enabled from the subnet-owner "
@@ -2701,14 +2435,8 @@ async def main():
     if os.path.exists(html_path):
         with open(html_path, "rb") as f:
             html_bytes = f.read()
-        # Stamp a build id derived from the source bytes so long-lived browser
-        # tabs can detect a deploy and reload themselves (see checkVersion in
-        # website/index.html). The placeholder must be replaced before upload
-        # or no version check ever fires.
         build_id = hashlib.sha256(html_bytes).hexdigest()[:12]
         html_bytes = html_bytes.replace(b"__BUILD_ID__", build_id.encode())
-        # no-cache forces browsers to revalidate every load via ETag, so a
-        # deploy lands on the next refresh instead of after max-age expires.
         r2.put_dashboard_raw(
             "index.html",
             html_bytes,
@@ -2717,19 +2445,10 @@ async def main():
         )
         log.info("uploaded dashboard to Hippius (build=%s)", build_id)
 
-    # Was: if should_seed_king(FORCE_SEED_KING, state.king):
     if not state.king:
         if not SEED_DIGEST:
             log.error("set TEUTONIC_SEED_DIGEST for the initial seed king")
             sys.exit(1)
-        if state.king and FORCE_SEED_KING:
-            log.warning(
-                "TEUTONIC_FORCE_SEED_KING enabled: overriding persisted king %s@%s with seed %s@%s",
-                state.king.get("model_repo", "?"),
-                (state.king.get("king_digest") or "")[:19],
-                SEED_REPO,
-                SEED_DIGEST[:19],
-            )
         seed_ref = ModelRef(SEED_REPO, SEED_DIGEST)
         materialize_model(seed_ref, max_workers=4, config_only=True)
         log.info("seed king %s", seed_ref.immutable_ref)
@@ -2739,7 +2458,6 @@ async def main():
     state.clear_restart_request()
     await maybe_set_weights(subtensor, wallet, state, force=True, reason="startup")
 
-    # Verify eval server is reachable
     try:
         r = httpx.get(f"{EVAL_SERVER_URL}/health", timeout=10)
         r.raise_for_status()
@@ -2777,12 +2495,6 @@ async def main():
             state.set_phase("scan_reveals", notes="polling chain for reveals")
             reveals = scan_reveals(subtensor, NETUID, state.completed_repos, state.seen)
             if reveals:
-                # If any newly-revealed hotkey isn't in the uid_map snapshot we
-                # just refreshed (registration happened *between* refresh and
-                # this scan, or we're fresh out of startup), refresh once more
-                # so the dashboard shows the miner's UID immediately rather
-                # than rendering "--" until the next tick (~5-10 min away when
-                # an eval is running).
                 if any(r["hotkey"] not in state.uid_map for r in reveals):
                     try:
                         state.refresh_uid_map(subtensor, NETUID)
@@ -2799,9 +2511,6 @@ async def main():
                     state.flush_dashboard()
 
             while state.queue:
-                # Per-eval watchdog: reset timer for each queue item so we only
-                # restart on a single stuck/hung eval, not on legitimately processing
-                # a large queue back-to-back.
                 eval_started_monotonic = _monotonic_now()
                 entry = state.queue.pop(0)
                 state.current_eval = {
@@ -2818,42 +2527,17 @@ async def main():
                 state.flush_dashboard()
                 state.flush()
                 state.note_progress(notes=f"starting queue item {entry.get('challenge_id', '?')}")
-                # Distinguish "hard wall-clock kill" (asyncio.wait_for) from any
-                # TimeoutError raised inside process_challenge (e.g. the stream-idle
-                # watchdog), since TimeoutError == asyncio.TimeoutError in py3.11+
-                # and we don't want to confuse a 423s stream-idle event with a
-                # 1800s hard kill.
-                #
-                # CancelledError is special: asyncio.wait_for cancels the inner
-                # task when the timer fires, then re-raises as asyncio.TimeoutError
-                # *iff* the CancelledError propagates up unmodified. Wrapping it
-                # in _EvalInnerError(CancelledError) breaks that path — the outer
-                # `except asyncio.TimeoutError` never fires and we fall through
-                # to the transient-error retry branch (validator_cancelled), which
-                # then burns the full TICK_RESTART_AFTER * MAX_TRANSIENT_EVAL_RETRIES
-                # = 30 min × 3 = 90 min on every wall-clocked eval. Observed live
-                # 2026-05-13 with eval-0479 burning ~2 hours in 4 retries before
-                # being noticed. Re-raise CancelledError directly so
-                # asyncio.wait_for can do its job; SIGTERM cancellations during
-                # `pm2 restart` also ride this path and propagate cleanly out of
-                # the main loop (the entry was already popped from the queue, so
-                # losing it on hard-kill matches the previous behavior anyway —
-                # the prior `validator_cancelled` retry path didn't actually
-                # rescue SIGTERM-cancelled evals because the process exited via
-                # sys.exit(0) in the signal handler before the requeue ran).
+                # Let wait_for receive cancellation directly; wrap only inner errors.
                 async def _bounded_eval():
                     try:
                         await process_challenge(state, r2, entry, subtensor, wallet)
                     except asyncio.CancelledError:
                         raise
                     except BaseException as inner:
-                        # Re-raise inner exceptions wrapped so they don't collide
-                        # with asyncio.wait_for's own TimeoutError sentinel.
                         raise _EvalInnerError(inner) from inner
                 try:
                     await asyncio.wait_for(_bounded_eval(), timeout=TICK_RESTART_AFTER)
                 except asyncio.TimeoutError:
-                    # Hard wall-clock kill from asyncio.wait_for.
                     eval_elapsed = _monotonic_now() - eval_started_monotonic
                     reason = (f"single-eval hard timeout: {entry.get('challenge_id')} "
                               f"exceeded {TICK_RESTART_AFTER}s wall clock "
@@ -2866,8 +2550,6 @@ async def main():
                     state.current_eval = None
                     state.flush_dashboard()
                     state.flush()
-                    # Don't restart -- a single bad model shouldn't kill the validator.
-                    # Continue to next queue item.
                     continue
                 except _EvalInnerError as wrapped:
                     exc = wrapped.original
@@ -2894,9 +2576,6 @@ async def main():
 
                 fresh = scan_reveals(subtensor, NETUID, state.completed_repos, state.seen)
                 if fresh:
-                    # See same comment in tick scan above: refresh uid_map
-                    # eagerly so the dashboard never shows uid="--" for a
-                    # miner that's actually registered on chain right now.
                     if any(r["hotkey"] not in state.uid_map for r in fresh):
                         try:
                             state.refresh_uid_map(subtensor, NETUID)
@@ -2920,15 +2599,6 @@ async def main():
 
             state.current_eval = None
 
-            # Re-eval is permanently disabled. Two layered gates enforce
-            # 1-hotkey-1-eval in scan_reveals:
-            #   1. hotkey -> in `seen`: the primary policy. A miner gets
-            #      exactly one shot per hotkey registration, period.
-            #   2. model_repo -> in `completed_repos`: belt-and-suspenders to
-            #      prevent the "wait until king is weak then re-eval the
-            #      same checkpoint" replay even if a hotkey leaks through.
-            # Miners who want another shot must register a fresh hotkey
-            # on subnet (which costs alpha) and reveal from that new key.
             if not state.queue:
                 log.info("idle: all known reveals processed, waiting for new submissions")
 
@@ -2965,17 +2635,6 @@ async def main():
                 state.flush_dashboard()
 
         await asyncio.sleep(POLL_INTERVAL)
-
-
-def parse_args():
-    import argparse
-    p = argparse.ArgumentParser()
-    # --seen / --no-seen are retained as no-ops for callers that still pass
-    # them. Re-eval is permanently disabled (one eval per model_repo, ever); the
-    # flag has no effect either way.
-    p.add_argument("--seen", action=argparse.BooleanOptionalAction, default=True,
-                   help=argparse.SUPPRESS)
-    return p.parse_args()
 
 
 def main_sync():

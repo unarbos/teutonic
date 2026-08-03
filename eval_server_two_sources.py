@@ -50,7 +50,6 @@ async def lifespan(app: FastAPI):
     base.COMPLETED_SAFETENSORS_SHA_FILE.touch(exist_ok=True)
     base.SHARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     URL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    base.ensure_model_decryption_key_permissions()
     base._gpu_ids = base.parse_gpu_ids()
     log.info(
         "Quasar two-source eval server starting; gpus=%s shard_cache=%s url_cache=%s",
@@ -89,8 +88,6 @@ async def health():
             "alpha": base.DEFAULT_ALPHA,
             "seq_len": base.DEFAULT_SEQ_LEN,
             "n": base.DEFAULT_N,
-            "n_public": base.DEFAULT_N_PUBLIC,
-            "n_private": base.DEFAULT_N_PRIVATE,
             "n_bootstrap": base.DEFAULT_BOOTSTRAP_B,
             "shards_per_source": DEFAULT_SHARDS_PER_SOURCE,
         },
@@ -103,11 +100,6 @@ async def health():
             "enabled": base.EVAL_EARLY_STOP,
             "min_fraction": base.EVAL_EARLY_STOP_MIN_FRACTION,
             "advantage_quantile": base.EVAL_EARLY_STOP_ADVANTAGE_QUANTILE,
-        },
-        "encryption": {
-            "manifest_name": base.MODEL_ENCRYPTION_MANIFEST_NAME,
-            "age_available": base.shutil.which("age") is not None,
-            "private_key_available": base.model_decryption_key_available(),
         },
     }
 

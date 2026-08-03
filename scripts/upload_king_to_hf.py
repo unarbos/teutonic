@@ -31,7 +31,6 @@ import json
 import logging
 import os
 import shutil
-import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -41,8 +40,6 @@ from pathlib import Path
 log = logging.getLogger("upload_king_to_hf")
 
 ROOT = Path(__file__).resolve().parents[1]
-ENCRYPTION_MANIFEST_NAME = "teutonic_encryption.json"
-DEFAULT_MODEL_DECRYPTION_KEY = ROOT / "keys" / "validator_model_decryption.key"
 
 DEFAULT_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teutonic/quasar_pair_models"))
 DEFAULT_RECORD_DIR = Path(os.environ.get("TEUTONIC_EVAL_RECORD_DIR", "/tmp/teutonic/quasar_pair_evals"))
@@ -360,77 +357,6 @@ def upload_to_hf(
     }
 
 
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        while chunk := f.read(1024 * 1024):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def model_decryption_key() -> Path:
-    configured = os.environ.get("TEUTONIC_MODEL_DECRYPTION_KEY")
-    key = Path(configured).expanduser() if configured else DEFAULT_MODEL_DECRYPTION_KEY
-    key = key.resolve()
-    if not key.is_file() or not os.access(key, os.R_OK):
-        raise RuntimeError(
-            "encrypted king snapshot found, but no private key is available; "
-            "set TEUTONIC_MODEL_DECRYPTION_KEY or create keys/validator_model_decryption.key"
-        )
-    return key
-
-
-def load_encryption_manifest(snapshot: Path) -> dict | None:
-    manifest_path = snapshot / ENCRYPTION_MANIFEST_NAME
-    if not manifest_path.exists():
-        return None
-    manifest = json.loads(manifest_path.read_text())
-    if manifest.get("scheme") != "age-x25519":
-        raise RuntimeError(f"unsupported model encryption scheme: {manifest.get('scheme')!r}")
-    if not manifest.get("files"):
-        raise RuntimeError(f"{ENCRYPTION_MANIFEST_NAME} has no encrypted files")
-    return manifest
-
-
-def decrypted_upload_snapshot(snapshot_dir: Path, output_parent: Path | None = None) -> Path:
-    manifest = load_encryption_manifest(snapshot_dir)
-    if manifest is None:
-        return snapshot_dir
-    raise RuntimeError("encrypted model snapshots are no longer accepted for upload")
-
-    age = shutil.which("age")
-    if age is None:
-        raise RuntimeError("encrypted model snapshot found, but `age` is not installed on PATH")
-    identity = model_decryption_key()
-    if output_parent is None:
-        output = snapshot_dir.with_name(snapshot_dir.name + "-decrypted")
-    else:
-        output = output_parent / snapshot_dir.parent.name / f"{snapshot_dir.name}-decrypted"
-    if output.exists():
-        shutil.rmtree(output)
-
-    encrypted = {item["path"]: item for item in manifest["files"]}
-    for src in sorted(p for p in snapshot_dir.rglob("*") if p.is_file()):
-        rel = str(src.relative_to(snapshot_dir)).replace("\\", "/")
-        if rel == ENCRYPTION_MANIFEST_NAME:
-            continue
-        dst = output / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if rel in encrypted:
-            subprocess.run([age, "-d", "-i", str(identity), "-o", str(dst), str(src)], check=True)
-            item = encrypted[rel]
-            if sha256_file(dst) != item.get("plain_sha256"):
-                raise RuntimeError(f"{rel}: plaintext sha256 mismatch after decrypt")
-            if dst.stat().st_size != int(item.get("plain_size", -1)):
-                raise RuntimeError(f"{rel}: plaintext size mismatch after decrypt")
-        elif src.name.endswith(".safetensors"):
-            raise RuntimeError(f"{rel}: .safetensors file is missing from {ENCRYPTION_MANIFEST_NAME}")
-        else:
-            shutil.copy2(src, dst)
-
-    return output
-
-
 def load_marker_set(path: Path) -> set[str]:
     try:
         data = json.loads(path.read_text())
@@ -484,7 +410,6 @@ def upload_king_candidate(
     revision: str,
     private: bool,
     dry_run: bool,
-    staging_dir: Path,
     last_uploaded_file: Path,
     uploaded_markers_file: Path,
     uploaded_markers: set[str],
@@ -495,9 +420,7 @@ def upload_king_candidate(
     log.info("  king_repo   : %s", candidate.repo or "?")
     log.info("  king_digest : %s", candidate.digest or "latest")
 
-    upload_snapshot_dir = decrypted_upload_snapshot(candidate.snapshot, staging_dir / "decrypted")
-    if upload_snapshot_dir != candidate.snapshot:
-        log.info("uploading decrypted king snapshot: %s", upload_snapshot_dir)
+    upload_snapshot_dir = candidate.snapshot
 
     snapshot_str = str(upload_snapshot_dir)
     try:
@@ -632,9 +555,7 @@ def upload_non_king_models(
         if record_mtime > upload_before_mtime:
             continue
 
-        upload_snapshot_dir = decrypted_upload_snapshot(snapshot, staging_dir / "decrypted")
-        if upload_snapshot_dir != snapshot:
-            log.info("uploading decrypted non-king snapshot: %s", upload_snapshot_dir)
+        upload_snapshot_dir = snapshot
 
         result = upload_to_hf(
             snapshot_dir=upload_snapshot_dir,
@@ -651,8 +572,6 @@ def upload_non_king_models(
             save_marker_set(marker_file, uploaded)
         if delete_after_upload:
             delete_snapshot_dir(upload_snapshot_dir, dry_run)
-            if upload_snapshot_dir != snapshot:
-                delete_snapshot_dir(snapshot, dry_run)
 
     return results
 
@@ -746,7 +665,7 @@ def parse_args() -> argparse.Namespace:
         "--upload-staging-dir",
         type=Path,
         default=DEFAULT_UPLOAD_STAGING_DIR,
-        help="Directory for staged/decrypted snapshots before HF upload",
+        help="Directory for staged snapshots before HF upload",
     )
     parser.add_argument(
         "--keep-non-king-after-upload",
@@ -810,7 +729,6 @@ def run_once(args: argparse.Namespace) -> dict:
                 revision=args.hf_revision,
                 private=args.hf_private,
                 dry_run=args.dry_run,
-                staging_dir=upload_staging_dir,
                 last_uploaded_file=last_uploaded_file,
                 uploaded_markers_file=uploaded_markers_file,
                 uploaded_markers=uploaded_king_markers,

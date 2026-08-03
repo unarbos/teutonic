@@ -12,7 +12,7 @@ on a single 64-core box, multi-TB on disk, and nontrivial Hippius write
 credentials. This script is the operator handoff so a separate compute
 job can run it during Phase 3 of the runbook.
 
-Usage (Phase 3 of LXXX_RUNBOOK):
+Usage:
     python scripts/tokenize_qwen.py \
         --tokenizer Qwen/Qwen3-30B-A3B \
         --source uonlp/CulturaX \

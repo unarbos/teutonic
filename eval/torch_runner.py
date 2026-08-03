@@ -5,10 +5,10 @@ Loads model replicas across all available GPUs, fetches sequences from R2
 with prefetch overlap, and computes cross-entropy loss via chunked lm_head
 forward passes to minimize VRAM. Accepts the challenger only when the
 bootstrapped lower confidence bound on the per-token log-loss advantage
-exceeds the fixed effect floor `EVAL_DELTA` (default 0.0025 nats/token).
+exceeds the fixed effect floor `EVAL_DELTA` (default 0.0015 nats/token).
 
 Usage:
-    python eval_torch.py \
+    python -m eval.torch_runner \
         --king unconst/Teutonic-I \
         --challenger unconst/Teutonic-I \
         --n 100 --batch-size 64 --seq-len 2048 --gpus 0,1,2,3,4,5,6,7
@@ -50,9 +50,8 @@ from botocore.config import Config as BotoConfig
 from collections import defaultdict
 from transformers import AutoModelForCausalLM
 
-# eval_server runs us with cwd=/home/const/workspace/teutonic, so the workspace
-# root is not on sys.path by default. Add it so `import teutonic.quasar`
-# resolves the vendored arch.
+# Direct module execution may not put the workspace root on sys.path. Add it so
+# the configured architecture can resolve its vendored modules.
 _workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _workspace_root not in sys.path:
     sys.path.insert(0, _workspace_root)
@@ -1380,11 +1379,9 @@ def compute_paired_multi_gpu(king_eval, chall_eval, token_batches):
 # Holdout sampling + paired bootstrap
 # ---------------------------------------------------------------------------
 
-# CLI fallback. Production runs eval_server.py, which gets `delta_threshold`
-# per-request from the validator (computed as `c · king_loss_ema`). Kept so
-# `python -m eval.torch_runner` and scripts/smoke_eval.py still work with a
-# sensible default.
-EVAL_DELTA = float(os.environ.get("EVAL_DELTA", "0.0025"))
+# Standalone CLI default; the active service receives `delta_threshold` in each
+# request from the validator.
+EVAL_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 
 
 def is_accepted(lcb: float, delta_threshold: float) -> bool:
@@ -1465,7 +1462,6 @@ def sample_public_holdout(r2, shard_key, public_seed: bytes,
 
 def run_paired_eval(king_eval, challenger_eval,
                     holdout_seqs: torch.Tensor,
-                    public_count: int,
                     boot_seed: bytes,
                     eval_alpha: float,
                     delta_threshold: float,
@@ -1474,23 +1470,21 @@ def run_paired_eval(king_eval, challenger_eval,
                     on_progress=None) -> dict:
     """Paired CE duel on a pre-prepared holdout tensor.
 
-    holdout_seqs: int64 [n_total, seq_len]; first `public_count` rows are the
-    public component, the rest are private. Bootstrap LCB is computed over all
-    `n_total` rows; per-component means are diagnostic.
+    ``holdout_seqs`` is an int64 tensor shaped ``[n_total, seq_len]``.
+    Bootstrap LCB is computed over all sampled public sequences.
     """
     if holdout_seqs.dim() != 2:
         raise ValueError(f"holdout_seqs must be 2D, got shape {tuple(holdout_seqs.shape)}")
     n_total = holdout_seqs.shape[0]
-    if not (0 <= public_count <= n_total):
-        raise ValueError(f"public_count={public_count} out of range [0, {n_total}]")
+    if n_total == 0:
+        raise ValueError("holdout_seqs must contain at least one sequence")
 
-    n_private = n_total - public_count
     same_evaluator = king_eval is challenger_eval
     sequences = holdout_seqs.tolist()
     batches = [sequences[i:i + batch_size] for i in range(0, n_total, batch_size)]
 
-    log.info("paired eval: n_total=%d (public=%d private=%d) alpha=%s delta=%.6f B=%d",
-             n_total, public_count, n_private, eval_alpha, delta_threshold, n_bootstrap)
+    log.info("paired eval: n_total=%d alpha=%s delta=%.6f B=%d",
+             n_total, eval_alpha, delta_threshold, n_bootstrap)
 
     king_losses_all: list[float] = []
     chall_losses_all: list[float] = []
@@ -1533,8 +1527,6 @@ def run_paired_eval(king_eval, challenger_eval,
     chall_arr = np.asarray(chall_losses_all)
     d = king_arr - chall_arr
     mu_hat = float(d.mean())
-    mu_hat_public = float(d[:public_count].mean()) if public_count else 0.0
-    mu_hat_private = float(d[public_count:].mean()) if n_private else 0.0
 
     boot_rng = np.random.Generator(np.random.PCG64(int.from_bytes(boot_seed, "little")))
     boot_means = np.empty(n_bootstrap)
@@ -1545,23 +1537,19 @@ def run_paired_eval(king_eval, challenger_eval,
     lcb = float(np.quantile(boot_means, eval_alpha))
 
     accepted = is_accepted(lcb, delta_threshold)
-    log.info("paired result: mu_hat=%.6f (pub=%.6f priv=%.6f) lcb=%.6f delta=%.6f accepted=%s",
-             mu_hat, mu_hat_public, mu_hat_private, lcb, delta_threshold, accepted)
+    log.info("paired result: mu_hat=%.6f lcb=%.6f delta=%.6f accepted=%s",
+             mu_hat, lcb, delta_threshold, accepted)
 
     return {
         "accepted": accepted,
         "verdict": "challenger" if accepted else "king",
         "mu_hat": round(mu_hat, 6),
-        "mu_hat_public": round(mu_hat_public, 6),
-        "mu_hat_private": round(mu_hat_private, 6),
         "lcb": round(lcb, 6),
         "delta": delta_threshold,
         "delta_threshold": delta_threshold,
         "alpha": eval_alpha,
         "n_bootstrap": n_bootstrap,
         "n_sequences": n_total,
-        "n_public_seqs": public_count,
-        "n_private_seqs": n_private,
         "avg_king_loss": round(king_sum / total_done, 6) if total_done else 0.0,
         "avg_challenger_loss": round(chall_sum / total_done, 6) if total_done else 0.0,
         "wall_time_s": round(elapsed, 1),
@@ -1574,13 +1562,9 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
                        alpha, seq_len, batch_size, seed_str,
                        n_bootstrap=10000, on_progress=None,
                        delta_threshold: float | None = None):
-    """Public-only paired bootstrap test (CLI / smoke compat).
+    """Run the retained standalone public-corpus paired bootstrap test.
 
-    Used by main() and scripts/smoke_eval.py. The eval-server path uses
-    sample_public_holdout + sample_private_pool + run_paired_eval directly
-    so it can layer the private holdout and surface audit digests.
-
-    `delta_threshold` defaults to EVAL_DELTA for backward compat.
+    ``delta_threshold`` defaults to ``EVAL_DELTA`` for CLI compatibility.
     """
     delta = EVAL_DELTA if delta_threshold is None else float(delta_threshold)
     public_seed = hashlib.blake2b(seed_str.encode(), digest_size=8).digest()
@@ -1592,14 +1576,11 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
     )
     verdict = run_paired_eval(
         king_eval, challenger_eval,
-        holdout, holdout.shape[0],
+        holdout,
         boot_seed=boot_seed, eval_alpha=alpha,
         delta_threshold=delta, n_bootstrap=n_bootstrap,
         batch_size=batch_size, on_progress=on_progress,
     )
-    # Legacy field names that smoke_eval / main() print.
-    verdict["delta"] = delta
-    verdict["N"] = verdict["n_sequences"]
     verdict["public_indices_digest"] = indices_digest
     if raw_meta is not None:
         verdict["dataset"] = raw_meta

@@ -41,7 +41,9 @@ packages = ["archs", "eval"]
 only-include = [
     "validator.py",
     "miner.py",
-    "eval_server.py",
+    "eval_server_quasar_pair.py",
+    "eval_server_two_sources.py",
+    "npy_sources.py",
     "model_store.py",
     "chain_config.py",
     "chain.toml",

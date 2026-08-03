@@ -6,9 +6,9 @@
 module.exports = {
   apps: [{
     name: "teutonic-eval-quasar",
-    script: "/root/start_eval_quasar.sh",
+    script: "./start_eval_quasar.sh",
     interpreter: "/bin/bash",
-    cwd: "/root",
+    cwd: "/root/teutonic",
     exec_mode: "fork",
     autorestart: true,
     restart_delay: 5000,
