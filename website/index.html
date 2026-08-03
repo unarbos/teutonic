@@ -1165,8 +1165,7 @@ var ERROR_MESSAGES = {
                 return "Model weight shapes don't match the expected architecture. " +
                     "Verify your safetensors match your config.json dimensions.";
             if (detail.indexOf("eval server") !== -1)
-                return "The evaluation server encountered an internal error. " +
-                    "This is likely transient -- your model will be retried.";
+                return "The evaluation server reported: " + detail;
             if (detail.indexOf("stream ended without verdict") !== -1)
                 return "The evaluation was interrupted before completing. " +
                     "This is likely transient -- your model will be retried.";
@@ -1179,17 +1178,41 @@ function shortSourceName(n) {
     return n.replace(/-quasar-\d+b$/i, "").replace(/-retok$/, "");
 }
 function modelRepo(obj) { return (obj && (obj.model_repo || obj.challenger_repo)) || ""; }
-function modelDigest(obj) { return (obj && (obj.model_digest || obj.king_digest || obj.challenger_digest)) || ""; }
+function modelDigest(obj) { return (obj && (obj.model_digest || obj.king_digest || obj.challenger_digest || obj.digest || obj.revision)) || ""; }
 function shortDigest(d) { return d ? d.slice(0, 19) : ""; }
-function hubUrl(repo) {
+function hubUrl(repo, digest) {
     if (!repo) return "#";
+    if (String(repo).indexOf("http://") === 0 || String(repo).indexOf("https://") === 0) return repo;
     var parts = repo.split("/");
-    if (parts.length < 2) return "https://hub.hippius.com/models";
-    return "https://hub.hippius.com/models/" + parts[0] + "/" + parts.slice(1).join("/");
+    if (parts.length < 2) return digest && String(digest).indexOf("hf:") === 0 ? "https://huggingface.co" : "https://hub.hippius.com/models";
+    var path = parts[0] + "/" + parts.slice(1).join("/");
+    return digest && String(digest).indexOf("hf:") === 0 ? "https://huggingface.co/" + path : "https://hub.hippius.com/models/" + path;
 }
 function modelLink(repo, digest, label) {
     if (!repo) return label || "--";
-    return '<a href="' + hubUrl(repo) + '" target="_blank" style="color:var(--ink)">' + (label || repo) + '</a>';
+    return '<a href="' + hubUrl(repo, digest) + '" target="_blank" style="color:var(--ink)">' + (label || repo) + '</a>';
+}
+function modelDigestLookup(d) {
+    var byRepo = {};
+    var byOwner = {};
+    [d && d.king].concat(d && d.history || [], d && d.queue || []).forEach(function(e) {
+        var repo = modelRepo(e);
+        var digest = modelDigest(e);
+        if (!repo || !digest) return;
+        if (!byRepo[repo]) byRepo[repo] = digest;
+        var owner = repo.split("/")[0];
+        var source = String(digest).indexOf("hf:") === 0 ? "hf:" : (String(digest).indexOf("sha256:") === 0 ? "sha256:" : "");
+        if (!owner || !source) return;
+        if (!byOwner[owner]) byOwner[owner] = source;
+        else if (byOwner[owner] !== source) byOwner[owner] = "";
+    });
+    return { byRepo: byRepo, byOwner: byOwner };
+}
+function modelDigestFor(repo, obj, lookup) {
+    var digest = modelDigest(obj) || (lookup && lookup.byRepo && lookup.byRepo[repo]);
+    if (digest || !repo) return digest || "";
+    var owner = repo.split("/")[0];
+    return (lookup && lookup.byOwner && lookup.byOwner[owner]) || "";
 }
 
 function esc(s) {
@@ -1719,34 +1742,27 @@ function render(d) {
     var genesisDigest = chain.seed_digest || "";
     var genesisLink = document.getElementById("genesis-link");
     if (genesisLink) {
-        genesisLink.href = hubUrl(genesisRepo);
+        genesisLink.href = hubUrl(genesisRepo, genesisDigest);
         genesisLink.textContent = genesisRepo;
     }
     var genesisRevEl = document.getElementById("genesis-rev");
     if (genesisRevEl) {
         if (genesisDigest) {
-            genesisRevEl.innerHTML = '@ <a href="' + hubUrl(genesisRepo) + '" target="_blank" style="color:var(--ink);opacity:0.6">' + shortDigest(genesisDigest) + '</a>';
+            genesisRevEl.innerHTML = '@ <a href="' + hubUrl(genesisRepo, genesisDigest) + '" target="_blank" style="color:var(--ink);opacity:0.6">' + shortDigest(genesisDigest) + '</a>';
         } else {
             genesisRevEl.textContent = "";
         }
     }
 
     var king = d.king || {};
-    var hist_all = d.history || [];
-    var topModel = null;
-    for (var ti = 0; ti < hist_all.length; ti++) {
-        if (hist_all[ti].accepted && hist_all[ti].challenger_repo) {
-            topModel = hist_all[ti]; break;
-        }
-    }
-    var kingRepo = topModel ? modelRepo(topModel) : (king.model_repo || "--");
-    var kingDigest = topModel ? modelDigest(topModel) : (king.king_digest || king.model_digest || "");
+    var kingRepo = king.model_repo || "--";
+    var kingDigest = king.king_digest || king.model_digest || "";
     var kingLinkTop = document.getElementById("king-link-top");
-    kingLinkTop.href = hubUrl(kingRepo);
+    kingLinkTop.href = hubUrl(kingRepo, kingDigest);
     kingLinkTop.textContent = kingRepo;
     var kingRevEl = document.getElementById("king-rev");
     if (kingDigest) {
-        kingRevEl.innerHTML = '@ <a href="' + hubUrl(kingRepo) + '" target="_blank" style="color:var(--ink);opacity:0.6">' + shortDigest(kingDigest) + '</a>';
+        kingRevEl.innerHTML = '@ <a href="' + hubUrl(kingRepo, kingDigest) + '" target="_blank" style="color:var(--ink);opacity:0.6">' + shortDigest(kingDigest) + '</a>';
     } else {
         kingRevEl.textContent = "";
     }
@@ -1757,7 +1773,10 @@ function render(d) {
     var reignEl = document.getElementById("king-reign");
     reignEl.textContent = king.reign_number != null ? "REIGN #" + king.reign_number + (king.crowned_at ? " \u2014 " + king.crowned_at.slice(0, 16) + "Z" : "") : "";
 
-    var hist = (d.history || []).slice().reverse();
+    var repoDigests = modelDigestLookup(d);
+    var hist = (d.history || []).slice().sort(function(a, b) {
+        return (parseBenchmarkTime(a.timestamp) || 0) - (parseBenchmarkTime(b.timestamp) || 0);
+    });
     var ev = d.current_eval;
 
     // --- Chart (king + challenger, perplexity or loss) ---
@@ -1983,7 +2002,7 @@ function render(d) {
         duelSec.classList.remove("duel-idle");
         var duelName = modelRepo(ev) || short(ev.hotkey, 12);
         if (modelRepo(ev)) {
-            duelLabel.innerHTML = modelLink(modelRepo(ev), modelDigest(ev), duelName);
+            duelLabel.innerHTML = modelLink(modelRepo(ev), modelDigestFor(modelRepo(ev), ev, repoDigests), duelName);
         } else {
             duelLabel.textContent = duelName;
         }
@@ -2014,7 +2033,7 @@ function render(d) {
             duelSec.classList.remove("duel-idle");
             var nextRepo = q[0].model_repo || "--";
             if (q[0].model_repo) {
-                duelLabel.innerHTML = modelLink(q[0].model_repo, q[0].model_digest, nextRepo);
+                duelLabel.innerHTML = modelLink(q[0].model_repo, modelDigestFor(q[0].model_repo, q[0], repoDigests), nextRepo);
             } else {
                 duelLabel.textContent = nextRepo;
             }
@@ -2032,10 +2051,16 @@ function render(d) {
 
     // --- King (most-recent winning challenger summary) ---
     var lwEl = document.getElementById("last-winner");
-    var winner = null;
-    for (var i = 0; i < (d.history || []).length; i++) {
-        if (d.history[i].accepted) { winner = d.history[i]; break; }
-    }
+    var winner = king.model_repo ? {
+        challenger_repo: king.model_repo,
+        challenger_digest: king.king_digest || king.model_digest,
+        mu_hat: king.mu_hat || 0,
+        lcb: king.lcb || 0,
+        delta: king.delta || 0,
+        avg_king_loss: king.avg_king_loss || 0,
+        avg_challenger_loss: king.avg_challenger_loss || 0,
+        wall_time_s: king.wall_time_s
+    } : null;
     if (winner) {
         var repo = modelRepo(winner) || "--";
         var link = modelRepo(winner) ? modelLink(modelRepo(winner), modelDigest(winner), repo) : repo;
@@ -2067,7 +2092,7 @@ function render(d) {
             var alphaVal = e.alpha_per_hour != null ? e.alpha_per_hour : w.alpha_per_hour;
             var usdVal = e.usd_per_hour != null ? e.usd_per_hour : w.usd_per_hour;
             var repo = e.model_repo || "--";
-            var repoLink = e.model_repo ? modelLink(e.model_repo, e.king_digest || e.model_digest, repo) : repo;
+            var repoLink = e.model_repo ? modelLink(e.model_repo, modelDigestFor(e.model_repo, e, repoDigests), repo) : repo;
             var hkLink = hotkeyCell(e.hotkey, e.coldkey);
             var weightPct = (weightVal != null) ? (weightVal * 100).toFixed(1) + "%" : "--";
             var alphaHr = (alphaVal != null) ? alphaVal.toFixed(3) : "--";
@@ -2095,7 +2120,7 @@ function render(d) {
     } else {
         qEl.innerHTML = q.map(function(e) {
             var repo = e.model_repo || "--";
-            var repoLink = e.model_repo ? modelLink(e.model_repo, e.king_digest || e.model_digest, repo) : repo;
+            var repoLink = e.model_repo ? modelLink(e.model_repo, modelDigestFor(e.model_repo, e, repoDigests), repo) : repo;
             var uid = e.uid != null ? e.uid : "--";
             return '<tr>' +
                 '<td>' + uid + '</td>' +
@@ -2153,7 +2178,9 @@ function render(d) {
 
     // --- History (duel results) ---
     var hb = document.getElementById("hist");
-    var history = d.history || [];
+    var history = (d.history || []).slice().sort(function(a, b) {
+        return (parseBenchmarkTime(b.timestamp) || 0) - (parseBenchmarkTime(a.timestamp) || 0);
+    });
     var historyErrorCount = history.filter(function(h) { return h.verdict === "error"; }).length;
     var historyErrorsToggle = document.getElementById("history-errors-toggle");
     if (historyErrorsToggle) historyErrorsToggle.textContent = _historyShowErrors ? "Hide Errors" : "Show Errors";
@@ -2185,7 +2212,19 @@ function render(d) {
                 var label = errInfo ? errInfo.title.toUpperCase() : "ERROR";
                 verdictCell = '<td title="' + tip + '" style="color:#c22;cursor:help">' + label + '</td>';
             } else {
-                verdictCell = '<td>' + (h.accepted ? "CHALLENGER" : "KING") + '</td>';
+                if (h.accepted) {
+                    var challengerTip = h.verdict === "crown_earlier_commit"
+                        ? "Crowned as the original model without a duel: identical weights and an earlier trusted registry push time (challenger " +
+                            (h.challenger_committed_at || "unknown") + "; king " + (h.king_committed_at || "unknown") + ")."
+                        : "Crowned after paired evaluation: LCB " + Number(h.lcb || 0).toFixed(6) +
+                            " > threshold " + Number(h.delta || 0).toFixed(6) +
+                            "; mean loss advantage (mu_hat) " + Number(h.mu_hat || 0).toFixed(6) +
+                            "; challenger loss " + cl.toFixed(4) + " vs king loss " + kl.toFixed(4) +
+                            (h.wall_time_s ? "; completed in " + Number(h.wall_time_s).toFixed(0) + "s." : ".");
+                    verdictCell = '<td title="' + esc(challengerTip) + '" style="cursor:help">CHALLENGER</td>';
+                } else {
+                    verdictCell = '<td>KING</td>';
+                }
             }
 
             var ago = timeAgo(h.timestamp);

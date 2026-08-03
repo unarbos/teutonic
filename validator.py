@@ -260,7 +260,15 @@ async def notify_new_king(king_info: dict, verdict: dict | None = None):
         f"**Hotkey:** `{hotkey[:16]}...`",
         f"**Reign:** #{reign}",
     ]
-    if verdict:
+    if verdict and verdict.get("verdict") == "crown_earlier_commit":
+        chall_ts  = verdict.get("challenger_committed_at") or "?"
+        king_ts   = verdict.get("king_committed_at") or "?"
+        chall_src = verdict.get("challenger_timestamp_source") or "?"
+        king_src  = verdict.get("king_timestamp_source") or "?"
+        lines.append(f"**Method:** identical weights — earlier upload displaced copy (no eval)")
+        lines.append(f"**Challenger upload:** `{chall_ts}` via `{chall_src}`")
+        lines.append(f"**King upload:** `{king_ts}` via `{king_src}`")
+    elif verdict:
         mu = verdict.get("mu_hat", 0)
         king_loss = verdict.get("avg_king_loss", 0)
         chall_loss = verdict.get("avg_challenger_loss", 0)
@@ -623,6 +631,10 @@ def validate_custom_code_policy(
     return None
 
 
+_COPY_CHECK_SAMPLE_N     = int(os.environ.get("TEUTONIC_COPY_CHECK_SAMPLE_N", "12"))
+_COPY_CHECK_SAMPLE_BYTES = int(os.environ.get("TEUTONIC_COPY_CHECK_SAMPLE_BYTES", "65536"))
+
+
 def _parse_registry_timestamp(ts: str | None):
     if not ts:
         return None
@@ -699,7 +711,13 @@ def _fetch_hf_model_info(repo_id: str, hf_digest: str) -> dict | None:
         api = HfApi(token=token)
         revision = hf_digest[3:]
         siblings = list(api.list_repo_tree(repo_id, recursive=True, expand=True, revision=revision))
-        return _copy_info_from_siblings(siblings, [])
+        result = _copy_info_from_siblings(siblings, [])
+        result.update({
+            "_hf_repo": repo_id,
+            "_hf_revision": revision,
+            "_hf_token": token,
+        })
+        return result
     except Exception:
         log.debug("could not fetch HF info for %s@%s (copy check skipped)",
                   repo_id, hf_digest[:19], exc_info=True)
@@ -781,10 +799,13 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
         manifest = resp.json()
 
         safetensor_layers: dict[str, str] = {}
+        index_json_digest: str | None = None
         for layer in manifest.get("layers", []):
             title = layer.get("annotations", {}).get("org.opencontainers.image.title", "")
             if title.endswith(".safetensors") and "digest" in layer:
                 safetensor_layers[title] = _normal_blob_digest(layer["digest"])
+            elif title == "model.safetensors.index.json" and "digest" in layer:
+                index_json_digest = layer["digest"]  # full "sha256:..." form for blob URL
 
         artifact = None
         auth_header = resolve_auth_header(raw_token)
@@ -812,11 +833,294 @@ def _fetch_model_oci_info(repo_id: str, oci_digest: str) -> dict | None:
             "safetensor_layers": safetensor_layers,
             "committed_at": committed_at,
             "timestamp_source": timestamp_source,
+            "index_json_digest": index_json_digest,
+            "_registry": registry,
+            "_oci_repo": oci_repo,
+            "_oci_token": oci_token,
         }
     except Exception:
         log.debug("could not fetch OCI info for %s@%s (copy check skipped)",
                   repo_id, oci_digest[:19], exc_info=True)
         return _fetch_hippius_model_info(repo_id, oci_digest)
+
+
+def _fetch_weight_map(info: dict) -> dict[str, str] | None:
+    """Return {tensor_name: shard_file} from model.safetensors.index.json.
+
+    Works for both Hippius (OCI blob) and HuggingFace (resolve URL).
+    """
+    try:
+        if "_registry" in info:
+            idx_digest = info.get("index_json_digest")
+            if not idx_digest:
+                return None
+            r = httpx.get(
+                f"{info['_registry']}/v2/{info['_oci_repo']}/blobs/{idx_digest}",
+                headers={"Authorization": f"Bearer {info['_oci_token']}"},
+                timeout=30.0,
+                follow_redirects=True,
+            )
+        elif "_hf_repo" in info:
+            repo     = info["_hf_repo"]
+            revision = info["_hf_revision"]
+            token    = info.get("_hf_token")
+            hdrs     = {"Authorization": f"Bearer {token}"} if token else {}
+            r = httpx.get(
+                f"https://huggingface.co/{repo}/resolve/{revision}/model.safetensors.index.json",
+                headers=hdrs, timeout=30.0, follow_redirects=True,
+            )
+        else:
+            return None
+        if r.status_code != 200:
+            return None
+        return r.json().get("weight_map", {})
+    except Exception:
+        log.debug("_fetch_weight_map failed", exc_info=True)
+        return None
+
+
+def _fetch_tensor_fingerprint(
+    info: dict,
+    tensor_names: list[str],
+    sample_bytes: int = _COPY_CHECK_SAMPLE_BYTES,
+    *,
+    _weight_map: dict[str, str] | None = None,
+) -> dict[str, str] | None:
+    """Download `sample_bytes` from each named tensor and return {name: sha256_hex}.
+
+    Handles both Hippius OCI (via registry blob Range requests) and HuggingFace
+    (via resolve URL Range requests). `_weight_map` can be passed from a
+    pre-fetched index.json to avoid a redundant network round-trip.
+    Returns None on failure so callers fail open.
+    """
+    import struct
+    import concurrent.futures
+
+    is_hippius = "_registry" in info
+    is_hf      = "_hf_repo" in info
+    if not is_hippius and not is_hf:
+        return None
+
+    client: httpx.Client | None = None
+    try:
+        client = httpx.Client(timeout=httpx.Timeout(30.0))
+
+        def _range_get(url: str, headers: dict, start: int, end: int) -> bytes | None:
+            r = client.get(url, headers={**headers, "Range": f"bytes={start}-{end}"},
+                           follow_redirects=True)
+            return r.content if r.status_code in (200, 206) else None
+
+        if is_hippius:
+            registry  = info["_registry"]
+            oci_repo  = info["_oci_repo"]
+            oci_token = info["_oci_token"]
+            auth      = {"Authorization": f"Bearer {oci_token}"}
+
+            def _blob_url(shard_file: str) -> str | None:
+                d = info["safetensor_layers"].get(shard_file, "")
+                if not d:
+                    return None
+                blob = d if d.startswith("sha256:") else f"sha256:{d}"
+                return f"{registry}/v2/{oci_repo}/blobs/{blob}"
+
+        else:  # HuggingFace
+            repo     = info["_hf_repo"]
+            revision = info["_hf_revision"]
+            token    = info.get("_hf_token")
+            auth     = {"Authorization": f"Bearer {token}"} if token else {}
+            base     = f"https://huggingface.co/{repo}/resolve/{revision}"
+
+            def _blob_url(shard_file: str) -> str | None:
+                return f"{base}/{shard_file}"
+
+        # Resolve weight_map if not pre-fetched
+        weight_map = _weight_map if _weight_map is not None else _fetch_weight_map(info)
+        if not weight_map:
+            return None
+
+        # Group sampled tensors by shard
+        shard_to_tensors: dict[str, list[str]] = {}
+        for tname in tensor_names:
+            shard = weight_map.get(tname)
+            if shard:
+                shard_to_tensors.setdefault(shard, []).append(tname)
+
+        def _fetch_shard_meta(shard_file: str):
+            url = _blob_url(shard_file)
+            if not url:
+                return None
+            hdr8 = _range_get(url, auth, 0, 7)
+            if not hdr8 or len(hdr8) < 8:
+                return None
+            hdr_len = struct.unpack_from("<Q", hdr8, 0)[0]
+            hdr_raw = _range_get(url, auth, 8, 7 + hdr_len)
+            if not hdr_raw:
+                return None
+            tensors = {
+                k: v for k, v in json.loads(hdr_raw[:hdr_len]).items()
+                if k != "__metadata__"
+            }
+            return shard_file, {"url": url, "hdr_len": hdr_len, "tensors": tensors}
+
+        shard_meta: dict[str, dict] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            for result in pool.map(_fetch_shard_meta, list(shard_to_tensors)):
+                if result:
+                    shard_meta[result[0]] = result[1]
+
+        def _fetch_one_tensor(args: tuple) -> tuple[str, str] | None:
+            tname, shard_file = args
+            meta  = shard_meta.get(shard_file)
+            if not meta:
+                return None
+            tinfo = meta["tensors"].get(tname)
+            if not tinfo:
+                return None
+            offsets   = tinfo["data_offsets"]
+            abs_start = 8 + meta["hdr_len"] + offsets[0]
+            abs_end   = 8 + meta["hdr_len"] + min(offsets[1], offsets[0] + sample_bytes) - 1
+            data = _range_get(meta["url"], auth, abs_start, abs_end)
+            if data is None:
+                return None
+            return tname, hashlib.sha256(data).hexdigest()
+
+        work = [(t, sf) for sf, tensors in shard_to_tensors.items() for t in tensors]
+        fingerprints: dict[str, str] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            for result in pool.map(_fetch_one_tensor, work):
+                if result:
+                    fingerprints[result[0]] = result[1]
+
+        return fingerprints or None
+
+    except Exception:
+        log.debug("tensor fingerprint check failed", exc_info=True)
+        return None
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def _check_tensor_copy(
+    challenger_info: dict,
+    king_info: dict,
+    challenger_digest: str,
+    king_digest: str,
+) -> dict | None:
+    """Tensor-level copy check for models whose shard count differs.
+
+    Samples _COPY_CHECK_SAMPLE_N tensors deterministically, downloads
+    _COPY_CHECK_SAMPLE_BYTES from each, and compares sha256 fingerprints.
+    Returns None when models differ or the check cannot be completed (fail-open).
+    """
+    import random as _random
+
+    king_has_ctx = "_registry" in king_info or "_hf_repo" in king_info
+    chall_has_ctx = "_registry" in challenger_info or "_hf_repo" in challenger_info
+    if not king_has_ctx or not chall_has_ctx:
+        log.debug("tensor copy check skipped: auth context missing on one or both models")
+        return None
+
+    king_weight_map = _fetch_weight_map(king_info)
+    if not king_weight_map:
+        return None
+    all_tensors = sorted(king_weight_map.keys())
+    if not all_tensors:
+        return None
+
+    seed = int(hashlib.blake2b(
+        (challenger_digest + king_digest).encode(), digest_size=8,
+    ).hexdigest(), 16)
+    rng     = _random.Random(seed)
+    sample_n = min(_COPY_CHECK_SAMPLE_N, len(all_tensors))
+    sampled  = rng.sample(all_tensors, sample_n)
+
+    log.info(
+        "tensor copy check: sampling %d/%d tensors @ %d B each",
+        sample_n, len(all_tensors), _COPY_CHECK_SAMPLE_BYTES,
+    )
+
+    # King fingerprint reuses the already-fetched weight_map to save a round-trip
+    king_fp  = _fetch_tensor_fingerprint(king_info,       sampled, _weight_map=king_weight_map)
+    chall_fp = _fetch_tensor_fingerprint(challenger_info, sampled)
+
+    if not chall_fp or not king_fp:
+        log.debug("tensor copy check: fingerprint fetch failed on at least one model")
+        return None
+
+    common = set(chall_fp) & set(king_fp)
+    if len(common) < max(1, sample_n // 2):
+        log.debug(
+            "tensor copy check: only %d/%d tensors fingerprinted — cannot conclude",
+            len(common), sample_n,
+        )
+        return None
+
+    mismatches = [t for t in common if chall_fp[t] != king_fp[t]]
+    if mismatches:
+        log.debug(
+            "tensor copy check: %d/%d tensors differ → not a copy",
+            len(mismatches), len(common),
+        )
+        return None
+
+    # All sampled tensors are byte-identical — apply trusted-timestamp arbitration
+    n_chall_shards   = len(challenger_info["safetensor_layers"])
+    n_king_shards    = len(king_info["safetensor_layers"])
+    challenger_ts    = challenger_info.get("committed_at")
+    king_ts          = king_info.get("committed_at")
+    challenger_source = challenger_info.get("timestamp_source")
+    king_source       = king_info.get("timestamp_source")
+
+    challenger_dt = _parse_registry_timestamp(challenger_ts)
+    king_dt       = _parse_registry_timestamp(king_ts)
+
+    base_reason = (
+        f"all {len(common)} sampled tensors have identical byte content "
+        f"(shard layout differs: {n_chall_shards} vs {n_king_shards} shards); "
+        f"challenger pushed_at={challenger_ts} source={challenger_source}, "
+        f"king pushed_at={king_ts} source={king_source}"
+    )
+    result_meta = {
+        "challenger_committed_at": challenger_ts,
+        "king_committed_at": king_ts,
+        "challenger_timestamp_source": challenger_source,
+        "king_timestamp_source": king_source,
+    }
+
+    if (
+        challenger_dt is None
+        or king_dt is None
+        or not _trusted_timestamp_source(challenger_source)
+    ):
+        return {
+            "action": "reject",
+            "reason": (
+                f"model is a tensor-level copy (trusted challenger timestamp unavailable): "
+                f"{base_reason}"
+            ),
+            **result_meta,
+        }
+
+    if challenger_dt < king_dt:
+        return {
+            "action": "crown_earlier",
+            "reason": (
+                f"model is tensor-identical to the king but has an earlier registry-observed "
+                f"push time ({challenger_ts} < {king_ts}); displacing king with original author. "
+                f"{base_reason}"
+            ),
+            **result_meta,
+        }
+
+    return {
+        "action": "reject",
+        "reason": f"model is a tensor-level copy (different shard layout, not earlier): {base_reason}",
+        **result_meta,
+    }
 
 
 def check_model_copy(
@@ -864,7 +1168,10 @@ def check_model_copy(
     king_layers = king_info["safetensor_layers"]
 
     if not challenger_layers or len(challenger_layers) != len(king_layers):
-        return None
+        # Shard counts differ — may still be an identical model re-sharded.
+        return _check_tensor_copy(
+            challenger_info, king_info, challenger_digest, king_digest,
+        )
 
     mismatches = [
         title for title, digest in challenger_layers.items()
@@ -896,9 +1203,6 @@ def check_model_copy(
         "king_timestamp_source": king_source,
     }
 
-    # Fail-safe: once weights are proven identical, never crown an "earlier"
-    # model unless the challenger proving originality has a trusted timestamp.
-    # HF dates are still recorded, but only as the later-side comparison.
     if (
         challenger_dt is None
         or king_dt is None
@@ -1536,9 +1840,9 @@ class State:
         self.history.insert(0, entry)
         self.r2.put("state/dashboard_history.json", {"history": self.history})
 
-    def record_failure(self, entry, error_code, error_detail=""):
+    def record_failure(self, entry, error_code, error_detail="", extra: dict | None = None):
         hk = entry.get("hotkey", "")
-        self.history.insert(0, {
+        record = {
             "challenge_id": entry.get("challenge_id", "?"),
             "hotkey": hk,
             "uid": self.uid_map.get(hk),
@@ -1557,7 +1861,10 @@ class State:
             "best_loss": 0,
             "wall_time_s": 0,
             "timestamp": _now(),
-        })
+        }
+        if extra:
+            record.update(extra)
+        self.history.insert(0, record)
         self.r2.put("state/dashboard_history.json", {"history": self.history})
 
     def refresh_uid_map(self, subtensor, netuid):
@@ -2035,7 +2342,12 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         if action == "reject":
             log.warning("rejecting %s (%s): %s", cid, model_repo, reason)
             state.failed_repos.add(model_key)
-            state.record_failure(entry, "model_copy", reason)
+            state.record_failure(entry, "model_copy", reason, extra={
+                "challenger_committed_at": copy_result.get("challenger_committed_at"),
+                "king_committed_at": copy_result.get("king_committed_at"),
+                "challenger_timestamp_source": copy_result.get("challenger_timestamp_source"),
+                "king_timestamp_source": copy_result.get("king_timestamp_source"),
+            })
             return
         if action == "crown_earlier":
             log.warning(
