@@ -18,32 +18,98 @@ import eval_server_quasar_pair as base
 log = logging.getLogger("eval_server_two_sources")
 
 # ---------------------------------------------------------------------------
-# Source registry – env-configurable defaults
+# Source registry – fetched from the bundle manifest, env-configurable
 # ---------------------------------------------------------------------------
 
+# Bundle manifest aggregating all dataset sources (URLs + mix weights) so this
+# file no longer needs manual edits when sources or weights change upstream.
+DEFAULT_BUNDLE_MANIFEST_URL = os.environ.get(
+    "TEUTONIC_BUNDLE_MANIFEST_URL",
+    "https://s3.hippius.com/teutonic-sn3/dataset/all-datasets.manifest.json",
+)
+
+# Used only if the bundle manifest can't be fetched (offline dev, network
+# outage) and no explicit env override is set.
+_FALLBACK_MANIFEST_URLS: list[str] = [
+    "https://s3.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
+    "https://s3.hippius.com/teutonic-sn3/dataset/ultradata-math-l3-quasar-10b/manifest.json",
+    "https://s3.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
+    "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.2-quasar-10b/manifest.json",
+    "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-cc-math-v1-4plus-mind-quasar-10b/manifest.json",
+    "https://s3.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json",
+    "https://s3.hippius.com/teutonic-sn3/dataset/pes2o-v3/manifest.json",
+    "https://s3.hippius.com/teutonic-sn3/dataset/openmathreasoning-quasar-10b/manifest.json",
+    "https://s3.hippius.com/teutonic-sn3/dataset/cosmopedia-wikihow-stories-quasar-10b/manifest.json",
+    "https://s3.hippius.com/dendrite-teutonic/dataset/dendrite-synth-run/manifest.json",
+]
+_FALLBACK_SOURCE_WEIGHT_MAP: dict[str, float] = {
+    "automathtext-v2": 0.23,
+    "ultradata-math-l3": 0.09,
+    "finewebedu": 0.27,
+    "nemotron-specialized-v1.2": 0.04,
+    "nemotron-cc-math": 0.05,
+    "openthoughts3-1.2m": 0.10,
+    "pes2o-v3": 0.08,
+    "openmathreasoning-quasar-10b": 0.06,
+    "cosmopedia-wikihow-stories-quasar-10b": 0.06,
+    "dendrite-synth-run": 0.02,
+}
+
+
+def fetch_bundle_manifest(url: str) -> dict:
+    """Fetch and parse the multi-source dataset bundle manifest at `url`."""
+    request = Request(url, headers={"User-Agent": "teutonic-eval/1.0"})
+    with urlopen(request, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def bundle_to_sources(bundle: dict) -> tuple[list[str], dict[str, float]]:
+    """Extract (manifest_urls, name->weight map) from a bundle's enabled sources."""
+    manifest_urls: list[str] = []
+    weight_map: dict[str, float] = {}
+    for entry in bundle.get("sources", []):
+        if not entry.get("enabled", True):
+            continue
+        url = entry.get("manifest_url")
+        name = entry.get("name")
+        if not url or not name:
+            continue
+        manifest_urls.append(url)
+        if entry.get("weight") is not None:
+            weight_map[name] = float(entry["weight"])
+    return manifest_urls, weight_map
+
+
+def _load_bundle_defaults() -> tuple[list[str], dict[str, float]]:
+    try:
+        manifest_urls, weight_map = bundle_to_sources(fetch_bundle_manifest(DEFAULT_BUNDLE_MANIFEST_URL))
+        if manifest_urls:
+            return manifest_urls, weight_map
+        log.warning(
+            "bundle manifest %s has no enabled sources; using hardcoded fallback", DEFAULT_BUNDLE_MANIFEST_URL
+        )
+    except Exception as exc:
+        log.warning(
+            "failed to fetch bundle manifest %s (%s); using hardcoded fallback", DEFAULT_BUNDLE_MANIFEST_URL, exc
+        )
+    return list(_FALLBACK_MANIFEST_URLS), dict(_FALLBACK_SOURCE_WEIGHT_MAP)
+
+
 _raw_manifest_urls = os.environ.get("TEUTONIC_MANIFEST_URLS", "").strip()
+_raw_weight_map = os.environ.get("TEUTONIC_SOURCE_WEIGHT_MAP", "").strip()
+# Only hit the network if neither override is set — an explicit env override
+# means the caller doesn't want the bundle manifest consulted at all.
+_bundle_manifest_urls, _bundle_weight_map = (
+    ([], {}) if (_raw_manifest_urls or _raw_weight_map) else _load_bundle_defaults()
+)
+
 DEFAULT_MANIFEST_URLS: list[str] = (
-    [u.strip() for u in _raw_manifest_urls.split(",") if u.strip()]
-    if _raw_manifest_urls
-    else [
-        "https://s3.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
-        "https://s3.hippius.com/teutonic-sn3/dataset/ultradata-math-l3-quasar-10b/manifest.json",
-        "https://s3.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
-        # "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.1-quasar-10b/manifest.json",
-        "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.2-quasar-10b/manifest.json",
-        "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-cc-math-v1-4plus-mind-quasar-10b/manifest.json",
-        "https://s3.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json",
-        "https://s3.hippius.com/teutonic-sn3/dataset/pes2o-v3/manifest.json",
-        "https://s3.hippius.com/teutonic-sn3/dataset/openmathreasoning-quasar-10b/manifest.json",
-        "https://s3.hippius.com/teutonic-sn3/dataset/cosmopedia-wikihow-stories-quasar-10b/manifest.json",
-        "https://s3.hippius.com/dendrite-teutonic/dataset/dendrite-synth-run/manifest.json"
-    ]
+    [u.strip() for u in _raw_manifest_urls.split(",") if u.strip()] if _raw_manifest_urls else _bundle_manifest_urls
 )
 
 # Fixed per-source sampling weights matched by substring against the source name.
 # Override via TEUTONIC_SOURCE_WEIGHT_MAP="pattern1=w1,pattern2=w2,..."
 # or TEUTONIC_SOURCE_WEIGHTS="w1,w2,..." (positional, aligned to npy_manifests order).
-_raw_weight_map = os.environ.get("TEUTONIC_SOURCE_WEIGHT_MAP", "").strip()
 DEFAULT_SOURCE_WEIGHT_MAP: dict[str, float] = (
     {
         k.strip(): float(v.strip())
@@ -52,19 +118,7 @@ DEFAULT_SOURCE_WEIGHT_MAP: dict[str, float] = (
         for k, v in [pair.split("=", 1)]
     }
     if _raw_weight_map
-    else {
-        "automathtext-v2": 0.22,
-        "ultradata-math-l3": 0.09,
-        "finewebedu": 0.27,
-        # "nemotron-specialized-v1.1": 0.01,
-        "nemotron-specialized-v1.2": 0.04,
-        "nemotron-cc-math": 0.05,
-        "openthoughts3-1.2m": 0.10,
-        "pes2o-v3": 0.08,
-        "openmathreasoning-quasar-10b": 0.06,
-        "cosmopedia-wikihow-stories-quasar-10b": 0.05,
-        "dendrite-synth-run": 0.04
-    }
+    else _bundle_weight_map
 )
 
 _raw_weights = os.environ.get("TEUTONIC_SOURCE_WEIGHTS", "")
