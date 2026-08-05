@@ -159,6 +159,7 @@ class EvalRequest(BaseModel):
     revision: str | None = None
     block_hash: str = ""
     hotkey: str = ""
+    coldkey: str = ""
     shard_key: str = ""
     dataset_source: str = DEFAULT_DATASET_SOURCE
     parquet_glob: list[str] = Field(default_factory=lambda: [DEFAULT_PARQUET_GLOB])

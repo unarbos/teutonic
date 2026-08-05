@@ -1236,6 +1236,23 @@ def _decode_commitment_pair(pair):
     return key, out
 
 
+def _resolve_chain_coldkey(subtensor, hotkey: str, reveal_block: int = 0) -> str | None:
+    attempts = [(None, "chain head")]
+    if reveal_block > 0:
+        attempts.append((reveal_block, f"reveal block {reveal_block}"))
+
+    for block, label in attempts:
+        try:
+            owner = subtensor.get_hotkey_owner(hotkey, block=block)
+        except Exception:
+            log.warning("coldkey lookup for %s failed at %s", hotkey[:16], label,
+                        exc_info=True)
+            continue
+        if owner:
+            return str(owner)
+    return None
+
+
 def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys):
     """Pull v4 reveals; return latest per hotkey not previously enqueued.
 
@@ -1287,8 +1304,14 @@ def scan_reveals(subtensor, netuid, completed_repos, seen_hotkeys):
         if author_hotkey != hotkey:
             log.warning("v4 author_hotkey %s mismatches chain key %s; trusting chain",
                         author_hotkey[:16], hotkey[:16])
+        coldkey = _resolve_chain_coldkey(subtensor, hotkey, int(block or 0))
+        if not coldkey:
+            log.warning("skipping reveal from %s at block %s: chain owner unavailable",
+                        hotkey[:16], block)
+            continue
         new.append({
             "hotkey": hotkey,
+            "coldkey": coldkey,
             "block": block,
             "model_repo": ref.repo,
             "model_digest": ref.digest,
@@ -1745,11 +1768,6 @@ class State:
         return self.hotkey_coldkey.get(hotkey) or None
 
     def expected_coldkey_token(self, hotkey: str) -> str | None:
-        """First 5 + last 5 chars of the miner's coldkey ss58 concatenated,
-        used to gate Hippius repo names. Returns None when the metagraph
-        hasn't surfaced this hotkey yet — callers should treat that as
-        "skip the check, retry later".
-        """
         ck = self.coldkey_for(hotkey)
         if not ck:
             return None
@@ -1879,7 +1897,8 @@ class State:
                 "watchdog": self.watchdog,
                 "queue": [{"challenge_id": e.get("challenge_id"), "hotkey": e.get("hotkey"),
                             "uid": self.uid_map.get(e.get("hotkey", "")),
-                            "coldkey": self.coldkey_for(e.get("hotkey", "")),
+                            "coldkey": (self.coldkey_for(e.get("hotkey", ""))
+                                        or e.get("coldkey")),
                             "model_repo": e.get("model_repo"),
                             "model_digest": e.get("model_digest"),
                             "queued_at": e.get("queued_at"),
@@ -2051,6 +2070,19 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         log.info("skipping %s: repo %s already evaluated this cycle", cid, model_repo)
         return
 
+    challenger_coldkey = str(entry.get("coldkey") or "").strip()
+    if not challenger_coldkey:
+        challenger_coldkey = _resolve_chain_coldkey(subtensor, hotkey, reveal_block) or ""
+    if not challenger_coldkey:
+        reason = (f"could not resolve the on-chain owner of challenger hotkey {hotkey} "
+                  f"at the chain head or reveal block {reveal_block}")
+        log.warning("rejecting %s: %s", cid, reason)
+        state.failed_repos.add(model_key)
+        state.record_failure(entry, "coldkey_unresolved", reason)
+        return
+    entry["coldkey"] = challenger_coldkey
+    state.hotkey_coldkey[hotkey] = challenger_coldkey
+
     legacy_king_digest = (entry.get("king_digest_at_reveal") or "").strip()
     if legacy_king_digest:
         log.warning("rejecting %s: legacy reveal pinned king %s", cid, legacy_king_digest[:19])
@@ -2073,7 +2105,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             state.record_failure(entry, "coldkey_required", reason)
             return
     else:
-        log.info("%s: coldkey for %s not in metagraph yet, skipping coldkey check",
+        log.info("%s: coldkey for %s unavailable, skipping coldkey check",
                  cid, hotkey[:16])
 
     _ = check_stale  # parameter retained for back-compat; v4 removed stale-parent binding
@@ -2234,7 +2266,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
         "challenge_id": cid, "king_repo": king_repo,
         "king_digest": king_digest,
         "challenger_repo": model_repo, "challenger_digest": challenger_digest,
-        "hotkey": hotkey,
+        "hotkey": hotkey, "coldkey": challenger_coldkey,
         "N": EVAL_N, "alpha": EVAL_ALPHA, "shard": shard_key,
         "eval_block": eval_block, "block_hash": block_hash,
     })
@@ -2257,6 +2289,7 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "challenger_repo": model_repo,
             "block_hash": block_hash,
             "hotkey": hotkey,
+            "coldkey": challenger_coldkey,
             "shard_key": shard_key,
             "king_digest": king_digest,
             "challenger_digest": challenger_digest,
