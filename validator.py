@@ -42,7 +42,7 @@ from model_store import (  # noqa: E402
 
 chain_config.load_arch()
 
-EVAL_N = int(os.environ.get("TEUTONIC_EVAL_N", "25000"))
+EVAL_N = int(os.environ.get("TEUTONIC_EVAL_N", "10000"))
 EVAL_ALPHA = 0.001
 EVAL_DELTA_THRESHOLD = 0.0015
 EVAL_BOOTSTRAP_SAMPLES = 10_000

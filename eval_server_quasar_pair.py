@@ -86,12 +86,12 @@ DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
 DEFAULT_SEQ_LEN_MULTIPLIER = max(1, int(os.environ.get("EVAL_SEQ_LEN_MULTIPLIER", "4")))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
-DEFAULT_N = int(os.environ.get("EVAL_N", "25000"))
+DEFAULT_N = int(os.environ.get("EVAL_N", "10000"))
 
 # Server-side caps. The validator can request a larger eval_n / n_bootstrap
 # in its POST body; we clamp to these to keep per-eval wall time bounded
 # while clearing a backed-up duel queue. Restore via env if not needed.
-EVAL_N_CAP = int(os.environ.get("EVAL_N_CAP", "25000"))
+EVAL_N_CAP = int(os.environ.get("EVAL_N_CAP", "10000"))
 EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 
 PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
@@ -111,7 +111,7 @@ DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_MODEL_DO
 # challenger cannot reach it regardless of the remaining samples.
 EVAL_EARLY_STOP = os.environ.get("EVAL_EARLY_STOP", "1") == "1"
 EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.2"))
-EVAL_EARLY_STOP_ADVANTAGE_QUANTILE = float(os.environ.get("EVAL_EARLY_STOP_ADVANTAGE_QUANTILE", "0.95"))
+EVAL_EARLY_STOP_ADVANTAGE_QUANTILE = float(os.environ.get("EVAL_EARLY_STOP_ADVANTAGE_QUANTILE", "0.94"))
 DEFAULT_MODEL_DOWNLOAD_WORKERS = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_WORKERS", "4"))
 DEFAULT_S3_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRIES", "5"))
 DEFAULT_S3_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRY_BACKOFF_S", "20"))
@@ -1545,7 +1545,10 @@ def compute_per_sequence_loss(model, token_batches: list[list[int]], chunk_size:
     input_ids = torch.tensor(token_batches, dtype=torch.long, device=model_input_device(model))
     if hasattr(model, "reset_state"):
         model.reset_state()
-    hidden = model.model(input_ids).last_hidden_state
+    hidden = model.model(
+        input_ids=input_ids,
+        use_cache=False,
+    ).last_hidden_state
     head_dev = lm_head_device(model)
     if hidden.device != head_dev:
         hidden = hidden.to(head_dev)

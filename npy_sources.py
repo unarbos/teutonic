@@ -131,7 +131,7 @@ DEFAULT_SOURCE_WEIGHTS: list[float] = (
 # before inference to prevent CUDA device-side assert from embedding OOB access.
 DEFAULT_VOCAB_SIZE: int = int(os.environ.get("TEUTONIC_VOCAB_SIZE", "248320"))
 DEFAULT_MAX_SEQS_PER_SHARD: int = int(os.environ.get("TEUTONIC_MAX_SEQS_PER_SHARD", "0"))
-DEFAULT_SHARDS_PER_SOURCE: int = int(os.environ.get("TEUTONIC_SHARDS_PER_SOURCE", "5"))
+DEFAULT_SHARDS_PER_SOURCE: int = int(os.environ.get("TEUTONIC_SHARDS_PER_SOURCE", "2"))
 URL_CACHE_DIR = Path(
     os.environ.get(
         "TEUTONIC_MULTI_SOURCE_CACHE_DIR",
