@@ -83,15 +83,15 @@ DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "512"))
 DEFAULT_PARALLEL_BATCH_SIZE = int(os.environ.get("EVAL_PARALLEL_BATCH_SIZE", "128"))
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
-DEFAULT_SEQ_LEN_MULTIPLIER = max(1, int(os.environ.get("EVAL_SEQ_LEN_MULTIPLIER", "4")))
+DEFAULT_SEQ_LEN_MULTIPLIER = max(1, int(os.environ.get("EVAL_SEQ_LEN_MULTIPLIER", "1")))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
-DEFAULT_N = int(os.environ.get("EVAL_N", "10000"))
+DEFAULT_N = int(os.environ.get("EVAL_N", "25000"))
 
 # Server-side caps. The validator can request a larger eval_n / n_bootstrap
 # in its POST body; we clamp to these to keep per-eval wall time bounded
 # while clearing a backed-up duel queue. Restore via env if not needed.
-EVAL_N_CAP = int(os.environ.get("EVAL_N_CAP", "10000"))
+EVAL_N_CAP = int(os.environ.get("EVAL_N_CAP", "25000"))
 EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 
 PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
