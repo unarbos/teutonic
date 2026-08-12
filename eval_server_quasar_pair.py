@@ -83,6 +83,7 @@ DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "512"))
 DEFAULT_PARALLEL_BATCH_SIZE = int(os.environ.get("EVAL_PARALLEL_BATCH_SIZE", "128"))
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
+DEFAULT_SEQ_LEN_MULTIPLIER = max(1, int(os.environ.get("EVAL_SEQ_LEN_MULTIPLIER", "4")))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
 DEFAULT_N = int(os.environ.get("EVAL_N", "25000"))
@@ -173,6 +174,7 @@ class EvalRequest(BaseModel):
     s3_doppler_project: str = "arbos"
     s3_doppler_config: str = "dev"
     seq_len: int = DEFAULT_SEQ_LEN
+    seq_len_multiplier: int = Field(default=DEFAULT_SEQ_LEN_MULTIPLIER, ge=1)
     n: int = DEFAULT_N
     batch_size: int = DEFAULT_BATCH_SIZE
     alpha: float = DEFAULT_ALPHA
@@ -271,6 +273,16 @@ def apply_eval_limits(req: EvalRequest, eval_id: str = "") -> dict:
         "n_bootstrap_cap": EVAL_BOOTSTRAP_B_CAP,
         "capped": capped,
     }
+
+
+def effective_seq_len(req: EvalRequest) -> int:
+    """Length presented to the model after joining consecutive base sequences."""
+    return int(req.seq_len) * int(req.seq_len_multiplier)
+
+
+def scaled_batch_size(batch_size: int, req: EvalRequest) -> int:
+    """Keep roughly the same token count per batch as sequence length grows."""
+    return max(1, int(batch_size) // int(req.seq_len_multiplier))
 
 
 def check_eval_runtime(t0: float) -> None:
@@ -1341,22 +1353,37 @@ def load_sequences_from_npy_shard(
         raise ValueError(f"{path} has invalid shape {shape}")
 
     arr = np.load(path, mmap_mode="r")
+    multiplier = int(req.seq_len_multiplier)
+    merged_seq_len = effective_seq_len(req)
     if arr.ndim == 2:
         if arr.shape[1] < req.seq_len:
             raise ValueError(f"{path} sequence width {arr.shape[1]} < seq_len={req.seq_len}")
-        indices = shuffled_indices(rng, arr.shape[0], limit)
-        return [arr[int(i), : req.seq_len].astype(np.int64, copy=False).tolist() for i in indices]
+        # A start in the last multiplier-1 rows cannot produce a complete
+        # merged sequence. Sample only valid starts, which is equivalent to
+        # picking another sequence whenever a tail row would be selected.
+        n_valid_starts = arr.shape[0] - multiplier + 1
+        if n_valid_starts <= 0:
+            return []
+        indices = shuffled_indices(rng, n_valid_starts, limit)
+        return [
+            arr[int(i) : int(i) + multiplier, : req.seq_len]
+            .reshape(merged_seq_len)
+            .astype(np.int64, copy=False)
+            .tolist()
+            for i in indices
+        ]
 
     if arr.ndim != 1:
         raise ValueError(f"{path} expected 1D token stream or 2D sequence matrix, got shape={arr.shape}")
-    n_sequences = arr.shape[0] // req.seq_len
-    if n_sequences <= 0:
+    n_base_sequences = arr.shape[0] // req.seq_len
+    n_valid_starts = n_base_sequences - multiplier + 1
+    if n_valid_starts <= 0:
         return []
-    indices = shuffled_indices(rng, n_sequences, limit)
+    indices = shuffled_indices(rng, n_valid_starts, limit)
     out = []
     for i in indices:
         start = int(i) * req.seq_len
-        out.append(arr[start : start + req.seq_len].astype(np.int64, copy=False).tolist())
+        out.append(arr[start : start + merged_seq_len].astype(np.int64, copy=False).tolist())
     _ = data_offset
     return out
 
@@ -1388,6 +1415,7 @@ def sample_packed_sequences(files: list[str], tokenizer, req: EvalRequest, *, sh
         raise ValueError("tokenizer must define eos_token_id")
 
     sequences: list[list[int]] = []
+    merged_seq_len = effective_seq_len(req)
     buffer: list[int] = []
     docs_seen = 0
     used_files: list[str] = []
@@ -1411,14 +1439,16 @@ def sample_packed_sequences(files: list[str], tokenizer, req: EvalRequest, *, sh
                     continue
                 buffer.extend(ids)
                 buffer.append(eos_id)
-                while len(buffer) >= req.seq_len:
-                    sequences.append(buffer[: req.seq_len])
-                    del buffer[: req.seq_len]
+                while len(buffer) >= merged_seq_len:
+                    sequences.append(buffer[:merged_seq_len])
+                    del buffer[:merged_seq_len]
                     if len(sequences) >= req.n:
                         digest = hashlib.sha256(np.asarray(sequences, dtype=np.int64).tobytes()).hexdigest()
                         return sequences, {
                             "n": len(sequences),
-                            "seq_len": req.seq_len,
+                            "seq_len": merged_seq_len,
+                            "base_seq_len": req.seq_len,
+                            "seq_len_multiplier": req.seq_len_multiplier,
                             "seed": req.seed,
                             "dataset_seed": seed_value,
                             "seed_material": dataset_seed_material(req),
@@ -1473,7 +1503,9 @@ def sample_packed_sequences_from_s3(tokenizer, req: EvalRequest, on_phase=None) 
                 digest = hashlib.sha256(np.asarray(sequences, dtype=np.int64).tobytes()).hexdigest()
                 return sequences, {
                     "n": len(sequences),
-                    "seq_len": req.seq_len,
+                    "seq_len": effective_seq_len(req),
+                    "base_seq_len": req.seq_len,
+                    "seq_len_multiplier": req.seq_len_multiplier,
                     "seed": req.seed,
                     "dataset_seed": seed_value,
                     "seed_material": dataset_seed_material(req),
@@ -1777,7 +1809,9 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             "phase": "dataset_sample_start",
             "source": req.dataset_source,
             "n": req.n,
-            "seq_len": req.seq_len,
+            "seq_len": effective_seq_len(req),
+            "base_seq_len": req.seq_len,
+            "seq_len_multiplier": req.seq_len_multiplier,
         })
         sequences, dataset_meta = sample_eval_sequences(tokenizer, req, on_phase=on_phase)
         # Pop private key so it never reaches the verdict JSON or disk record.
@@ -1815,7 +1849,14 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             from concurrent.futures import ThreadPoolExecutor
             _eval_pool = ThreadPoolExecutor(max_workers=2)
 
-        effective_batch_size = req.parallel_batch_size if use_parallel else req.batch_size
+        requested_batch_size = req.parallel_batch_size if use_parallel else req.batch_size
+        effective_batch_size = scaled_batch_size(requested_batch_size, req)
+        on_phase({
+            "phase": "eval_batching",
+            "requested_batch_size": requested_batch_size,
+            "effective_batch_size": effective_batch_size,
+            "seq_len_multiplier": req.seq_len_multiplier,
+        })
         king_losses: list[float] = []
         challenger_losses: list[float] = []
         king_sum = 0.0
@@ -2057,8 +2098,11 @@ async def health():
         },
         "defaults": {
             "batch_size": DEFAULT_BATCH_SIZE,
+            "effective_batch_size": max(1, DEFAULT_BATCH_SIZE // DEFAULT_SEQ_LEN_MULTIPLIER),
             "alpha": DEFAULT_ALPHA,
             "seq_len": DEFAULT_SEQ_LEN,
+            "seq_len_multiplier": DEFAULT_SEQ_LEN_MULTIPLIER,
+            "effective_seq_len": DEFAULT_SEQ_LEN * DEFAULT_SEQ_LEN_MULTIPLIER,
             "n": DEFAULT_N,
             "n_bootstrap": DEFAULT_BOOTSTRAP_B,
         },

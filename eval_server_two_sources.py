@@ -85,8 +85,13 @@ async def health():
         "source_weights": DEFAULT_SOURCE_WEIGHT_MAP,
         "defaults": {
             "batch_size": base.DEFAULT_BATCH_SIZE,
+            "effective_batch_size": max(
+                1, base.DEFAULT_BATCH_SIZE // base.DEFAULT_SEQ_LEN_MULTIPLIER
+            ),
             "alpha": base.DEFAULT_ALPHA,
             "seq_len": base.DEFAULT_SEQ_LEN,
+            "seq_len_multiplier": base.DEFAULT_SEQ_LEN_MULTIPLIER,
+            "effective_seq_len": base.DEFAULT_SEQ_LEN * base.DEFAULT_SEQ_LEN_MULTIPLIER,
             "n": base.DEFAULT_N,
             "n_bootstrap": base.DEFAULT_BOOTSTRAP_B,
             "shards_per_source": DEFAULT_SHARDS_PER_SOURCE,

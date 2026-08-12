@@ -572,7 +572,9 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
     )
     return sequences, {
         "n": len(sequences),
-        "seq_len": req.seq_len,
+        "seq_len": base.effective_seq_len(req),
+        "base_seq_len": req.seq_len,
+        "seq_len_multiplier": req.seq_len_multiplier,
         "seed": req.seed,
         "dataset_seed": seed_value,
         "seed_material": base.dataset_seed_material(req),
