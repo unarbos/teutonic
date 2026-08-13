@@ -45,6 +45,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from eval.copy_probe import (
+    COPY_PROBE_VERSION,
+    FingerprintBank,
+    load_private_probe_secret,
+    private_model_fingerprint,
+    public_rejection_message as copy_probe_rejection_message,
+)
+
 
 _repo_root = Path(__file__).resolve().parent
 if str(_repo_root) not in sys.path:
@@ -83,7 +91,7 @@ DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "512"))
 DEFAULT_PARALLEL_BATCH_SIZE = int(os.environ.get("EVAL_PARALLEL_BATCH_SIZE", "128"))
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
-DEFAULT_SEQ_LEN_MULTIPLIER = max(1, int(os.environ.get("EVAL_SEQ_LEN_MULTIPLIER", "1")))
+DEFAULT_SEQ_LEN_MULTIPLIER = max(1, int(os.environ.get("EVAL_SEQ_LEN_MULTIPLIER", "4")))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
 DEFAULT_N = int(os.environ.get("EVAL_N", "25000"))
@@ -95,6 +103,22 @@ EVAL_N_CAP = int(os.environ.get("EVAL_N_CAP", "25000"))
 EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 
 PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
+COPY_PROBE_ENABLED = os.environ.get("TEUTONIC_COPY_PROBE_ENABLED", "0") == "1"
+# Calibrated by scripts/calibrate_copy_probe.py. The expanded 2026-08-13 cohort
+# put the suspected derivative at 1.776e-4 and the nearest independent model at
+# 1.039e-2 JS p95; 1e-3 is a conservative round cutoff inside that clean gap.
+COPY_PROBE_JS_P95_MAX = float(os.environ.get("TEUTONIC_COPY_PROBE_JS_P95_MAX", "0.001"))
+COPY_PROBE_BANK_SIZE = int(os.environ.get("TEUTONIC_COPY_PROBE_BANK_SIZE", "100"))
+COPY_PROBE_MAX_SIMILAR_MODELS = int(
+    os.environ.get("TEUTONIC_COPY_PROBE_MAX_SIMILAR_MODELS", "3")
+)
+COPY_PROBE_BANK_PATH = Path(
+    os.environ.get(
+        "TEUTONIC_COPY_PROBE_BANK_PATH",
+        "/var/lib/teutonic/copy_probe/fingerprints.sqlite3",
+    )
+)
+COPY_PROBE_SECRET_FILE = _repo_root / ".seed"
 
 EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "3000"))
 DEFAULT_LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "32"))
@@ -148,6 +172,22 @@ _king_model = None
 _king_key: tuple[str, ...] | None = None
 _king_device = ""
 _king_gpu_ids: list[int] = []
+_copy_probe_bank = FingerprintBank(
+    COPY_PROBE_BANK_PATH,
+    max_entries=COPY_PROBE_BANK_SIZE,
+    max_similar_models=COPY_PROBE_MAX_SIMILAR_MODELS,
+)
+
+
+def copy_probe_secret() -> str:
+    return load_private_probe_secret(COPY_PROBE_SECRET_FILE)
+
+
+def initialize_copy_probe_bank() -> None:
+    if not COPY_PROBE_ENABLED:
+        return
+    copy_probe_secret()
+    _copy_probe_bank.initialize()
 
 
 class EvalRequest(BaseModel):
@@ -159,6 +199,8 @@ class EvalRequest(BaseModel):
     allow_code_model_fallback: bool = DEFAULT_ALLOW_CODE_MODEL_FALLBACK
     revision: str | None = None
     block_hash: str = ""
+    submission_id: str = ""
+    submission_block: int = 0
     hotkey: str = ""
     coldkey: str = ""
     shard_key: str = ""
@@ -1806,8 +1848,92 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         if config_mismatches:
             raise RuntimeError(f"king/challenger config mismatch: {config_mismatches[:8]}")
 
-        tokenizer, tokenizer_meta = load_eval_tokenizer(king_snapshot, req, on_phase=on_phase)
+        use_parallel = req.parallel_models and len(_gpu_ids) >= 4
+        if use_parallel:
+            mid = len(_gpu_ids) // 2
+            king_gpu_ids = _gpu_ids[:mid]
+            challenger_gpu_ids = _gpu_ids[mid:]
+            on_phase({"phase": "parallel_models_setup", "king_gpus": king_gpu_ids, "challenger_gpus": challenger_gpu_ids})
+        else:
+            king_gpu_ids = _gpu_ids
+            challenger_gpu_ids = _gpu_ids
 
+        king_device = device_plan_for_gpus(king_gpu_ids)
+        challenger_device = device_plan_for_gpus(challenger_gpu_ids)
+        challenger = load_quasar_model(
+            challenger_snapshot,
+            challenger_config,
+            challenger_device,
+            "challenger",
+            req,
+            gpu_ids=challenger_gpu_ids,
+            on_phase=on_phase,
+        )
+        check_eval_runtime(t0)
+
+        if COPY_PROBE_ENABLED:
+            on_phase({"phase": "behavioral_copy_probe_start", "version": COPY_PROBE_VERSION})
+            challenger_fingerprint, fingerprint_meta = private_model_fingerprint(
+                challenger,
+                copy_probe_secret(),
+            )
+            submission_id = req.submission_id or eval_id
+            submission_order = str(req.submission_block or req.block_hash or eval_id)
+            copy_decision = _copy_probe_bank.compare_and_store(
+                challenger_fingerprint,
+                fingerprint_meta,
+                model_ref=normalize_model_ref(req.challenger_repo),
+                model_digest=local_challenger_digest,
+                submission_id=submission_id,
+                submission_order=submission_order,
+                hotkey=req.hotkey,
+                js_p95_max=COPY_PROBE_JS_P95_MAX,
+            )
+            del challenger_fingerprint
+            closest = copy_decision.get("match") or {}
+            closest_metrics = closest.get("metrics") or {}
+            log.info(
+                "behavioral copy probe: rejected=%s too_similar=%s "
+                "family_size=%d family_limit=%d compared=%d bank_size=%d "
+                "closest_js_p95=%s",
+                copy_decision["detected"],
+                copy_decision["too_similar"],
+                copy_decision["similar_family_size"],
+                copy_decision["max_similar_models"],
+                copy_decision["compared"],
+                copy_decision["bank_size"],
+                f"{closest_metrics['js_p95']:.9g}" if closest_metrics else "none",
+            )
+            if copy_decision["detected"]:
+                raise RuntimeError(
+                    copy_probe_rejection_message(
+                        copy_decision,
+                        candidate_model_ref=normalize_model_ref(req.challenger_repo),
+                        candidate_model_digest=local_challenger_digest,
+                        candidate_submission_id=submission_id,
+                        candidate_submission_order=submission_order,
+                    )
+                )
+            on_phase({
+                "phase": "behavioral_copy_probe_done",
+                "version": COPY_PROBE_VERSION,
+            })
+            check_eval_runtime(t0)
+
+        # Only a challenger that clears the queue-copy gate incurs king-model
+        # loading, dataset sampling, and the full corpus quality evaluation.
+        king = ensure_king(
+            req,
+            king_snapshot,
+            king_config,
+            king_artifacts["source"],
+            king_device,
+            gpu_ids=king_gpu_ids,
+            on_phase=on_phase,
+        )
+        check_eval_runtime(t0)
+
+        tokenizer, tokenizer_meta = load_eval_tokenizer(king_snapshot, req, on_phase=on_phase)
         on_phase({
             "phase": "dataset_sample_start",
             "source": req.dataset_source,
@@ -1822,31 +1948,6 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         public_dataset_meta = _public_dataset_meta(dataset_meta)
         check_eval_runtime(t0)
         on_phase({"phase": "dataset_sample_done", "digest": dataset_meta["digest"][:16]})
-
-        use_parallel = req.parallel_models and len(_gpu_ids) >= 4
-        if use_parallel:
-            mid = len(_gpu_ids) // 2
-            king_gpu_ids = _gpu_ids[:mid]
-            challenger_gpu_ids = _gpu_ids[mid:]
-            on_phase({"phase": "parallel_models_setup", "king_gpus": king_gpu_ids, "challenger_gpus": challenger_gpu_ids})
-        else:
-            king_gpu_ids = _gpu_ids
-            challenger_gpu_ids = _gpu_ids
-
-        king_device = device_plan_for_gpus(king_gpu_ids)
-        challenger_device = device_plan_for_gpus(challenger_gpu_ids)
-        king = ensure_king(req, king_snapshot, king_config, king_artifacts["source"], king_device, gpu_ids=king_gpu_ids, on_phase=on_phase)
-        check_eval_runtime(t0)
-        challenger = load_quasar_model(
-            challenger_snapshot,
-            challenger_config,
-            challenger_device,
-            "challenger",
-            req,
-            gpu_ids=challenger_gpu_ids,
-            on_phase=on_phase,
-        )
-        check_eval_runtime(t0)
 
         if use_parallel:
             from concurrent.futures import ThreadPoolExecutor
@@ -2070,6 +2171,7 @@ async def lifespan(app: FastAPI):
     EVAL_RECORD_DIR.mkdir(parents=True, exist_ok=True)
     COMPLETED_SAFETENSORS_SHA_FILE.touch(exist_ok=True)
     SHARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    initialize_copy_probe_bank()
     _gpu_ids = parse_gpu_ids()
     log.info(
         "Quasar pair eval server starting; gpus=%s model_cache=%s shard_cache=%s records=%s",
@@ -2126,6 +2228,15 @@ async def health():
             "allow_patterns": MODEL_ALLOW_PATTERNS,
         },
         "probe_enabled": PROBE_ENABLED,
+        "behavioral_copy_probe": {
+            "enabled": COPY_PROBE_ENABLED,
+            "version": COPY_PROBE_VERSION,
+            "js_p95_max": COPY_PROBE_JS_P95_MAX,
+            "bank_size_limit": COPY_PROBE_BANK_SIZE,
+            "max_similar_models": COPY_PROBE_MAX_SIMILAR_MODELS,
+            "private_samples": True,
+            "passing_metrics_public": False,
+        },
         "allow_code_model_fallback_default": DEFAULT_ALLOW_CODE_MODEL_FALLBACK,
     }
 

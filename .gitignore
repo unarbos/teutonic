@@ -15,6 +15,7 @@ env/
 # Environment / secrets
 .env
 .env.*
+/.seed
 
 # PyTorch artifacts
 *.pt

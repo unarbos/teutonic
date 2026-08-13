@@ -2288,6 +2288,8 @@ async def process_challenge(state, r2, entry, subtensor, wallet, *, check_stale=
             "king_repo": king_repo,
             "challenger_repo": model_repo,
             "block_hash": block_hash,
+            "submission_id": cid,
+            "submission_block": reveal_block,
             "hotkey": hotkey,
             "coldkey": challenger_coldkey,
             "shard_key": shard_key,

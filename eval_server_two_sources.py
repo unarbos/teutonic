@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
     base.COMPLETED_SAFETENSORS_SHA_FILE.touch(exist_ok=True)
     base.SHARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     URL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    base.initialize_copy_probe_bank()
     base._gpu_ids = base.parse_gpu_ids()
     log.info(
         "Quasar two-source eval server starting; gpus=%s shard_cache=%s url_cache=%s",
@@ -105,6 +106,15 @@ async def health():
             "enabled": base.EVAL_EARLY_STOP,
             "min_fraction": base.EVAL_EARLY_STOP_MIN_FRACTION,
             "advantage_quantile": base.EVAL_EARLY_STOP_ADVANTAGE_QUANTILE,
+        },
+        "behavioral_copy_probe": {
+            "enabled": base.COPY_PROBE_ENABLED,
+            "version": base.COPY_PROBE_VERSION,
+            "js_p95_max": base.COPY_PROBE_JS_P95_MAX,
+            "bank_size_limit": base.COPY_PROBE_BANK_SIZE,
+            "max_similar_models": base.COPY_PROBE_MAX_SIMILAR_MODELS,
+            "private_samples": True,
+            "passing_metrics_public": False,
         },
     }
 
