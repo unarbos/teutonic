@@ -40,19 +40,21 @@ _FALLBACK_MANIFEST_URLS: list[str] = [
     "https://s3.hippius.com/teutonic-sn3/dataset/pes2o-v3/manifest.json",
     "https://s3.hippius.com/teutonic-sn3/dataset/openmathreasoning-quasar-10b/manifest.json",
     "https://s3.hippius.com/teutonic-sn3/dataset/cosmopedia-wikihow-stories-quasar-10b/manifest.json",
+    "https://s3.hippius.com/dendrite-teutonic/dataset/dolma3_longmino_pool_8k/manifest.json",
     "https://s3.hippius.com/dendrite-teutonic/dataset/dendrite-synth-run/manifest.json",
 ]
 _FALLBACK_SOURCE_WEIGHT_MAP: dict[str, float] = {
-    "automathtext-v2": 0.23,
-    "ultradata-math-l3": 0.09,
-    "finewebedu": 0.27,
-    "nemotron-specialized-v1.2": 0.04,
-    "nemotron-cc-math": 0.05,
-    "openthoughts3-1.2m": 0.10,
-    "pes2o-v3": 0.08,
-    "openmathreasoning-quasar-10b": 0.06,
+    "automathtext-v2": 0.19,
+    "ultradata-math-l3": 0.08,
+    "finewebedu": 0.25,
+    "nemotron-specialized-v1.2": 0.03,
+    "nemotron-cc-math": 0.04,
+    "openthoughts3-1.2m": 0.08,
+    "pes2o-v3": 0.06,
+    "openmathreasoning-quasar-10b": 0.10,
     "cosmopedia-wikihow-stories-quasar-10b": 0.06,
-    "dendrite-synth-run": 0.02,
+    "dolma3_longmino_pool_8k": 0.10,
+    "dendrite-synth-run": 0.01,
 }
 
 
@@ -76,7 +78,14 @@ def bundle_to_sources(bundle: dict) -> tuple[list[str], dict[str, float]]:
             continue
         manifest_urls.append(url)
         if entry.get("weight") is not None:
-            weight_map[name] = float(entry["weight"])
+            weight = float(entry["weight"])
+            weight_map[name] = weight
+            parts = [part for part in urlparse(url).path.split("/") if part]
+            url_source_name = parts[-2] if len(parts) >= 2 else ""
+            if url_source_name and url_source_name != name:
+                # The bundle name may use hyphens while its manifest directory
+                # uses underscores. Default sources are named from the URL.
+                weight_map[url_source_name] = weight
     return manifest_urls, weight_map
 
 
@@ -174,6 +183,7 @@ class MultiSourceEvalRequest(base.EvalRequest):
 class ShardRef:
     source: str
     ref: str
+    seq_len: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -248,19 +258,29 @@ def refs_from_manifest(source_name: str, manifest_ref: str, req: MultiSourceEval
         manifest_dict = {}
     else:
         raise ValueError(f"manifest source {source_name!r} must be a JSON object or list")
+    manifest_seq_len = int(
+        manifest_dict.get("seq_len") or manifest_dict.get("sequence_length") or 0
+    )
     refs: list[ShardRef] = []
     for entry in raw_shards:
         value = ""
+        shard_seq_len = manifest_seq_len
         if isinstance(entry, str):
             value = entry
         elif isinstance(entry, dict):
+            shard_seq_len = int(
+                entry.get("seq_len")
+                or entry.get("sequence_length")
+                or manifest_seq_len
+                or 0
+            )
             for key in ("url", "href", "uri", "key", "path", "name"):
                 if entry.get(key):
                     value = str(entry[key])
                     break
         normalized = normalize_manifest_ref(value, manifest_dict, manifest_ref)
         if normalized.endswith(".npy"):
-            refs.append(ShardRef(source_name, normalized))
+            refs.append(ShardRef(source_name, normalized, shard_seq_len or None))
     if not refs:
         raise FileNotFoundError(f"manifest source {source_name!r} produced no .npy refs from {manifest_ref!r}")
     return refs
@@ -412,14 +432,26 @@ def load_materialized_shard_with_retry(
 ) -> tuple[str, list[list[int]]]:
     local_path = materialize_shard(ref, req, on_phase=on_phase)
     try:
-        return local_path, base.load_sequences_from_npy_shard(local_path, req, rng, limit)
+        return local_path, base.load_sequences_from_npy_shard(
+            local_path,
+            req,
+            rng,
+            limit,
+            source_seq_len=ref.seq_len,
+        )
     except Exception as exc:
         if not base.is_truncated_npy_error(exc) or not can_redownload_shard(ref):
             raise
         log.warning("cached npy shard is truncated; deleting and redownloading: %s", local_path)
         Path(local_path).unlink(missing_ok=True)
         local_path = materialize_shard(ref, req, on_phase=on_phase)
-        return local_path, base.load_sequences_from_npy_shard(local_path, req, rng, limit)
+        return local_path, base.load_sequences_from_npy_shard(
+            local_path,
+            req,
+            rng,
+            limit,
+            source_seq_len=ref.seq_len,
+        )
 
 
 def static_source_weights(source_names: list[str]) -> list[float]:
@@ -470,6 +502,7 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
                     "name": spec.name,
                     "kind": spec.kind,
                     "shards": len(refs),
+                    "source_seq_len": refs[0].seq_len if refs else None,
                     "target_shards": req.shards_per_source,
                     "weight": round(weights[idx], 4),
                     "target_sequences": targets[idx],
@@ -546,6 +579,7 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
         source_meta.append({
             "name": spec.name,
             "kind": spec.kind,
+            "source_seq_len": refs[0].seq_len if refs else None,
             "target_sequences": target,
             "n_sequences": len(taken),
             "available_shards": len(refs),

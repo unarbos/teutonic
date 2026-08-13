@@ -1385,6 +1385,8 @@ def load_sequences_from_npy_shard(
     req: EvalRequest,
     rng: np.random.Generator,
     limit: int | None = None,
+    *,
+    source_seq_len: int | None = None,
 ) -> list[list[int]]:
     data_offset, header = read_npy_header(path)
     dtype = np.dtype(header["descr"])
@@ -1395,36 +1397,53 @@ def load_sequences_from_npy_shard(
         raise ValueError(f"{path} has invalid shape {shape}")
 
     arr = np.load(path, mmap_mode="r")
-    multiplier = int(req.seq_len_multiplier)
     merged_seq_len = effective_seq_len(req)
+    record_seq_len = int(source_seq_len or req.seq_len)
+    if record_seq_len < 1:
+        raise ValueError(f"{path} source sequence length must be >= 1")
+    if record_seq_len < merged_seq_len and merged_seq_len % record_seq_len:
+        raise ValueError(
+            f"{path} effective seq_len={merged_seq_len} is not divisible by "
+            f"source seq_len={record_seq_len}"
+        )
+    records_per_sequence = (
+        1 if record_seq_len >= merged_seq_len else merged_seq_len // record_seq_len
+    )
     if arr.ndim == 2:
-        if arr.shape[1] < req.seq_len:
-            raise ValueError(f"{path} sequence width {arr.shape[1]} < seq_len={req.seq_len}")
-        # A start in the last multiplier-1 rows cannot produce a complete
-        # merged sequence. Sample only valid starts, which is equivalent to
-        # picking another sequence whenever a tail row would be selected.
-        n_valid_starts = arr.shape[0] - multiplier + 1
+        if arr.shape[1] < record_seq_len:
+            raise ValueError(
+                f"{path} sequence width {arr.shape[1]} < source seq_len={record_seq_len}"
+            )
+        # A source with native 8K rows supplies one evaluation sequence per
+        # row. Legacy 2K rows are still concatenated four at a time.
+        n_valid_starts = arr.shape[0] - records_per_sequence + 1
         if n_valid_starts <= 0:
             return []
         indices = shuffled_indices(rng, n_valid_starts, limit)
-        return [
-            arr[int(i) : int(i) + multiplier, : req.seq_len]
-            .reshape(merged_seq_len)
-            .astype(np.int64, copy=False)
-            .tolist()
-            for i in indices
-        ]
+        out = []
+        for i in indices:
+            if record_seq_len >= merged_seq_len:
+                sequence = arr[int(i), :merged_seq_len]
+            else:
+                sequence = arr[
+                    int(i) : int(i) + records_per_sequence,
+                    :record_seq_len,
+                ].reshape(merged_seq_len)
+            out.append(sequence.astype(np.int64, copy=False).tolist())
+        return out
 
     if arr.ndim != 1:
         raise ValueError(f"{path} expected 1D token stream or 2D sequence matrix, got shape={arr.shape}")
-    n_base_sequences = arr.shape[0] // req.seq_len
-    n_valid_starts = n_base_sequences - multiplier + 1
+    n_source_sequences = arr.shape[0] // record_seq_len
+    n_valid_starts = n_source_sequences - records_per_sequence + 1
     if n_valid_starts <= 0:
         return []
     indices = shuffled_indices(rng, n_valid_starts, limit)
     out = []
     for i in indices:
-        start = int(i) * req.seq_len
+        # Align starts to the source manifest's packed-record boundary. This
+        # is 8192 for dolma3_longmino_pool_8k and 2048 for legacy sources.
+        start = int(i) * record_seq_len
         out.append(arr[start : start + merged_seq_len].astype(np.int64, copy=False).tolist())
     _ = data_offset
     return out
