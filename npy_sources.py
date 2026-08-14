@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import random
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,54 +17,119 @@ from pydantic import BaseModel, Field
 
 import eval_server_quasar_pair as base
 
+# chain_config sits at the repo root; ensure it imports regardless of cwd.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chain_config  # noqa: E402
+
 log = logging.getLogger("eval_server_two_sources")
 
 # ---------------------------------------------------------------------------
-# Source registry – fetched from the bundle manifest, env-configurable
+# Source registry – pinned dataset bundle, resolved once at server startup
 # ---------------------------------------------------------------------------
+#
+# The eval mixture IS the measuring stick. `delta_threshold` is a fixed constant
+# (0.0015 nats), so changing which corpora are sampled — or their mix weights —
+# moves the bar every challenger is judged against, while the recorded verdict
+# still says plain "accepted: true". Two consequences drive the design here:
+#
+#   1. There is deliberately NO hardcoded fallback mixture. A manifest we cannot
+#      fetch or cannot verify must stop the eval server. The validator then
+#      falls back to burn weights, which is honest and reversible; scoring
+#      against a silently different mixture corrupts the king chain forever.
+#   2. The bundle is pinned by digest in chain.toml, so changing the mixture is
+#      a reviewed commit rather than an invisible edit to a bucket object.
+#
+# Resolution is explicit (`ensure_bundle_resolved`, called from the server
+# lifespan) rather than an import side effect: importing this module must not do
+# network I/O, and a failure should surface as a refused startup rather than a
+# half-initialised module.
 
-# Bundle manifest aggregating all dataset sources (URLs + mix weights) so this
-# file no longer needs manual edits when sources or weights change upstream.
-DEFAULT_BUNDLE_MANIFEST_URL = os.environ.get(
-    "TEUTONIC_BUNDLE_MANIFEST_URL",
-    "https://s3.hippius.com/teutonic-sn3/dataset/all-datasets.manifest.json",
+# Precedence: env override > chain.toml > built-in default. Only the digest
+# gates correctness, so an unset chain.toml URL is not fatal.
+DEFAULT_BUNDLE_MANIFEST_URL = (
+    os.environ.get("TEUTONIC_BUNDLE_MANIFEST_URL", "").strip()
+    or chain_config.DATASET_BUNDLE_URL
+    or "https://s3.hippius.com/teutonic-sn3/dataset/all-datasets.manifest.json"
+)
+EXPECTED_BUNDLE_DIGEST = (
+    os.environ.get("TEUTONIC_BUNDLE_DIGEST", "").strip() or chain_config.DATASET_BUNDLE_DIGEST
 )
 
-# Used only if the bundle manifest can't be fetched (offline dev, network
-# outage) and no explicit env override is set.
-_FALLBACK_MANIFEST_URLS: list[str] = [
-    "https://s3.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
-    "https://s3.hippius.com/teutonic-sn3/dataset/ultradata-math-l3-quasar-10b/manifest.json",
-    "https://s3.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
-    "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-specialized-v1.2-quasar-10b/manifest.json",
-    "https://s3.hippius.com/teutonic-sn3/dataset/nemotron-cc-math-v1-4plus-mind-quasar-10b/manifest.json",
-    "https://s3.hippius.com/teutonic-sn3/dataset/openthoughts3-1.2m-quasar-10b/manifest.json",
-    "https://s3.hippius.com/teutonic-sn3/dataset/pes2o-v3/manifest.json",
-    "https://s3.hippius.com/teutonic-sn3/dataset/openmathreasoning-quasar-10b/manifest.json",
-    "https://s3.hippius.com/teutonic-sn3/dataset/cosmopedia-wikihow-stories-quasar-10b/manifest.json",
-    "https://s3.hippius.com/dendrite-teutonic/dataset/dolma3_longmino_pool_8k/manifest.json",
-    "https://s3.hippius.com/dendrite-teutonic/dataset/dendrite-synth-run/manifest.json",
-]
-_FALLBACK_SOURCE_WEIGHT_MAP: dict[str, float] = {
-    "automathtext-v2": 0.19,
-    "ultradata-math-l3": 0.08,
-    "finewebedu": 0.25,
-    "nemotron-specialized-v1.2": 0.03,
-    "nemotron-cc-math": 0.04,
-    "openthoughts3-1.2m": 0.08,
-    "pes2o-v3": 0.06,
-    "openmathreasoning-quasar-10b": 0.10,
-    "cosmopedia-wikihow-stories-quasar-10b": 0.06,
-    "dolma3_longmino_pool_8k": 0.10,
-    "dendrite-synth-run": 0.01,
-}
+# Bounded retry: a transient blip should not take the eval box down, but an
+# unreachable manifest must eventually raise rather than degrade.
+BUNDLE_FETCH_ATTEMPTS = max(1, int(os.environ.get("TEUTONIC_BUNDLE_FETCH_ATTEMPTS", "3")))
+BUNDLE_FETCH_BACKOFF_S = float(os.environ.get("TEUTONIC_BUNDLE_FETCH_BACKOFF_S", "5"))
+BUNDLE_FETCH_TIMEOUT_S = float(os.environ.get("TEUTONIC_BUNDLE_FETCH_TIMEOUT_S", "30"))
 
 
-def fetch_bundle_manifest(url: str) -> dict:
-    """Fetch and parse the multi-source dataset bundle manifest at `url`."""
-    request = Request(url, headers={"User-Agent": "teutonic-eval/1.0"})
-    with urlopen(request, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+class BundleManifestError(RuntimeError):
+    """The dataset bundle could not be fetched, parsed, or matched to its pin."""
+
+
+def bundle_digest(raw: bytes) -> str:
+    """sha256 over the exact manifest bytes, in chain.toml's digest format."""
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def fetch_bundle_manifest(
+    url: str,
+    *,
+    attempts: int = BUNDLE_FETCH_ATTEMPTS,
+    backoff_s: float = BUNDLE_FETCH_BACKOFF_S,
+    timeout_s: float = BUNDLE_FETCH_TIMEOUT_S,
+) -> tuple[dict, str]:
+    """Fetch and parse the dataset bundle manifest at `url`.
+
+    Returns (parsed_manifest, digest). Retries a bounded number of times on any
+    failure and then raises — never returns a substitute mixture.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            request = Request(url, headers={"User-Agent": "teutonic-eval/1.0"})
+            with urlopen(request, timeout=timeout_s) as resp:
+                raw = resp.read()
+            return json.loads(raw.decode("utf-8")), bundle_digest(raw)
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "dataset bundle fetch attempt %d/%d failed for %s: %s", attempt, attempts, url, exc
+            )
+            if attempt < attempts:
+                time.sleep(backoff_s * attempt)
+    raise BundleManifestError(
+        f"could not fetch dataset bundle manifest {url} after {attempts} attempts"
+    ) from last_exc
+
+
+def verify_bundle_digest(actual: str, expected: str) -> None:
+    """Enforce the chain.toml pin. Empty pin logs loudly but allows startup."""
+    if not expected:
+        log.warning(
+            "dataset bundle is UNPINNED (chain.toml [dataset].bundle_digest is empty); "
+            "resolved digest=%s — set it to make mixture drift fatal",
+            actual,
+        )
+        return
+    if actual != expected:
+        raise BundleManifestError(
+            f"dataset bundle digest mismatch: expected={expected} actual={actual}; "
+            "the eval mixture changed under a pinned chain.toml — refusing to score"
+        )
+
+
+def resolve_bundle_sources(
+    url: str = DEFAULT_BUNDLE_MANIFEST_URL,
+    expected_digest: str = EXPECTED_BUNDLE_DIGEST,
+    **fetch_kwargs,
+) -> tuple[list[str], dict[str, float], str]:
+    """Fetch, verify, and unpack the bundle into (manifest_urls, weights, digest)."""
+    bundle, digest = fetch_bundle_manifest(url, **fetch_kwargs)
+    verify_bundle_digest(digest, expected_digest)
+    manifest_urls, weight_map = bundle_to_sources(bundle)
+    if not manifest_urls:
+        raise BundleManifestError(f"dataset bundle {url} has no enabled sources")
+    return manifest_urls, weight_map, digest
 
 
 def bundle_to_sources(bundle: dict) -> tuple[list[str], dict[str, float]]:
@@ -89,46 +156,75 @@ def bundle_to_sources(bundle: dict) -> tuple[list[str], dict[str, float]]:
     return manifest_urls, weight_map
 
 
-def _load_bundle_defaults() -> tuple[list[str], dict[str, float]]:
-    try:
-        manifest_urls, weight_map = bundle_to_sources(fetch_bundle_manifest(DEFAULT_BUNDLE_MANIFEST_URL))
-        if manifest_urls:
-            return manifest_urls, weight_map
-        log.warning(
-            "bundle manifest %s has no enabled sources; using hardcoded fallback", DEFAULT_BUNDLE_MANIFEST_URL
-        )
-    except Exception as exc:
-        log.warning(
-            "failed to fetch bundle manifest %s (%s); using hardcoded fallback", DEFAULT_BUNDLE_MANIFEST_URL, exc
-        )
-    return list(_FALLBACK_MANIFEST_URLS), dict(_FALLBACK_SOURCE_WEIGHT_MAP)
-
-
 _raw_manifest_urls = os.environ.get("TEUTONIC_MANIFEST_URLS", "").strip()
 _raw_weight_map = os.environ.get("TEUTONIC_SOURCE_WEIGHT_MAP", "").strip()
-# Only hit the network if neither override is set — an explicit env override
-# means the caller doesn't want the bundle manifest consulted at all.
-_bundle_manifest_urls, _bundle_weight_map = (
-    ([], {}) if (_raw_manifest_urls or _raw_weight_map) else _load_bundle_defaults()
-)
 
-DEFAULT_MANIFEST_URLS: list[str] = (
-    [u.strip() for u in _raw_manifest_urls.split(",") if u.strip()] if _raw_manifest_urls else _bundle_manifest_urls
-)
+# Populated by ensure_bundle_resolved(); empty until then. Env overrides are
+# applied eagerly because they need no network.
+DEFAULT_MANIFEST_URLS: list[str] = [
+    u.strip() for u in _raw_manifest_urls.split(",") if u.strip()
+]
 
 # Fixed per-source sampling weights matched by substring against the source name.
 # Override via TEUTONIC_SOURCE_WEIGHT_MAP="pattern1=w1,pattern2=w2,..."
 # or TEUTONIC_SOURCE_WEIGHTS="w1,w2,..." (positional, aligned to npy_manifests order).
-DEFAULT_SOURCE_WEIGHT_MAP: dict[str, float] = (
-    {
-        k.strip(): float(v.strip())
-        for pair in _raw_weight_map.split(",")
-        if "=" in pair
-        for k, v in [pair.split("=", 1)]
-    }
-    if _raw_weight_map
-    else _bundle_weight_map
-)
+DEFAULT_SOURCE_WEIGHT_MAP: dict[str, float] = {
+    k.strip(): float(v.strip())
+    for pair in _raw_weight_map.split(",")
+    if "=" in pair
+    for k, v in [pair.split("=", 1)]
+}
+
+# Provenance of the active mixture, stamped into every verdict so a decision can
+# be audited against the exact source list that produced it.
+RESOLVED_BUNDLE: dict[str, object] = {}
+
+
+def ensure_bundle_resolved(*, force: bool = False) -> dict:
+    """Resolve the dataset mixture into the module defaults. Idempotent.
+
+    Raises BundleManifestError if the bundle is unreachable or fails its pin —
+    the caller (server lifespan) must let that abort startup rather than serve
+    evals against an unknown mixture.
+    """
+    if RESOLVED_BUNDLE and not force:
+        return dict(RESOLVED_BUNDLE)
+
+    if _raw_manifest_urls or _raw_weight_map:
+        # An explicit env override means the operator does not want the bundle
+        # consulted at all. Legitimate for local dev; recorded so a verdict
+        # produced this way is never mistaken for a pinned-mixture verdict.
+        log.warning(
+            "dataset sources come from env overrides (%d manifests); bundle manifest not consulted",
+            len(DEFAULT_MANIFEST_URLS),
+        )
+        RESOLVED_BUNDLE.update({"origin": "env_override", "url": "", "digest": "", "pinned": False})
+        return dict(RESOLVED_BUNDLE)
+
+    urls, weights, digest = resolve_bundle_sources(
+        DEFAULT_BUNDLE_MANIFEST_URL, EXPECTED_BUNDLE_DIGEST
+    )
+    # Mutated in place, not rebound: eval_server_two_sources imports these names
+    # by value, so rebinding here would leave that module holding stale objects.
+    DEFAULT_MANIFEST_URLS.clear()
+    DEFAULT_MANIFEST_URLS.extend(urls)
+    DEFAULT_SOURCE_WEIGHT_MAP.clear()
+    DEFAULT_SOURCE_WEIGHT_MAP.update(weights)
+    RESOLVED_BUNDLE.update({
+        "origin": "bundle",
+        "url": DEFAULT_BUNDLE_MANIFEST_URL,
+        "digest": digest,
+        "pinned": bool(EXPECTED_BUNDLE_DIGEST),
+        "n_sources": len(urls),
+    })
+    log.info(
+        "dataset bundle resolved: %d sources digest=%s pinned=%s",
+        len(urls),
+        digest,
+        bool(EXPECTED_BUNDLE_DIGEST),
+    )
+    return dict(RESOLVED_BUNDLE)
+
 
 _raw_weights = os.environ.get("TEUTONIC_SOURCE_WEIGHTS", "")
 DEFAULT_SOURCE_WEIGHTS: list[float] = (
@@ -343,6 +439,12 @@ def _manifest_source_name(url: str) -> str:
 def default_sources(req: MultiSourceEvalRequest) -> list[NpyDataSource]:
     if req.npy_sources:
         return [source for source in req.npy_sources if source.enabled]
+    if not req.npy_manifests:
+        # Reachable only if the server started without resolving the bundle.
+        # Refuse rather than sample from an empty/unknown mixture.
+        raise BundleManifestError(
+            "no dataset sources available — ensure_bundle_resolved() was not run or resolved empty"
+        )
     return [
         NpyDataSource(name=_manifest_source_name(url), kind="manifest", value=url)
         for url in req.npy_manifests
@@ -617,6 +719,9 @@ def sample_balanced_multi_source(req: MultiSourceEvalRequest, on_phase=None) -> 
         "digest": digest,
         "source": "multi_source_npy",
         "source_mix_policy": req.source_mix_policy,
+        # Which mixture produced this sample. Recorded in the verdict so an
+        # accept/reject can be replayed against the exact source list.
+        "bundle": dict(RESOLVED_BUNDLE),
         "sources": source_meta,
         # Private key: parallel list of source names for each sequence in the
         # shuffled order. Consumed by eval_server to compute per-source scores;
