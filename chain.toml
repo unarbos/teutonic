@@ -38,6 +38,18 @@ extra_lock_keys = [
   "use_gla",
   "use_nope",
 ]
+[dataset]
+# The eval mixture is part of the scoring contract, not runtime config. The
+# accept threshold (EVAL_DELTA) is fixed, so changing the sources or their mix
+# weights silently moves the bar every challenger is measured against. Pin the
+# bundle here so a mixture change is a reviewed, versioned commit rather than an
+# invisible edit to a JSON file on a bucket.
+bundle_manifest_url = "https://s3.hippius.com/teutonic-sn3/dataset/all-datasets.manifest.json"
+# sha256 over the exact manifest bytes. Empty = fetch is still mandatory (there
+# is no fallback mixture) but unverified; fill this in to make drift fatal.
+# Recompute with: scripts/pin_dataset_bundle.py
+bundle_digest = ""
+
 [seed]
 tokenizer_repo = "silx-ai/Quasar-10B"
 repo_backend = "hippius"

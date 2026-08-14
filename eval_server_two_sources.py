@@ -34,9 +34,11 @@ from npy_sources import (
     DEFAULT_MANIFEST_URLS,
     DEFAULT_SHARDS_PER_SOURCE,
     DEFAULT_SOURCE_WEIGHT_MAP,
+    RESOLVED_BUNDLE,
     MultiSourceEvalRequest,
     URL_CACHE_DIR,
     _manifest_source_name,
+    ensure_bundle_resolved,
 )
 
 log = logging.getLogger("eval_server_two_sources")
@@ -50,13 +52,19 @@ async def lifespan(app: FastAPI):
     base.COMPLETED_SAFETENSORS_SHA_FILE.touch(exist_ok=True)
     base.SHARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     URL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # Resolve the eval mixture before accepting any request. Deliberately not
+    # guarded: an unreachable or unpinned-mismatched bundle must abort startup
+    # so the validator burns weights instead of scoring against an unknown
+    # mixture. PM2 restarts this process, so a transient outage self-heals.
+    bundle = ensure_bundle_resolved()
     base.initialize_copy_probe_bank()
     base._gpu_ids = base.parse_gpu_ids()
     log.info(
-        "Quasar two-source eval server starting; gpus=%s shard_cache=%s url_cache=%s",
+        "Quasar two-source eval server starting; gpus=%s shard_cache=%s url_cache=%s bundle=%s",
         base._gpu_ids,
         base.SHARD_CACHE_DIR,
         URL_CACHE_DIR,
+        bundle,
     )
     yield
     log.info("Quasar two-source eval server shutting down")
@@ -84,6 +92,7 @@ async def health():
             for url in DEFAULT_MANIFEST_URLS
         ],
         "source_weights": DEFAULT_SOURCE_WEIGHT_MAP,
+        "dataset_bundle": dict(RESOLVED_BUNDLE),
         "defaults": {
             "batch_size": base.DEFAULT_BATCH_SIZE,
             "effective_batch_size": max(

@@ -1700,7 +1700,13 @@ def _shards_used(dataset_meta: dict) -> list[dict]:
 
 
 def _public_dataset_meta(dataset_meta: dict) -> dict:
-    meta = {"source": dataset_meta.get("source"), "shards_used": _shards_used(dataset_meta)}
+    meta = {
+        "source": dataset_meta.get("source"),
+        "shards_used": _shards_used(dataset_meta),
+        # Mixture provenance (url + digest + pinned flag) when the multi-source
+        # sampler supplied it; absent for single-source evals.
+        "bundle": dataset_meta.get("bundle"),
+    }
     return {k: v for k, v in meta.items() if v}
 
 

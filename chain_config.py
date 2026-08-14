@@ -34,6 +34,9 @@ with open(_TOML_PATH, "rb") as _f:
 _chain = _doc.get("chain", {})
 _arch = _doc.get("arch", {})
 _seed = _doc.get("seed", {})
+_dataset = _doc.get("dataset", {})
+
+_BUNDLE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 _VALID_SEED_REPO_BACKENDS = {"hf", "hippius"}
 
@@ -60,6 +63,19 @@ if SEED_REPO_BACKEND not in _VALID_SEED_REPO_BACKENDS:
     raise RuntimeError(
         f"chain.toml [seed].repo_backend must be one of "
         f"{sorted(_VALID_SEED_REPO_BACKENDS)}, got {SEED_REPO_BACKEND!r}"
+    )
+
+# Dataset bundle that defines the eval mixture. The URL is advisory (callers may
+# override it); the digest is the pin — when set, the eval server refuses to
+# score against a manifest whose bytes don't match.
+DATASET_BUNDLE_URL: str = (_dataset.get("bundle_manifest_url") or "").strip()
+DATASET_BUNDLE_DIGEST: str = (_dataset.get("bundle_digest") or "").strip()
+if DATASET_BUNDLE_DIGEST and not _BUNDLE_DIGEST_RE.match(DATASET_BUNDLE_DIGEST):
+    # Fail at import: a malformed pin would otherwise read as "unpinned" and
+    # silently disable the very check it was added to enforce.
+    raise RuntimeError(
+        "chain.toml [dataset].bundle_digest must be 'sha256:<64 hex>' or empty, "
+        f"got {DATASET_BUNDLE_DIGEST!r}"
     )
 
 # HF namespace inferred from the seed repo. Miners default their challenger
@@ -90,5 +106,7 @@ __all__ = [
     "SEED_DIGEST",
     "SEED_REPO_BACKEND",
     "SEED_NAMESPACE",
+    "DATASET_BUNDLE_URL",
+    "DATASET_BUNDLE_DIGEST",
     "load_arch",
 ]
