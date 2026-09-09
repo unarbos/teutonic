@@ -65,6 +65,7 @@ class EvaluationConfigurationIntegrationTests(unittest.TestCase):
             n=2000,
             delta_threshold=0.5,
             manifests=(snapshot("a"),),
+            shards_per_dataset=4,
         )
         second = store_evaluation_configuration(
             self.connection,
@@ -75,6 +76,7 @@ class EvaluationConfigurationIntegrationTests(unittest.TestCase):
             n=100,
             delta_threshold=0.25,
             manifests=(snapshot("b"),),
+            shards_per_dataset=4,
         )
         self.assertNotEqual(first.config_version, second.config_version)
         rows = self.connection.execute(

@@ -56,6 +56,7 @@ def evaluation_policy_from_env(
         delta_threshold=settings.delta_threshold,
         dataset_source="pretokenized_npy",
         dataset_label=settings.dataset_label,
+        shards_per_dataset=settings.shards_per_dataset,
         batch_size=int(
             env.get("TEUTONIC_EVAL_BATCH_SIZE", str(DEFAULT_EVAL_BATCH_SIZE))
         ),

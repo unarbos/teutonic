@@ -81,8 +81,9 @@ class ValidatorRepository:
             cursor.execute(
                 """
                 SELECT ec.config_version, ec.dataset_label, ec.eval_n,
-                       ec.delta_threshold, dm.position, dm.name, dm.manifest_url,
-                       dm.manifest_sha256, dm.manifest_json, dm.sample_proportion
+                       ec.delta_threshold, ec.shards_per_dataset, dm.position, dm.name,
+                       dm.manifest_url, dm.manifest_sha256, dm.manifest_json,
+                       dm.sample_proportion
                   FROM control_plane.competitions c
                   JOIN control_plane.evaluation_configs ec
                     ON ec.competition_id = c.competition_id AND ec.active
@@ -113,6 +114,7 @@ class ValidatorRepository:
             n=int(first["eval_n"]),
             delta_threshold=float(first["delta_threshold"]),
             manifests=manifests,
+            shards_per_dataset=int(first["shards_per_dataset"]),
         )
 
     def load_early_stopping_policy(self) -> EarlyStoppingPolicy:

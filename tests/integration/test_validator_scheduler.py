@@ -60,6 +60,7 @@ def policy(**overrides) -> EvaluationPolicyConfig:
         "delta_threshold": 0.0015,
         "dataset_source": "pretokenized_npy",
         "dataset_label": "fixture-v1",
+        "shards_per_dataset": 4,
         "dataset_manifests": (snapshot,),
         "lease": timedelta(minutes=2),
         "retry_base_delay": timedelta(seconds=5),

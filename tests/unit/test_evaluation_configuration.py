@@ -58,6 +58,7 @@ class EvaluationConfigurationTests(unittest.TestCase):
             n=7,
             delta_threshold=0.5,
             manifests=(snapshot("alpha", 0.6, "a"), snapshot("beta", 0.4, "b")),
+            shards_per_dataset=4,
         )
         request = pretokenized_dataset_request(
             settings,
@@ -83,6 +84,7 @@ class EvaluationConfigurationTests(unittest.TestCase):
             n=1,
             delta_threshold=0.5,
             manifests=(snapshot("alpha", 1.0, "a"),),
+            shards_per_dataset=4,
         )
         kwargs = {
             "settings": settings,

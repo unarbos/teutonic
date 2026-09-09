@@ -70,6 +70,7 @@ class ValidatorRuntimeTests(unittest.TestCase):
             n=2000,
             delta_threshold=0.5,
             manifests=(snapshot,),
+            shards_per_dataset=4,
         )
     def test_equal_weight_plan_preserves_order_and_deduplicates_uids(self):
         hotkeys, uids, weights = equal_weight_plan(

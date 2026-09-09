@@ -279,12 +279,14 @@ CREATE TABLE control_plane.evaluation_configs (
     dataset_label text NOT NULL,
     eval_n integer NOT NULL,
     delta_threshold double precision NOT NULL,
+    shards_per_dataset integer DEFAULT 4 NOT NULL,
     active boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT evaluation_configs_config_version_check CHECK ((config_version ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT evaluation_configs_dataset_label_check CHECK ((dataset_label <> ''::text)),
     CONSTRAINT evaluation_configs_delta_threshold_check CHECK (((delta_threshold >= (0)::double precision) AND (delta_threshold <= (100)::double precision))),
-    CONSTRAINT evaluation_configs_eval_n_check CHECK ((eval_n > 0))
+    CONSTRAINT evaluation_configs_eval_n_check CHECK ((eval_n > 0)),
+    CONSTRAINT evaluation_configs_shards_per_dataset_check CHECK ((shards_per_dataset > 0))
 );
 
 

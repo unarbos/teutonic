@@ -59,21 +59,32 @@ initial_weight_uids = [110, 115, 143, 224, 226]
 "tokenizer_config.json" = "2cb1d781e7d20a1386d6a6c2c89fdc9b18a9c6f277071488f39dbfc02829589e"
 
 [evaluation]
-dataset_label = "finewebedu-automathtext-v2-dclm-baseline-1.0"
-n = 4000
+dataset_label = "pretrain-behaviors-math-reasoning-txt360-v2-code-reasoning-sft-reasoning"
+n = 20000
 delta_threshold = 0.025
+shards_per_dataset = 4
 
 [[evaluation.datasets]]
-name = "finewebedu"
-manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/finewebedu/manifest.json"
+name = "pretrain-behaviors"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/pretrain-behaviors/manifest.json"
+proportion = 0.32
+
+[[evaluation.datasets]]
+name = "math-reasoning"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/math-reasoning/manifest.json"
+proportion = 0.28
+
+[[evaluation.datasets]]
+name = "txt360-v2"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/txt360-v2/manifest.json"
 proportion = 0.22
 
 [[evaluation.datasets]]
-name = "automathtext-v2"
-manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/automathtext-v2/manifest.json"
-proportion = 0.26
+name = "code-reasoning"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/code-reasoning/manifest.json"
+proportion = 0.17
 
 [[evaluation.datasets]]
-name = "dclm-baseline-1.0"
-manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/dclm-baseline-1.0/manifest.json"
-proportion = 0.52
+name = "sft-reasoning"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/sft-reasoning/manifest.json"
+proportion = 0.01

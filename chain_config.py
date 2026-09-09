@@ -80,6 +80,7 @@ EVALUATION_DATASETS: tuple[dict[str, object], ...] = tuple(
     }
     for item in _evaluation.get("datasets", ())
 )
+EVALUATION_SHARDS_PER_DATASET: int = int(_evaluation.get("shards_per_dataset") or 0)
 CHAIN_GENERATION: str = str(_chain.get("generation") or "").strip() or (
     f"{NAME}-{SEED_DIGEST.replace(':', '-')}"
 )
@@ -117,6 +118,8 @@ if not math.isfinite(EVALUATION_DELTA_THRESHOLD) or EVALUATION_DELTA_THRESHOLD <
     raise RuntimeError("chain.toml [evaluation].delta_threshold must be finite and non-negative")
 if not EVALUATION_DATASETS:
     raise RuntimeError("chain.toml [[evaluation.datasets]] requires at least one dataset")
+if EVALUATION_SHARDS_PER_DATASET < 1:
+    raise RuntimeError("chain.toml [evaluation].shards_per_dataset must be positive")
 if any(
     not item["name"]
     or not str(item["manifest_url"]).startswith("https://")
@@ -165,6 +168,7 @@ __all__ = [
     "EVALUATION_N",
     "EVALUATION_DELTA_THRESHOLD",
     "EVALUATION_DATASETS",
+    "EVALUATION_SHARDS_PER_DATASET",
     "SEED_REPO_BACKEND",
     "SEED_HOTKEY",
     "SEED_INITIAL_WEIGHT_UIDS",

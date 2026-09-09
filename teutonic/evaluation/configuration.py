@@ -111,6 +111,7 @@ class EvaluationSettings:
     n: int
     delta_threshold: float
     manifests: tuple[DatasetManifestSnapshot, ...]
+    shards_per_dataset: int
 
     def __post_init__(self) -> None:
         if not _DIGEST.fullmatch(self.config_version):
@@ -123,6 +124,8 @@ class EvaluationSettings:
             raise ValueError("evaluation delta threshold must be finite")
         if not self.manifests:
             raise ValueError("evaluation configuration needs dataset manifests")
+        if self.shards_per_dataset < 1:
+            raise ValueError("evaluation shards_per_dataset must be positive")
         total = sum(item.proportion for item in self.manifests)
         if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
             raise ValueError("dataset sample proportions must sum to 1")
@@ -178,6 +181,7 @@ def pretokenized_dataset_request(
             f"{seed}:{snapshot.name}".encode("utf-8"), digest_size=8
         ).digest()
         random.Random(int.from_bytes(source_digest, "little")).shuffle(shards)
+        shards = shards[: settings.shards_per_dataset]
         selected: list[dict[str, Any]] = []
         available_sequences = 0
         required_sequences = target + max(16, math.ceil(target * 0.5))
@@ -254,6 +258,7 @@ def evaluation_config_version(
     n: int,
     delta_threshold: float,
     manifests: Sequence[DatasetManifestSnapshot],
+    shards_per_dataset: int,
 ) -> str:
     value = {
         "dataset_label": dataset_label,
@@ -268,7 +273,8 @@ def evaluation_config_version(
             for item in manifests
         ],
         "n": int(n),
-        "protocol_version": 1,
+        "shards_per_dataset": int(shards_per_dataset),
+        "protocol_version": 2,
     }
     return hashlib.sha256(canonical_manifest_bytes(value)).hexdigest()
 
@@ -290,6 +296,7 @@ def store_evaluation_configuration(
     n: int,
     delta_threshold: float,
     manifests: Sequence[DatasetManifestSnapshot],
+    shards_per_dataset: int,
 ) -> StoredEvaluationConfiguration:
     snapshots = tuple(manifests)
     config_version = evaluation_config_version(
@@ -297,6 +304,7 @@ def store_evaluation_configuration(
         n=n,
         delta_threshold=delta_threshold,
         manifests=snapshots,
+        shards_per_dataset=shards_per_dataset,
     )
     settings = EvaluationSettings(
         config_version=config_version,
@@ -304,6 +312,7 @@ def store_evaluation_configuration(
         n=n,
         delta_threshold=delta_threshold,
         manifests=snapshots,
+        shards_per_dataset=shards_per_dataset,
     )
     with connection.transaction():
         row = connection.execute(
@@ -332,8 +341,8 @@ def store_evaluation_configuration(
                 """
                 INSERT INTO control_plane.evaluation_configs (
                     competition_id, config_version, dataset_label, eval_n,
-                    delta_threshold, active
-                ) VALUES (%s, %s, %s, %s, %s, false)
+                    delta_threshold, shards_per_dataset, active
+                ) VALUES (%s, %s, %s, %s, %s, %s, false)
                 RETURNING evaluation_config_id
                 """,
                 (
@@ -342,6 +351,7 @@ def store_evaluation_configuration(
                     settings.dataset_label,
                     settings.n,
                     settings.delta_threshold,
+                    settings.shards_per_dataset,
                 ),
             ).fetchone()["evaluation_config_id"]
             for position, snapshot in enumerate(settings.manifests):

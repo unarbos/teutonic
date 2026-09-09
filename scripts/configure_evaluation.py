@@ -47,6 +47,7 @@ def main() -> int:
             n=chain_config.EVALUATION_N,
             delta_threshold=chain_config.EVALUATION_DELTA_THRESHOLD,
             manifests=snapshots,
+            shards_per_dataset=chain_config.EVALUATION_SHARDS_PER_DATASET,
         )
     log.info(
         "%s evaluation config=%s n=%s delta=%s datasets=%s",

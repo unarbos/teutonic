@@ -28,6 +28,7 @@ class EvaluationPolicyConfig:
     delta_threshold: float
     dataset_source: str
     dataset_label: str
+    shards_per_dataset: int
     batch_size: int = DEFAULT_EVAL_BATCH_SIZE
     dataset_manifests: tuple[DatasetManifestSnapshot, ...] = ()
     early_stopping: EarlyStoppingPolicy = field(default_factory=EarlyStoppingPolicy)
@@ -56,6 +57,8 @@ class EvaluationPolicyConfig:
             raise ValueError("early stopping check_interval cannot exceed evaluation n")
         if self.dataset_source != "pretokenized_npy" or not self.dataset_manifests:
             raise ValueError("evaluation needs database-backed pre-tokenized manifests")
+        if self.shards_per_dataset < 1:
+            raise ValueError("shards_per_dataset must be positive")
 
     @property
     def thresholds(self) -> dict[str, int | float]:
@@ -82,6 +85,7 @@ class EvaluationPolicyConfig:
             n=self.n,
             delta_threshold=self.delta_threshold,
             manifests=self.dataset_manifests,
+            shards_per_dataset=self.shards_per_dataset,
         )
         return pretokenized_dataset_request(
             settings,
