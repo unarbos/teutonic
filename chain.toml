@@ -61,7 +61,7 @@ initial_weight_uids = [110, 115, 143, 224, 226]
 [evaluation]
 dataset_label = "pretrain-behaviors-math-reasoning-txt360-v2-code-reasoning-sft-reasoning"
 n = 20000
-delta_threshold = 0.025
+delta_threshold = 0.0125
 shards_per_dataset = 4
 
 [[evaluation.datasets]]
