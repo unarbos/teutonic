@@ -5,14 +5,17 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from transformers import GPT2Config, GPT2LMHeadModel
 
 from teutonic.evaluator import engine as eval_server
+from teutonic.evaluator import sources
 from teutonic.evaluator.engine import (
     MODEL_INSTANCES_PER_SIDE,
     MODEL_WORKER_PROCESSES,
@@ -443,3 +446,124 @@ def test_two_gpu_pipeline_overlaps_next_stage_one_with_current_stage_two(monkeyp
     assert pipeline.depth == 2
     assert events.index((1, "stage1")) < events.index((0, "done"))
     assert {output.get()["sequence_index"], output.get()["sequence_index"]} == {0, 1}
+
+
+def test_indexed_npy_loader_preserves_row_and_window_indices(tmp_path):
+    request = SimpleNamespace(seq_len=3)
+
+    matrix_path = tmp_path / "matrix.npy"
+    matrix = np.arange(12, dtype=np.uint32).reshape(4, 3)
+    np.save(matrix_path, matrix)
+    matrix_rows = eval_server.load_indexed_sequences_from_npy_shard(
+        str(matrix_path), request, np.random.default_rng(7)
+    )
+    assert {index for index, _sequence in matrix_rows} == set(range(4))
+    assert all(sequence == matrix[index].tolist() for index, sequence in matrix_rows)
+
+    stream_path = tmp_path / "stream.npy"
+    stream = np.arange(15, dtype=np.uint32)
+    np.save(stream_path, stream)
+    stream_rows = eval_server.load_indexed_sequences_from_npy_shard(
+        str(stream_path), request, np.random.default_rng(11)
+    )
+    assert {index for index, _sequence in stream_rows} == set(range(5))
+    assert all(
+        sequence == stream[index * 3 : (index + 1) * 3].tolist()
+        for index, sequence in stream_rows
+    )
+
+
+def test_sampler_keeps_shard_provenance_aligned_through_shuffle(monkeypatch, tmp_path):
+    request = SimpleNamespace(
+        n=4,
+        seq_len=2,
+        vocab_size=0,
+        block_hash="0x" + "a" * 64,
+        hotkey="hotkey",
+        dataset_sources=[
+            {
+                "name": "fixture",
+                "proportion": 1.0,
+                "target_sequences": 4,
+                "shards": [
+                    {
+                        "url": "https://datasets.example/alpha.npy",
+                        "sha256": "a" * 64,
+                        "size_bytes": 100,
+                        "n_tokens": 100,
+                        "target_sequences": 2,
+                    },
+                    {
+                        "url": "https://datasets.example/beta.npy",
+                        "sha256": "b" * 64,
+                        "size_bytes": 100,
+                        "n_tokens": 100,
+                        "target_sequences": 2,
+                    },
+                ],
+            }
+        ],
+    )
+    loaded = {
+        "alpha.npy": [(7, [107, 1]), (8, [108, 1])],
+        "beta.npy": [(20, [220, 1]), (21, [221, 1])],
+    }
+
+    def fake_load(shard, _request, _rng, _limit, on_phase=None):
+        del on_phase
+        return tmp_path, loaded[Path(shard.url).name]
+
+    monkeypatch.setattr(sources, "_load_with_retry", fake_load)
+    monkeypatch.setattr(sources.base, "dataset_seed", lambda _request: 123)
+    monkeypatch.setattr(
+        sources.base, "dataset_seed_material", lambda _request: "fixture-seed"
+    )
+
+    sequences, metadata = sources.sample_pretokenized_sequences(request)
+    observed = {
+        sequence[0]: (
+            provenance["shard_group_index"],
+            provenance["shard_index"],
+            provenance["shard_sequence_index"],
+        )
+        for sequence, provenance in zip(
+            sequences, metadata["_sample_provenance"], strict=True
+        )
+    }
+
+    assert observed == {
+        107: (0, 0, 7),
+        108: (0, 0, 8),
+        220: (0, 1, 20),
+        221: (0, 1, 21),
+    }
+    assert metadata["_source_labels"] == ["fixture"] * 4
+
+
+def test_sample_results_are_compact_and_index_aligned():
+    result = eval_server._build_sample_results(
+        [1.2, 1.3],
+        [1.1, 1.4],
+        [
+            {
+                "shard_group_index": 0,
+                "shard_index": 2,
+                "shard_sequence_index": 42,
+            },
+            {
+                "shard_group_index": 1,
+                "shard_index": 0,
+                "shard_sequence_index": 9,
+            },
+        ],
+    )
+
+    assert result == {
+        "format": "columnar-v1",
+        "n_samples": 2,
+        "shard_group_index": [0, 1],
+        "shard_index": [2, 0],
+        "shard_sequence_index": [42, 9],
+        "king_loss": [1.2, 1.3],
+        "challenger_loss": [1.1, 1.4],
+    }

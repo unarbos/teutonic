@@ -300,7 +300,13 @@ class EvaluationRequestV2:
             for shard_index, shard_value in enumerate(raw_shards):
                 shard_path = f"{path}.shards[{shard_index}]"
                 shard = _required_mapping(shard_value, shard_path)
-                _exact_keys(shard, {"url", "sha256", "size_bytes", "n_tokens"}, shard_path)
+                # target_sequences is optional: _exact_keys only rejects unknown
+                # fields, so older validators that omit it still validate.
+                _exact_keys(
+                    shard,
+                    {"url", "sha256", "size_bytes", "n_tokens", "target_sequences"},
+                    shard_path,
+                )
                 url = _required_string(shard.get("url"), f"{shard_path}.url")
                 parsed_url = urlparse(url)
                 if parsed_url.scheme != "https" or not parsed_url.netloc:
@@ -312,9 +318,29 @@ class EvaluationRequestV2:
                     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
                         raise ProtocolValidationError(f"{shard_path}.{field} must be positive")
                     numeric[field] = number
-                normalized_shards.append(
-                    {"url": url, "sha256": digest, **numeric}
-                )
+                normalized_shard = {"url": url, "sha256": digest, **numeric}
+                # Optional: a validator that stratifies by dataset category sends
+                # the per-shard sequence count, because category weights cannot be
+                # expressed by shard count alone. Absent, the evaluator splits the
+                # source target evenly across its shards.
+                if "target_sequences" in shard:
+                    shard_target = shard.get("target_sequences")
+                    if (
+                        isinstance(shard_target, bool)
+                        or not isinstance(shard_target, int)
+                        or shard_target <= 0
+                    ):
+                        raise ProtocolValidationError(
+                            f"{shard_path}.target_sequences must be a positive integer"
+                        )
+                    normalized_shard["target_sequences"] = shard_target
+                normalized_shards.append(normalized_shard)
+            declared_targets = [shard.get("target_sequences") for shard in normalized_shards]
+            if any(value is not None for value in declared_targets):
+                if any(value is None for value in declared_targets):
+                    raise ProtocolValidationError(f"{path}: shard targets must be all present or all absent")
+                if sum(declared_targets) != target:
+                    raise ProtocolValidationError(f"{path}: shard targets must sum to source target")
             normalized_sources.append(
                 {
                     "name": name,

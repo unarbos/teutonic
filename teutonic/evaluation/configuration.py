@@ -10,6 +10,8 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
+from teutonic.evaluation.categories import DEFAULT_RULES_PATH, load_rules, plan_source_shards
+
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -167,9 +169,12 @@ def pretokenized_dataset_request(
     block_hash: str,
     hotkey: str,
     seq_len: int,
+    category_rules: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if seq_len < 2:
         raise ValueError("evaluation sequence length must be at least 2")
+    if category_rules is None:
+        category_rules = load_rules(DEFAULT_RULES_PATH)
     targets = _source_targets(
         settings.n, [item.proportion for item in settings.manifests]
     )
@@ -177,36 +182,43 @@ def pretokenized_dataset_request(
     sources: list[dict[str, Any]] = []
     for target, snapshot in zip(targets, settings.manifests, strict=True):
         shards = list(snapshot.manifest["shards"])
-        source_digest = hashlib.blake2b(
-            f"{seed}:{snapshot.name}".encode("utf-8"), digest_size=8
-        ).digest()
-        random.Random(int.from_bytes(source_digest, "little")).shuffle(shards)
-        shards = shards[: settings.shards_per_dataset]
-        selected: list[dict[str, Any]] = []
-        available_sequences = 0
-        required_sequences = target + max(16, math.ceil(target * 0.5))
-        for shard in shards:
-            reference = next(
+
+        def reference_of(shard: Mapping[str, Any]) -> str:
+            return next(
                 str(shard[key]).strip()
                 for key in ("url", "href", "uri", "key", "path", "name")
                 if shard.get(key)
             )
-            n_tokens = int(shard["n_tokens"])
-            selected.append(
-                {
-                    "url": _shard_url(snapshot.manifest_url, reference),
-                    "sha256": str(shard["sha256"]).lower(),
-                    "size_bytes": int(shard["size_bytes"]),
-                    "n_tokens": n_tokens,
-                }
-            )
-            available_sequences += n_tokens // seq_len
-            if available_sequences >= required_sequences:
-                break
-        if available_sequences < target:
+
+        # Split the source target across its categories first, then across
+        # several shards inside each category. Categories carry real content
+        # differences, so a source evaluated on whichever categories its shuffle
+        # surfaced moves between runs for reasons unrelated to model quality.
+        planned = plan_source_shards(
+            shards,
+            target=target,
+            shard_budget=settings.shards_per_dataset,
+            seed=seed,
+            source_name=snapshot.name,
+            rule=(category_rules or {}).get(snapshot.name),
+            reference_of=lambda shard: str(shard.get("source_file") or reference_of(shard)),
+            capacity_of=lambda shard: int(shard["n_tokens"]) // seq_len,
+        )
+        planned_sequences = sum(count for _shard, count in planned)
+        if planned_sequences < target:
             raise EvaluationConfigurationError(
                 f"dataset {snapshot.name!r} cannot provide {target} sequences of length {seq_len}"
             )
+        selected = [
+            {
+                "url": _shard_url(snapshot.manifest_url, reference_of(shard)),
+                "sha256": str(shard["sha256"]).lower(),
+                "size_bytes": int(shard["size_bytes"]),
+                "n_tokens": int(shard["n_tokens"]),
+                "target_sequences": int(count),
+            }
+            for shard, count in planned
+        ]
         sources.append(
             {
                 "name": snapshot.name,
@@ -275,6 +287,10 @@ def evaluation_config_version(
         "n": int(n),
         "shards_per_dataset": int(shards_per_dataset),
         "protocol_version": 2,
+        "sampling_policy": "category-stratified-v1",
+        "category_rules": {
+            name: rule["raw"] for name, rule in sorted(load_rules(DEFAULT_RULES_PATH).items())
+        },
     }
     return hashlib.sha256(canonical_manifest_bytes(value)).hexdigest()
 

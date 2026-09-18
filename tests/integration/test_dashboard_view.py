@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     import psycopg
@@ -272,6 +272,8 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(payload["history"][0]["model_identity"], "hidden_until_promotion")
         self.assertIsNone(payload["history"][0]["challenger_repo"])
+        self.assertEqual(payload["history"][0]["coldkey"], "5" + "C" * 47)
+        self.assertEqual(payload["history"][0]["baseline_coldkey"], "5" + "G" * 47)
         self.assertEqual(payload["king"]["coldkey"], "5" + "G" * 47)
         self.assertEqual(len(payload["dataset_versions"]), 1)
         self.assertEqual(payload["dataset_versions"][0]["config_version"], "7" * 64)
@@ -428,12 +430,14 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             UPDATE control_plane.evaluations
                SET state = 'evaluating', verdict = NULL, verdict_summary = NULL,
                    completed_at = NULL, started_at = %s, heartbeat_at = %s,
+                   lease_expires_at = %s,
                    request_payload = %s::jsonb, progress_summary = %s::jsonb
              WHERE evaluation_id = %s
             """,
             (
                 NOW,
                 NOW,
+                NOW + timedelta(minutes=5),
                 '{"limits":{"n":2000,"delta_threshold":0.5}}',
                 '{"phase":"eval_progress","completed_sequences":400,'
                 '"requested_sequences":2000,"percent":20.0,'

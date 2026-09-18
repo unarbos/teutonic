@@ -34,6 +34,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Literal
@@ -1075,6 +1076,7 @@ def patch_mimo_masking_compat(model) -> tuple[str, ...]:
 
 def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
     from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+    from accelerate.utils import modeling as accelerate_modeling
     from transformers import AutoModelForCausalLM
     from transformers.initialization import no_init_weights
 
@@ -1121,16 +1123,24 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
     else:
         device_map = {"": device}
     no_split = list(getattr(model, "_no_split_modules", None) or [])
-    model = load_checkpoint_and_dispatch(
-        model,
-        checkpoint=snapshot_dir,
-        device_map=device_map,
-        no_split_module_classes=no_split,
-        dtype=dtype,
-        offload_state_dict=False,
-        force_hooks=len(set(device_map.values())) > 1,
-        strict=True,
-    )
+    # Accelerate redraws a tqdm bar for every tensor in a multi-device load.
+    # PM2 stores each redraw; suppress only that bar, preserving warnings and
+    # our phase/progress events. Each model worker loads in its own process.
+    checkpoint_progress = accelerate_modeling.tqdm
+    try:
+        accelerate_modeling.tqdm = partial(checkpoint_progress, disable=True)
+        model = load_checkpoint_and_dispatch(
+            model,
+            checkpoint=snapshot_dir,
+            device_map=device_map,
+            no_split_module_classes=no_split,
+            dtype=dtype,
+            offload_state_dict=False,
+            force_hooks=len(set(device_map.values())) > 1,
+            strict=True,
+        )
+    finally:
+        accelerate_modeling.tqdm = checkpoint_progress
     meta_parameters = [name for name, parameter in model.named_parameters() if parameter.is_meta]
     if meta_parameters:
         raise RuntimeError(f"{label} has parameters left on meta after checkpoint load: {meta_parameters[:8]}")
@@ -1207,12 +1217,13 @@ def shuffled_indices(rng: np.random.Generator, size: int, limit: int | None = No
     return rng.choice(size, size=limit, replace=False)
 
 
-def load_sequences_from_npy_shard(
+def load_indexed_sequences_from_npy_shard(
     path: str,
     req: EvalRequest,
     rng: np.random.Generator,
     limit: int | None = None,
-) -> list[list[int]]:
+) -> list[tuple[int, list[int]]]:
+    """Load randomized sequences together with their shard-relative index."""
     data_offset, header = read_npy_header(path)
     dtype = np.dtype(header["descr"])
     shape = tuple(header["shape"])
@@ -1229,7 +1240,10 @@ def load_sequences_from_npy_shard(
                 "refusing to truncate or pad evaluation sequences"
             )
         indices = shuffled_indices(rng, arr.shape[0], limit)
-        return [arr[int(i)].astype(np.int64, copy=False).tolist() for i in indices]
+        return [
+            (int(i), arr[int(i)].astype(np.int64, copy=False).tolist())
+            for i in indices
+        ]
 
     if arr.ndim != 1:
         raise ValueError(f"{path} expected 1D token stream or 2D sequence matrix, got shape={arr.shape}")
@@ -1239,10 +1253,36 @@ def load_sequences_from_npy_shard(
     indices = shuffled_indices(rng, n_sequences, limit)
     out = []
     for i in indices:
-        start = int(i) * req.seq_len
-        out.append(arr[start : start + req.seq_len].astype(np.int64, copy=False).tolist())
+        sequence_index = int(i)
+        start = sequence_index * req.seq_len
+        out.append(
+            (
+                sequence_index,
+                arr[start : start + req.seq_len]
+                .astype(np.int64, copy=False)
+                .tolist(),
+            )
+        )
     _ = data_offset
     return out
+
+
+def load_sequences_from_npy_shard(
+    path: str,
+    req: EvalRequest,
+    rng: np.random.Generator,
+    limit: int | None = None,
+) -> list[list[int]]:
+    """Backward-compatible token-only wrapper around the indexed loader."""
+    return [
+        sequence
+        for _sequence_index, sequence in load_indexed_sequences_from_npy_shard(
+            path,
+            req,
+            rng,
+            limit,
+        )
+    ]
 
 
 def lm_head_device(model) -> torch.device:
@@ -1958,6 +1998,35 @@ def _compute_source_scores(
     return scores
 
 
+def _build_sample_results(
+    king_losses: list[float],
+    challenger_losses: list[float],
+    sample_provenance: list[dict[str, int]] | None,
+) -> dict[str, Any]:
+    """Build compact, index-aligned per-sample audit results."""
+    if sample_provenance is None:
+        raise RuntimeError("evaluation sampler did not provide sample provenance")
+    if not (
+        len(king_losses) == len(challenger_losses) == len(sample_provenance)
+    ):
+        raise RuntimeError(
+            "sample provenance and paired losses must have identical lengths"
+        )
+    return {
+        "format": "columnar-v1",
+        "n_samples": len(king_losses),
+        "shard_group_index": [
+            int(item["shard_group_index"]) for item in sample_provenance
+        ],
+        "shard_index": [int(item["shard_index"]) for item in sample_provenance],
+        "shard_sequence_index": [
+            int(item["shard_sequence_index"]) for item in sample_provenance
+        ],
+        "king_loss": [float(value) for value in king_losses],
+        "challenger_loss": [float(value) for value in challenger_losses],
+    }
+
+
 def _shards_used(dataset_meta: dict) -> list[dict]:
     out = []
     for source in dataset_meta.get("sources") or []:
@@ -2224,6 +2293,13 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         })
         # Pop private key so it never reaches the verdict JSON or disk record.
         source_labels: list[str] | None = dataset_meta.pop("_source_labels", None)
+        sample_provenance: list[dict[str, int]] | None = dataset_meta.pop(
+            "_sample_provenance", None
+        )
+        if sample_provenance is None or len(sample_provenance) != len(sequences):
+            raise RuntimeError(
+                "evaluation sampler returned incomplete sample provenance"
+            )
         public_dataset_meta = _public_dataset_meta(dataset_meta)
         check_eval_runtime(t0)
         on_phase({
@@ -2299,6 +2375,11 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             king_losses,
             challenger_losses,
             source_labels[: len(king_losses)] if source_labels else None,
+        )
+        verdict["sample_results"] = _build_sample_results(
+            king_losses,
+            challenger_losses,
+            sample_provenance[: len(king_losses)],
         )
         completed_at = datetime.now(timezone.utc).isoformat()
         verdict.update({

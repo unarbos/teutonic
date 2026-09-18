@@ -1,0 +1,20 @@
+{
+  "datasets": {
+    "code-reasoning": {
+      "regex": "code-reasoning__([a-zA-Z0-9_-]+?)--"
+    },
+    "math-reasoning": {
+      "regex": "math-reasoning__([a-zA-Z0-9_-]+?)--"
+    },
+    "pretrain-behaviors": {
+      "regex": "pretrain-behaviors__([a-zA-Z0-9_-]+?)--"
+    },
+    "sft-reasoning": {
+      "regex": "sft-reasoning__([a-zA-Z0-9_-]+?)--"
+    },
+    "txt360-v2": {
+      "regex": "txt360-v2__([a-zA-Z0-9_-]+?)--"
+    }
+  },
+  "version": 1
+}

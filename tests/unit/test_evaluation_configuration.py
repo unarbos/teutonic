@@ -75,7 +75,7 @@ class EvaluationConfigurationTests(unittest.TestCase):
             for shard in source["shards"]:
                 self.assertTrue(shard["url"].startswith("https://datasets.example/"))
                 self.assertTrue(shard["url"].endswith(".npy"))
-                self.assertEqual(set(shard), {"url", "sha256", "size_bytes", "n_tokens"})
+                self.assertEqual(set(shard), {"url", "sha256", "size_bytes", "n_tokens", "target_sequences"})
 
     def test_shard_selection_is_deterministic_for_block_hash_and_hotkey(self):
         settings = EvaluationSettings(
