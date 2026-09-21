@@ -86,6 +86,28 @@
         return Math.max(minRadius, Math.min(maxRadius, width / (count - 1) * 0.28));
     }
 
+    function lossChartPresentation(history) {
+        function loss(value) {
+            return value == null || value === "" ? null : finiteNumber(value, null);
+        }
+        var points = (Array.isArray(history) ? history : []).filter(function(item) {
+            return item
+                && loss(item.avg_king_loss) != null
+                && loss(item.avg_challenger_loss) != null;
+        }).sort(function(a, b) {
+            return new Date(a.timestamp || 0) - new Date(b.timestamp || 0);
+        });
+        if (!points.length) return { points: [], maximum: null };
+        var maximum = loss(points[0].avg_challenger_loss);
+        if (maximum == null || maximum <= 0) return { points: [], maximum: null };
+        return {
+            points: points.filter(function(item) {
+                return loss(item.avg_challenger_loss) <= maximum;
+            }),
+            maximum: maximum
+        };
+    }
+
     function datasetChangePresentation(history, datasetVersions) {
         var configs = {};
         (Array.isArray(datasetVersions) ? datasetVersions : []).forEach(function(config) {
@@ -491,6 +513,7 @@
         decisionPresentation: decisionPresentation,
         datasetPresentation: datasetPresentation,
         graphPointRadius: graphPointRadius,
+        lossChartPresentation: lossChartPresentation,
         datasetChangePresentation: datasetChangePresentation,
         benchmarkPresentation: benchmarkPresentation
     };

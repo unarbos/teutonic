@@ -310,6 +310,15 @@ assert.deepStrictEqual(
 assert.strictEqual(dashboard.graphPointRadius(1, 1000, 0.75, 2.5), 2.5);
 assert.strictEqual(dashboard.graphPointRadius(1000, 200, 0.75, 2.5), 0.75);
 assert.ok(dashboard.graphPointRadius(200, 800, 0.75, 2.5) < 2.5);
+const lossChart = dashboard.lossChartPresentation([
+    { timestamp: "2026-08-18T12:02:00Z", avg_king_loss: 3.1, avg_challenger_loss: 2.7 },
+    { timestamp: "2026-08-18T12:00:00Z", avg_king_loss: 2.6, avg_challenger_loss: 2.5 },
+    { timestamp: "2026-08-18T12:01:00Z", avg_king_loss: 2.4, avg_challenger_loss: 2.3 },
+    { timestamp: "2026-08-18T12:03:00Z", avg_king_loss: null, avg_challenger_loss: 2.1 }
+]);
+assert.strictEqual(lossChart.maximum, 2.5);
+assert.deepStrictEqual(lossChart.points.map((point) => point.avg_challenger_loss), [2.5, 2.3]);
+assert.deepStrictEqual(dashboard.lossChartPresentation([]), { points: [], maximum: null });
 const datasetChanges = dashboard.datasetChangePresentation(
     [{ dataset_version: "a".repeat(64) }, { dataset_version: "b".repeat(64) }],
     [

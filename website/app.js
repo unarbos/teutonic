@@ -231,7 +231,7 @@
     var amount = finite(el("smooth-slider").value) || 0;
     var smoothLabel = amount > 0 ? "SMOOTH " + smoothMode.toUpperCase() + " " + amount.toFixed(2) : "SMOOTH OFF";
     text("smooth-status", smoothLabel);
-    var points = (d.history || []).filter(function (item) { return finite(item.avg_king_loss) != null && finite(item.avg_challenger_loss) != null; }).sort(function (a, b) { return new Date(a.timestamp || 0) - new Date(b.timestamp || 0); });
+    var chart = TeutonicDashboardV1.lossChartPresentation(d.history || []), points = chart.points;
     text("chart-count", points.length + (points.length === 1 ? " EVALUATION" : " EVALUATIONS"));
     el("chart-empty").hidden = points.length > 0;
     if (!points.length) { svg.innerHTML = ""; return; }
@@ -244,11 +244,10 @@
     var rawKings = kingPoints.map(function (p) { return p.loss; });
     var challengers = smoothSeries(rawChallengers, amount);
     var kings = smoothSeries(rawKings, amount);
-    var values = rawChallengers.concat(rawKings, challengers, kings);
-    var min = Math.min.apply(null, values), max = Math.max.apply(null, values), padding = Math.max((max - min) * .2, .001); min -= padding; max += padding;
+    var min = 0, max = chart.maximum;
 
     function x(i) { return points.length === 1 ? (left + W - right) / 2 : left + i / (points.length - 1) * (W - left - right); }
-    function y(v) { return top + (max - v) / (max - min) * (H - top - bottom); }
+    function y(v) { var visible = Math.max(min, Math.min(max, v)); return top + (max - visible) / (max - min) * (H - top - bottom); }
     function challengerLine(series) { return series.map(function (value, i) { return x(i).toFixed(1) + "," + y(value).toFixed(1); }).join(" "); }
     function kingLine(series) { return series.map(function (value, i) { return x(kingPoints[i].index).toFixed(1) + "," + y(value).toFixed(1); }).join(" "); }
     var styles = getComputedStyle(document.documentElement), ink = styles.getPropertyValue("--ink").trim(), muted = styles.getPropertyValue("--muted").trim(), paper = styles.getPropertyValue("--paper").trim(), markup = "";
