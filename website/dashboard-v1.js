@@ -8,16 +8,20 @@
     var HIDDEN = "Hidden until promotion";
     var BENCHMARK_SPECS = [
         { name: "BBH", fewshot: 3 },
-        { name: "MMLU", fewshot: 0 },
-        { name: "HellaSwag", fewshot: 0 },
-        { name: "WinoGrande", fewshot: 0 },
+        { name: "MMLU", fewshot: 5 },
+        { name: "HellaSwag", fewshot: 10 },
+        { name: "WinoGrande", fewshot: 5 },
         { name: "GSM8K", fewshot: 4 },
         { name: "PIQA", fewshot: 0 },
-        { name: "ARC-C", fewshot: 0 },
+        { name: "ARC-C", fewshot: 25 },
         { name: "ARC-E", fewshot: 0 },
-        { name: "GPQA Diamond", fewshot: 0 },
+        { name: "GPQA Diamond", fewshot: 5 },
         { name: "MATH-500", fewshot: 4 }
     ];
+
+    function benchmarkKey(name) {
+        return String(name || "").replace(/_v\d+$/i, "").toLowerCase();
+    }
 
     function walkFinite(value, path) {
         if (typeof value === "number" && !Number.isFinite(value)) {
@@ -438,10 +442,10 @@
             var model = result.model || {};
             var byName = {};
             (Array.isArray(result.benchmarks) ? result.benchmarks : []).forEach(function(row) {
-                if (row && typeof row.name === "string") byName[row.name.toLowerCase()] = row;
+                if (row && typeof row.name === "string") byName[benchmarkKey(row.name)] = row;
             });
             var benchmarks = BENCHMARK_SPECS.map(function(spec) {
-                var row = byName[spec.name.toLowerCase()] || {};
+                var row = byName[benchmarkKey(spec.name)] || {};
                 var metric = row.metric || {};
                 var score = metric.value == null ? null : finiteNumber(metric.value, null);
                 return {

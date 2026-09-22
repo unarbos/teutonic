@@ -268,8 +268,12 @@ const benchmarkResults = dashboard.benchmarkPresentation({
                 model: { reign_number: 7, uid: 226, hotkey: "current", model_repo: "owner/current", is_current: true },
                 benchmarks: [
                     { name: "BBH", fewshot: 3, status: "completed", metric: { name: "acc_norm,none", value: 0.297344 } },
+                    { name: "MMLU_v2", fewshot: 5, status: "completed", metric: { name: "acc,none", value: 0.7395 } },
+                    { name: "HellaSwag_v2", fewshot: 10, status: "completed", metric: { name: "acc_norm,none", value: 0.8419 } },
+                    { name: "WinoGrande_v2", fewshot: 5, status: "completed", metric: { name: "acc,none", value: 0.7695 } },
                     { name: "GSM8K", fewshot: 4, status: "completed", metric: { name: "exact_match,strict-match", value: 0 } },
-                    { name: "GPQA Diamond", fewshot: 0, status: "completed", metric: { name: "acc_norm,none", value: 0.42 } },
+                    { name: "ARC-C_v2", fewshot: 25, status: "completed", metric: { name: "acc_norm,none", value: 0.657 } },
+                    { name: "GPQA Diamond_v2", fewshot: 5, status: "completed", metric: { name: "acc,none", value: 0.3535 } },
                     { name: "MATH-500", fewshot: 4, status: "completed", metric: { name: "exact_match,none", value: 0.38 } }
                 ]
             }
@@ -281,14 +285,25 @@ assert.strictEqual(benchmarkResults.selected.kingId, "reign-7");
 assert.strictEqual(benchmarkResults.selected.benchmarks.length, 10);
 assert.strictEqual(benchmarkResults.selected.benchmarks[0].name, "BBH");
 assert.strictEqual(benchmarkResults.selected.benchmarks[0].score, 0.297344);
+assert.deepStrictEqual(
+    benchmarkResults.selected.benchmarks.slice(1, 4).map((benchmark) => [benchmark.name, benchmark.score, benchmark.fewshot]),
+    [["MMLU", 0.7395, 5], ["HellaSwag", 0.8419, 10], ["WinoGrande", 0.7695, 5]]
+);
 assert.strictEqual(benchmarkResults.selected.benchmarks[4].name, "GSM8K");
 assert.strictEqual(benchmarkResults.selected.benchmarks[4].score, 0);
+assert.deepStrictEqual(
+    [benchmarkResults.selected.benchmarks[6].name, benchmarkResults.selected.benchmarks[6].score, benchmarkResults.selected.benchmarks[6].fewshot],
+    ["ARC-C", 0.657, 25]
+);
 assert.strictEqual(benchmarkResults.selected.benchmarks[8].name, "GPQA Diamond");
-assert.strictEqual(benchmarkResults.selected.benchmarks[8].score, 0.42);
+assert.strictEqual(benchmarkResults.selected.benchmarks[8].score, 0.3535);
+assert.strictEqual(benchmarkResults.selected.benchmarks[8].fewshot, 5);
 assert.strictEqual(benchmarkResults.selected.benchmarks[9].name, "MATH-500");
 assert.strictEqual(benchmarkResults.selected.benchmarks[9].score, 0.38);
 assert.strictEqual(benchmarkResults.selected.benchmarks[9].fewshot, 4);
-assert.strictEqual(benchmarkResults.selected.benchmarks[1].status, "pending");
+assert.strictEqual(benchmarkResults.kings[1].benchmarks[1].score, 0.2);
+assert.strictEqual(benchmarkResults.kings[1].benchmarks[2].status, "pending");
+assert.strictEqual(benchmarkResults.kings[1].benchmarks[2].fewshot, 10);
 assert.deepStrictEqual(
     benchmarkResults.series[0].points.map((point) => [point.reignNumber, point.score]),
     [[6, 0.25], [7, 0.297344]]
