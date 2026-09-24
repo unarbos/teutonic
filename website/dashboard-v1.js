@@ -17,8 +17,8 @@
         { name: "ARC-E", fewshot: 0 },
         { name: "GPQA Diamond", fewshot: 5 },
         { name: "MATH-500", fewshot: 4 },
-        { name: "HumanEval Sampled", sourceName: "HumanEval Sampled n=3", fewshot: 0 },
-        { name: "MBPP-Sanitized 3-shot", sourceName: "MBPP-Sanitized 3-shot n=3", fewshot: 3 }
+        { name: "HumanEval-Sanitized", sourceName: "HumanEval Sampled n=3", fewshot: 0 },
+        { name: "MBPP-Sanitized", sourceName: "MBPP-Sanitized 3-shot n=3", fewshot: 3 }
     ];
 
     function benchmarkKey(name) {

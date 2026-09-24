@@ -303,10 +303,10 @@ assert.strictEqual(benchmarkResults.selected.benchmarks[8].fewshot, 5);
 assert.strictEqual(benchmarkResults.selected.benchmarks[9].name, "MATH-500");
 assert.strictEqual(benchmarkResults.selected.benchmarks[9].score, 0.38);
 assert.strictEqual(benchmarkResults.selected.benchmarks[9].fewshot, 4);
-assert.strictEqual(benchmarkResults.selected.benchmarks[10].name, "HumanEval Sampled");
+assert.strictEqual(benchmarkResults.selected.benchmarks[10].name, "HumanEval-Sanitized");
 assert.strictEqual(benchmarkResults.selected.benchmarks[10].score, 0.4431);
 assert.strictEqual(benchmarkResults.selected.benchmarks[10].fewshot, 0);
-assert.strictEqual(benchmarkResults.selected.benchmarks[11].name, "MBPP-Sanitized 3-shot");
+assert.strictEqual(benchmarkResults.selected.benchmarks[11].name, "MBPP-Sanitized");
 assert.strictEqual(benchmarkResults.selected.benchmarks[11].score, 0.6316);
 assert.strictEqual(benchmarkResults.selected.benchmarks[11].fewshot, 3);
 assert.strictEqual(benchmarkResults.kings[1].benchmarks[1].score, 0.2);
@@ -325,7 +325,7 @@ assert.throws(
     () => dashboard.benchmarkPresentation({ schema_version: "wrong", kings: [] }),
     /unsupported benchmark results schema/
 );
-const benchmarkNames = ["BBH", "MMLU", "HellaSwag", "WinoGrande", "GSM8K", "PIQA", "ARC-C", "ARC-E", "GPQA Diamond", "MATH-500", "HumanEval Sampled", "MBPP-Sanitized 3-shot"];
+const benchmarkNames = ["BBH", "MMLU", "HellaSwag", "WinoGrande", "GSM8K", "PIQA", "ARC-C", "ARC-E", "GPQA Diamond", "MATH-500", "HumanEval-Sanitized", "MBPP-Sanitized"];
 assert.deepStrictEqual(
     dashboard.benchmarkPresentation({ schema_version: "teutonic-king-benchmark-all-results.v2", kings: [] }).series.map((series) => series.name),
     benchmarkNames
