@@ -16,7 +16,9 @@
         { name: "ARC-C", fewshot: 25 },
         { name: "ARC-E", fewshot: 0 },
         { name: "GPQA Diamond", fewshot: 5 },
-        { name: "MATH-500", fewshot: 4 }
+        { name: "MATH-500", fewshot: 4 },
+        { name: "HumanEval Sampled", sourceName: "HumanEval Sampled n=3", fewshot: 0 },
+        { name: "MBPP-Sanitized 3-shot", sourceName: "MBPP-Sanitized 3-shot n=3", fewshot: 3 }
     ];
 
     function benchmarkKey(name) {
@@ -445,7 +447,7 @@
                 if (row && typeof row.name === "string") byName[benchmarkKey(row.name)] = row;
             });
             var benchmarks = BENCHMARK_SPECS.map(function(spec) {
-                var row = byName[benchmarkKey(spec.name)] || {};
+                var row = byName[benchmarkKey(spec.sourceName || spec.name)] || {};
                 var metric = row.metric || {};
                 var score = metric.value == null ? null : finiteNumber(metric.value, null);
                 return {

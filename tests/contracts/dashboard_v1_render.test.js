@@ -274,7 +274,9 @@ const benchmarkResults = dashboard.benchmarkPresentation({
                     { name: "GSM8K", fewshot: 4, status: "completed", metric: { name: "exact_match,strict-match", value: 0 } },
                     { name: "ARC-C_v2", fewshot: 25, status: "completed", metric: { name: "acc_norm,none", value: 0.657 } },
                     { name: "GPQA Diamond_v2", fewshot: 5, status: "completed", metric: { name: "acc,none", value: 0.3535 } },
-                    { name: "MATH-500", fewshot: 4, status: "completed", metric: { name: "exact_match,none", value: 0.38 } }
+                    { name: "MATH-500", fewshot: 4, status: "completed", metric: { name: "exact_match,none", value: 0.38 } },
+                    { name: "HumanEval Sampled n=3", fewshot: 0, status: "completed", metric: { name: "pass_at_1,n=3,evalplus_sanitize", value: 0.4431 } },
+                    { name: "MBPP-Sanitized 3-shot n=3", fewshot: 3, status: "completed", metric: { name: "pass_at_1,n=3,evalplus_sanitized", value: 0.6316 } }
                 ]
             }
         }
@@ -282,7 +284,7 @@ const benchmarkResults = dashboard.benchmarkPresentation({
 });
 assert.deepStrictEqual(benchmarkResults.kings.map((king) => king.kingId), ["reign-7", "reign-6"]);
 assert.strictEqual(benchmarkResults.selected.kingId, "reign-7");
-assert.strictEqual(benchmarkResults.selected.benchmarks.length, 10);
+assert.strictEqual(benchmarkResults.selected.benchmarks.length, 12);
 assert.strictEqual(benchmarkResults.selected.benchmarks[0].name, "BBH");
 assert.strictEqual(benchmarkResults.selected.benchmarks[0].score, 0.297344);
 assert.deepStrictEqual(
@@ -301,6 +303,12 @@ assert.strictEqual(benchmarkResults.selected.benchmarks[8].fewshot, 5);
 assert.strictEqual(benchmarkResults.selected.benchmarks[9].name, "MATH-500");
 assert.strictEqual(benchmarkResults.selected.benchmarks[9].score, 0.38);
 assert.strictEqual(benchmarkResults.selected.benchmarks[9].fewshot, 4);
+assert.strictEqual(benchmarkResults.selected.benchmarks[10].name, "HumanEval Sampled");
+assert.strictEqual(benchmarkResults.selected.benchmarks[10].score, 0.4431);
+assert.strictEqual(benchmarkResults.selected.benchmarks[10].fewshot, 0);
+assert.strictEqual(benchmarkResults.selected.benchmarks[11].name, "MBPP-Sanitized 3-shot");
+assert.strictEqual(benchmarkResults.selected.benchmarks[11].score, 0.6316);
+assert.strictEqual(benchmarkResults.selected.benchmarks[11].fewshot, 3);
 assert.strictEqual(benchmarkResults.kings[1].benchmarks[1].score, 0.2);
 assert.strictEqual(benchmarkResults.kings[1].benchmarks[2].status, "pending");
 assert.strictEqual(benchmarkResults.kings[1].benchmarks[2].fewshot, 10);
@@ -317,7 +325,7 @@ assert.throws(
     () => dashboard.benchmarkPresentation({ schema_version: "wrong", kings: [] }),
     /unsupported benchmark results schema/
 );
-const benchmarkNames = ["BBH", "MMLU", "HellaSwag", "WinoGrande", "GSM8K", "PIQA", "ARC-C", "ARC-E", "GPQA Diamond", "MATH-500"];
+const benchmarkNames = ["BBH", "MMLU", "HellaSwag", "WinoGrande", "GSM8K", "PIQA", "ARC-C", "ARC-E", "GPQA Diamond", "MATH-500", "HumanEval Sampled", "MBPP-Sanitized 3-shot"];
 assert.deepStrictEqual(
     dashboard.benchmarkPresentation({ schema_version: "teutonic-king-benchmark-all-results.v2", kings: [] }).series.map((series) => series.name),
     benchmarkNames
