@@ -14,7 +14,8 @@ from .early_stopping import EarlyStoppingPolicy
 
 
 PROTOCOL_VERSION = "teutonic-evaluator-v2"
-DEFAULT_EVAL_BATCH_SIZE = 96
+# Validated for single-GPU BF16 MiMo replicas on B300 with 2048 tokens and FA4.
+DEFAULT_EVAL_BATCH_SIZE = 40
 MAX_BATCH_SIZE = 1024
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")

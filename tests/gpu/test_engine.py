@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import sys
 import threading
@@ -20,8 +21,8 @@ from teutonic.evaluator.engine import (
     MODEL_INSTANCES_PER_SIDE,
     MODEL_WORKER_PROCESSES,
     EvalRequest,
+    ModelSequenceScorer,
     PersistentModelWorkerPool,
-    TwoGpuSequencePipeline,
     checkpoint_load_key,
     kernel_cache_identity,
     load_eval_model,
@@ -256,7 +257,7 @@ def test_supported_attention_backends_and_malformed_hybrid_config():
 def test_eval_request_fixes_reference_runtime_settings():
     request = EvalRequest(king_repo="king", challenger_repo="challenger")
     assert request.attn_implementation == "eager"
-    assert request.batch_size == 1
+    assert request.batch_size == eval_server.DEFAULT_BATCH_SIZE
     assert request.parallel_batch_size == 1
     assert request.parallel_models is True
     assert request.seq_len == 2048
@@ -289,18 +290,59 @@ def test_fa4_attention_report_preserves_asymmetric_value_head_dim():
     assert report["fa4_native_asymmetric_value_dim"] is True
 
 
-def test_worker_topology_uses_two_processes_per_side_and_two_gpus_each():
-    specs = model_worker_specs(list(range(8)))
-    assert MODEL_INSTANCES_PER_SIDE == 2
-    assert MODEL_WORKER_PROCESSES == 4
-    assert specs == [
-        {"worker_id": "king-0", "role": "king", "gpu_ids": [0, 1]},
-        {"worker_id": "king-1", "role": "king", "gpu_ids": [2, 3]},
-        {"worker_id": "challenger-0", "role": "challenger", "gpu_ids": [4, 5]},
-        {"worker_id": "challenger-1", "role": "challenger", "gpu_ids": [6, 7]},
-    ]
-    with pytest.raises(RuntimeError, match="exactly 8 GPUs"):
-        model_worker_specs(list(range(4)))
+def test_worker_topology_gives_each_side_four_distinct_single_gpu_replicas():
+    gpu_ids = [7, 5, 3, 1, 6, 4, 2, 0]
+    specs = model_worker_specs(gpu_ids)
+    assert MODEL_INSTANCES_PER_SIDE == 4
+    assert MODEL_WORKER_PROCESSES == 8
+    assert [spec["gpu_ids"] for spec in specs] == [[gpu] for gpu in gpu_ids]
+    assert [spec["role"] for spec in specs] == ["king"] * 4 + ["challenger"] * 4
+    assert len({spec["worker_id"] for spec in specs}) == 8
+    for invalid in (list(range(4)), [0] * 8, [-1] + list(range(7))):
+        with pytest.raises(RuntimeError, match="exactly 8 GPUs"):
+            model_worker_specs(invalid)
+
+
+def test_health_reports_single_gpu_replicas():
+    defaults = asyncio.run(eval_server.health())["defaults"]
+    assert defaults["gpus_per_model_instance"] == 1
+    assert defaults["model_instances_per_side"] == 4
+    assert defaults["worker_processes"] == 8
+    assert defaults["model_parallel_strategy"] == "single_gpu_replicas"
+    assert defaults["sequence_pipeline_depth"] == 1
+
+
+def test_eight_workers_score_each_sequence_once_per_side():
+    pool = object.__new__(PersistentModelWorkerPool)
+    pool.specs = model_worker_specs(list(range(8)))
+    pool.ready = {spec["worker_id"]: {"pipeline_depth": 1} for spec in pool.specs}
+    pool.result_queue = Queue()
+    seen = {"king": [], "challenger": []}
+
+    class IndexedScoreQueue:
+        def __init__(self, spec):
+            self.spec = spec
+
+        def put(self, command):
+            role = self.spec["role"]
+            indices = command["sequence_indices"]
+            seen[role].extend(indices)
+            pool.result_queue.put({
+                "type": "result", "generation": "generation",
+                "worker_id": self.spec["worker_id"], "role": role,
+                "sequence_indices": indices,
+                "losses": [float(index) + (0.25 if role == "king" else 0.0) for index in indices],
+            })
+
+    pool.command_queues = {spec["worker_id"]: IndexedScoreQueue(spec) for spec in pool.specs}
+    request = EvalRequest(king_repo="king", challenger_repo="challenger", batch_size=3)
+    king, challenger, _ = pool.score(
+        [[index] for index in range(35)], "generation", request, lambda event: None
+    )
+    assert king == [index + 0.25 for index in range(35)]
+    assert challenger == [float(index) for index in range(35)]
+    assert sorted(seen["king"]) == sorted(seen["challenger"]) == list(range(35))
+    assert pool.result_queue.empty()
 
 
 def test_checkpoint_key_excludes_randomized_sequences(tmp_path):
@@ -403,49 +445,55 @@ def test_kernel_cache_is_architecture_keyed(monkeypatch):
     assert kernel_cache_identity(config_a, [0, 1]) != kernel_cache_identity(config_b, [0, 1])
 
 
-def test_two_gpu_pipeline_overlaps_next_stage_one_with_current_stage_two(monkeypatch):
-    class FakeModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.model = SimpleNamespace(layers=torch.nn.ModuleList([torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)]))
-
+def test_single_gpu_scorer_serializes_batches_and_preserves_indices(monkeypatch):
     events = []
-    events_lock = threading.Lock()
     output = Queue()
-    pipeline_ref = {}
-
-    monkeypatch.setattr(TwoGpuSequencePipeline, "_find_boundary_layer", lambda self: 1)
 
     def fake_loss(_model, token_batches, _chunk_size, **_kwargs):
-        sequence_id = token_batches[0][0]
-        with events_lock:
-            events.append((sequence_id, "stage1"))
-        time.sleep(0.03)
-        pipeline_ref["pipeline"]._enter_stage2(None, None)
-        with events_lock:
-            events.append((sequence_id, "stage2"))
-        time.sleep(0.03)
-        with events_lock:
-            events.append((sequence_id, "done"))
-        return [float(sequence_id)]
+        indices = tuple(tokens[0] for tokens in token_batches)
+        events.append((indices, "start"))
+        time.sleep(0.02)
+        events.append((indices, "done"))
+        return [float(tokens[0]) for tokens in token_batches]
 
     monkeypatch.setattr(eval_server, "compute_per_sequence_loss", fake_loss)
-    request = EvalRequest(king_repo="king", challenger_repo="challenger")
-    pipeline = TwoGpuSequencePipeline(
-        FakeModel(),
-        request,
-        {"worker_id": "king-0", "role": "king", "gpu_ids": [0, 1]},
-        output,
-        "generation",
+    request = EvalRequest(king_repo="king", challenger_repo="challenger", batch_size=2)
+    scorer = ModelSequenceScorer(
+        object(), request,
+        {"worker_id": "king-0", "role": "king", "gpu_ids": [3]},
+        output, "generation",
     )
-    pipeline_ref["pipeline"] = pipeline
-    pipeline.submit(0, [0])
-    pipeline.submit(1, [1])
-    pipeline.close()
+    scorer.submit_batch([7, 2], [[7], [2]])
+    scorer.submit(9, [9])
+    scorer.close()
+    assert scorer.depth == 1
+    assert events == [((7, 2), "start"), ((7, 2), "done"), ((9,), "start"), ((9,), "done")]
+    first, second = output.get_nowait(), output.get_nowait()
+    assert first["sequence_indices"] == [7, 2]
+    assert first["losses"] == [7.0, 2.0]
+    assert second["sequence_index"] == 9
+    assert second["losses"] == [9.0]
+    assert first["generation"] == second["generation"] == "generation"
 
-    assert pipeline.depth == 2
-    assert events.index((1, "stage1")) < events.index((0, "done"))
-    assert {output.get()["sequence_index"], output.get()["sequence_index"]} == {0, 1}
+
+def test_single_gpu_scorer_reports_errors_to_worker_pool(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("test scoring failure")
+
+    monkeypatch.setattr(eval_server, "compute_per_sequence_loss", fail)
+    output = Queue()
+    scorer = ModelSequenceScorer(
+        object(), EvalRequest(king_repo="king", challenger_repo="challenger"),
+        {"worker_id": "challenger-3", "role": "challenger", "gpu_ids": [7]},
+        output, "generation",
+    )
+    scorer.submit(0, [0])
+    scorer.close()
+    result = output.get_nowait()
+    assert result["type"] == "error"
+    assert result["worker_id"] == "challenger-3"
+    assert result["generation"] == "generation"
+    assert result["error"] == "test scoring failure"
 
 
 def test_indexed_npy_loader_preserves_row_and_window_indices(tmp_path):

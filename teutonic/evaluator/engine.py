@@ -131,8 +131,8 @@ class SafetensorsReuseLimitError(RuntimeError):
 
 DEFAULT_MODEL_DEVICE_MAP = os.environ.get("TEUTONIC_MODEL_DEVICE_MAP", "auto")
 DEFAULT_GPU_MEMORY_FRACTION = float(os.environ.get("TEUTONIC_GPU_MEMORY_FRACTION", "0.45"))
-GPUS_PER_MODEL_INSTANCE = 2
-MODEL_INSTANCES_PER_SIDE = 2
+GPUS_PER_MODEL_INSTANCE = 1
+MODEL_INSTANCES_PER_SIDE = 4
 MODEL_WORKER_PROCESSES = MODEL_INSTANCES_PER_SIDE * 2
 KERNEL_CACHE_DIR = Path(
     os.environ.get("TEUTONIC_KERNEL_CACHE_DIR", "/tmp/teutonic/kernel_cache")
@@ -260,14 +260,15 @@ def device_plan_for_gpus(gpu_ids: list[int]) -> str:
 
 
 def model_worker_specs(gpu_ids: list[int]) -> list[dict]:
-    """Return the fixed two-GPU, two-instance topology for each duel side."""
-    if len(gpu_ids) != 8:
-        raise RuntimeError(f"MiMo duel requires exactly 8 GPUs, got {gpu_ids}")
+    """Give each duel side four independent, single-GPU model replicas."""
+    if len(gpu_ids) != 8 or len(set(gpu_ids)) != 8 or any(gpu < 0 for gpu in gpu_ids):
+        raise RuntimeError(
+            f"MiMo duel requires exactly 8 GPUs with distinct non-negative IDs, got {gpu_ids}"
+        )
     return [
-        {"worker_id": "king-0", "role": "king", "gpu_ids": gpu_ids[0:2]},
-        {"worker_id": "king-1", "role": "king", "gpu_ids": gpu_ids[2:4]},
-        {"worker_id": "challenger-0", "role": "challenger", "gpu_ids": gpu_ids[4:6]},
-        {"worker_id": "challenger-1", "role": "challenger", "gpu_ids": gpu_ids[6:8]},
+        {"worker_id": f"{role}-{replica}", "role": role, "gpu_ids": [gpu_ids[offset + replica]]}
+        for role, offset in (("king", 0), ("challenger", MODEL_INSTANCES_PER_SIDE))
+        for replica in range(MODEL_INSTANCES_PER_SIDE)
     ]
 
 
@@ -1369,8 +1370,8 @@ def compute_per_sequence_loss(
         ) from exc
 
 
-class TwoGpuSequencePipeline:
-    """Score batches, overlapping two single-sequence forwards when possible."""
+class ModelSequenceScorer:
+    """Score one batch at a time on a worker's dedicated GPU."""
 
     def __init__(self, model, req: EvalRequest, spec: dict, result_queue, generation: str):
         self.model = model
@@ -1378,43 +1379,11 @@ class TwoGpuSequencePipeline:
         self.spec = spec
         self.result_queue = result_queue
         self.generation = generation
-        self._thread_state = threading.local()
-        self._stage2_lock = threading.Lock()
-        self._previous_boundary = None
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix=spec["worker_id"])
-        self._hook = None
-        self.boundary_layer = self._find_boundary_layer()
-        if self.boundary_layer is not None:
-            layers = model.model.layers
-            self._hook = layers[self.boundary_layer].register_forward_pre_hook(
-                self._enter_stage2,
-                prepend=True,
-            )
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=spec["worker_id"])
 
     @property
     def depth(self) -> int:
-        return 2 if self.boundary_layer is not None else 1
-
-    def _find_boundary_layer(self) -> int | None:
-        if self.req.batch_size > 1 or len(self.spec["gpu_ids"]) != 2:
-            return None
-        layers = getattr(getattr(self.model, "model", None), "layers", None)
-        if layers is None:
-            return None
-        second_gpu = self.spec["gpu_ids"][1]
-        for index, layer in enumerate(layers):
-            parameter = next(layer.parameters(), None)
-            if parameter is not None and parameter.device.type == "cuda" and parameter.device.index == second_gpu:
-                return index
-        return None
-
-    def _enter_stage2(self, _module, _args) -> None:
-        state = getattr(self._thread_state, "current", None)
-        if state is None or state["stage2_acquired"]:
-            return
-        self._stage2_lock.acquire()
-        state["stage2_acquired"] = True
-        state["boundary"].set()
+        return 1
 
     def submit(self, sequence_index: int, token_ids: list[int]) -> None:
         self.submit_batch([sequence_index], [token_ids])
@@ -1426,19 +1395,13 @@ class TwoGpuSequencePipeline:
     ) -> None:
         if not sequence_indices or len(sequence_indices) != len(token_batches):
             raise ValueError("sequence indices and token batches must be non-empty and aligned")
-        if self._previous_boundary is not None:
-            self._previous_boundary.wait()
-        state = {"boundary": threading.Event(), "stage2_acquired": False}
-        self._previous_boundary = state["boundary"]
-        self._executor.submit(self._score, sequence_indices, token_batches, state)
+        self._executor.submit(self._score, sequence_indices, token_batches)
 
     def _score(
         self,
         sequence_indices: list[int],
         token_batches: list[list[int]],
-        state: dict,
     ) -> None:
-        self._thread_state.current = state
         started = time.time()
         try:
             losses = compute_per_sequence_loss(
@@ -1476,16 +1439,9 @@ class TwoGpuSequencePipeline:
                 "error": str(exc),
                 "traceback": traceback.format_exc(),
             })
-        finally:
-            state["boundary"].set()
-            if state["stage2_acquired"]:
-                self._stage2_lock.release()
-            self._thread_state.current = None
 
     def close(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=False)
-        if self._hook is not None:
-            self._hook.remove()
 
 
 def empty_worker_cuda_cache(gpu_ids: list[int]) -> None:
@@ -1505,7 +1461,7 @@ def reset_worker_peak_memory(gpu_ids: list[int]) -> None:
 
 
 def model_worker_main(spec: dict, command_queue, result_queue) -> None:
-    """Own one persistent two-GPU model instance and accept load/score commands."""
+    """Own one persistent single-GPU model instance and accept load/score commands."""
     setup_logging()
     worker_id = spec["worker_id"]
     role = spec["role"]
@@ -1514,6 +1470,7 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
     pipeline = None
     loaded_key = None
     try:
+        torch.cuda.set_device(gpu_ids[0])
         while True:
             command = command_queue.get()
             if command["type"] == "shutdown":
@@ -1537,7 +1494,7 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
                         model = load_eval_model(
                             command["snapshot"],
                             config,
-                            "auto",
+                            f"cuda:{gpu_ids[0]}",
                             worker_id,
                             req,
                             gpu_ids=gpu_ids,
@@ -1548,7 +1505,7 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
                         attention = command.get("attention", {})
                         kernel_cache = command.get("kernel_cache", {})
                     reset_worker_peak_memory(gpu_ids)
-                    pipeline = TwoGpuSequencePipeline(model, req, spec, result_queue, generation)
+                    pipeline = ModelSequenceScorer(model, req, spec, result_queue, generation)
                     result_queue.put({
                         "type": "ready",
                         "generation": generation,
@@ -1562,7 +1519,7 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
                         "attention": attention,
                         "kernel_cache": kernel_cache,
                         "pipeline_depth": pipeline.depth,
-                        "pipeline_boundary_layer": pipeline.boundary_layer,
+                        "pipeline_boundary_layer": None,
                     })
                 except BaseException as exc:
                     result_queue.put({
@@ -1597,7 +1554,7 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
 
 
 class PersistentModelWorkerPool:
-    """Keep four model processes alive and reload only when checkpoint identity changes."""
+    """Keep eight model processes alive and reload only when checkpoint identity changes."""
 
     def __init__(self, gpu_ids: list[int]):
         self.gpu_ids = list(gpu_ids)
@@ -2318,10 +2275,14 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             "model_instances_per_side": MODEL_INSTANCES_PER_SIDE,
             "worker_processes": MODEL_WORKER_PROCESSES,
             "tensor_parallel_size": 1,
-            "model_parallel_strategy": "layer_sharding",
+            "model_parallel_strategy": "single_gpu_replicas",
         })
-        king_device = "cuda:0,1|cuda:2,3"
-        challenger_device = "cuda:4,5|cuda:6,7"
+        king_device = "|".join(
+            f"cuda:{spec['gpu_ids'][0]}" for spec in worker_specs if spec["role"] == "king"
+        )
+        challenger_device = "|".join(
+            f"cuda:{spec['gpu_ids'][0]}" for spec in worker_specs if spec["role"] == "challenger"
+        )
         use_parallel = True
         king_losses, challenger_losses, worker_meta = score_with_model_workers(
             sequences,
@@ -2403,7 +2364,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             "model_instances_per_side": MODEL_INSTANCES_PER_SIDE,
             "worker_processes": MODEL_WORKER_PROCESSES,
             "tensor_parallel_size": 1,
-            "model_parallel_strategy": "layer_sharding",
+            "model_parallel_strategy": "single_gpu_replicas",
             "grouped_moe": True,
             "dataset": public_dataset_meta,
             "shards_used": public_dataset_meta.get("shards_used", []),
@@ -2423,7 +2384,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
                 hardware={
                     "gpu_ids": list(_gpu_ids),
                     "workers": [spec["worker_id"] for spec in worker_specs],
-                    "model_parallel_strategy": "layer_sharding",
+                    "model_parallel_strategy": "single_gpu_replicas",
                 },
             )
         )
@@ -2534,11 +2495,11 @@ async def health():
             "model_instances_per_side": MODEL_INSTANCES_PER_SIDE,
             "worker_processes": MODEL_WORKER_PROCESSES,
             "tensor_parallel_size": 1,
-            "model_parallel_strategy": "layer_sharding",
+            "model_parallel_strategy": "single_gpu_replicas",
             "grouped_moe": True,
             "persistent_model_workers": True,
             "direct_checkpoint_to_gpu": True,
-            "sequence_pipeline_depth": 2,
+            "sequence_pipeline_depth": 1,
             "loss_cache": False,
             "use_cache": False,
             "dtype": "bfloat16",

@@ -145,7 +145,7 @@ class ValidatorRuntimeTests(unittest.TestCase):
             settings=self._settings(),
         )
 
-        self.assertEqual(policy.batch_size, 96)
+        self.assertEqual(policy.batch_size, 40)
 
 
 if __name__ == "__main__":
