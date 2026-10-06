@@ -360,7 +360,8 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         self.assertEqual(entry["error_code"], "model_copy")
         self.assertEqual(
             entry["error_message"],
-            "The challenger's model weights are identical to the current king.",
+            "The checkpoint violates the model-copy policy: copies must belong to the original "
+            "coldkey and differ from the opposing king.",
         )
 
     def test_upload_verification_failure_is_projected_as_hidden_history_error(self):

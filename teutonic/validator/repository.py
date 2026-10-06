@@ -14,6 +14,7 @@ from teutonic.evaluation import EarlyStoppingPolicy, EvaluationRequestV2
 from teutonic.evaluation.configuration import DatasetManifestSnapshot, EvaluationSettings
 
 from .contracts import ClaimedEvaluation, EvaluationPolicyConfig, RecoveryCandidate
+from .model_ownership import model_ownership_error, reject_model_copy
 
 
 class SchedulerLockUnavailable(RuntimeError):
@@ -309,6 +310,13 @@ class ValidatorRepository:
                     """,
                     (row["upload_id"],),
                 )
+                ownership_error = model_ownership_error(cursor, row["upload_id"])
+                if ownership_error:
+                    reject_model_copy(
+                        cursor, upload_id=row["upload_id"], evaluation_id=evaluation_id,
+                        reason=ownership_error, now=now,
+                    )
+                    return None
                 return ClaimedEvaluation(
                     evaluation_id=evaluation_id,
                     upload_id=str(row["upload_id"]),
@@ -429,6 +437,13 @@ class ValidatorRepository:
                 """,
                 (row["upload_id"],),
             )
+            ownership_error = model_ownership_error(cursor, row["upload_id"])
+            if ownership_error:
+                reject_model_copy(
+                    cursor, upload_id=row["upload_id"], evaluation_id=evaluation_id,
+                    reason=ownership_error, now=now,
+                )
+                return None
         return ClaimedEvaluation(
             evaluation_id=evaluation_id,
             upload_id=str(row["upload_id"]),
@@ -535,6 +550,8 @@ class ValidatorRepository:
             row = cursor.fetchone()
             if row is None:
                 raise SchedulerInvariantError("unknown evaluation")
+            if row["state"] == "terminal_failure" and row["public_error_code"] == "model_copy":
+                return "failed"
             if row["state"] == "completed":
                 if row["verdict"] != verdict or row["verdict_summary"] != dict(result):
                     raise SchedulerInvariantError(
@@ -546,6 +563,13 @@ class ValidatorRepository:
                 "evaluating",
             }:
                 raise LeaseLostError("evaluation is no longer owned")
+            ownership_error = model_ownership_error(cursor, row["upload_id"])
+            if ownership_error:
+                reject_model_copy(
+                    cursor, upload_id=row["upload_id"], evaluation_id=evaluation_id,
+                    reason=ownership_error, now=now,
+                )
+                return "failed"
             cursor.execute(
                 """
                 UPDATE control_plane.evaluations
@@ -575,6 +599,9 @@ class ValidatorRepository:
                 (upload_state, row["upload_id"]),
             )
             if accepted or publish_non_winning:
+                # A digest owns one public artifact. Reuse its storage provenance,
+                # but associate a new win with the new evaluation. Crowning must
+                # resolve the winning upload through evaluations.upload_id.
                 disposition = "winner" if accepted else "non_winner"
                 cursor.execute(
                     """
@@ -591,7 +618,6 @@ class ValidatorRepository:
                         disposition = 'winner',
                         updated_at = clock_timestamp()
                     WHERE EXCLUDED.disposition = 'winner'
-                      AND model_promotions.state = 'promoted'
                     RETURNING state
                     """,
                     (
@@ -858,7 +884,7 @@ class ValidatorRepository:
                 SELECT u.signalling_hotkey, e.competition_id
                   FROM control_plane.model_promotions p
                   JOIN control_plane.evaluations e ON e.evaluation_id = p.evaluation_id
-                  JOIN control_plane.uploads u ON u.upload_id = p.upload_id
+                  JOIN control_plane.uploads u ON u.upload_id = e.upload_id
                  WHERE p.promotion_id = %s
                    AND p.disposition = 'winner' AND p.state = 'promoted'
                 """,
@@ -1092,13 +1118,15 @@ class ValidatorRepository:
         with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
-                SELECT p.*, e.competition_id, e.claimed_king_reign_id, e.policy_version, e.verdict,
+                SELECT p.*, e.upload_id AS winning_upload_id,
+                       winner_model.model_digest AS evaluated_model_digest, e.competition_id, e.claimed_king_reign_id, e.policy_version, e.verdict,
                        u.signalling_hotkey, r.uid, c.current_reign_id, c.next_reign_number,
                        c.competition_key, main.competition_id AS main_id,
                        main.current_reign_id AS main_reign_id, main.reward_main_hotkeys
                   FROM control_plane.model_promotions p
                   JOIN control_plane.evaluations e ON e.evaluation_id = p.evaluation_id
-                  JOIN control_plane.uploads u ON u.upload_id = p.upload_id
+                  JOIN control_plane.uploads u ON u.upload_id = e.upload_id
+                  JOIN control_plane.verified_uploads winner_model ON winner_model.upload_id = e.upload_id
                   JOIN control_plane.registrations r ON r.registration_id = u.registration_id
                   JOIN control_plane.competitions c ON c.competition_id = e.competition_id
                   JOIN control_plane.competitions main
@@ -1113,6 +1141,8 @@ class ValidatorRepository:
                 raise SchedulerInvariantError("unknown promotion")
             if row["state"] != "promoted" or row["disposition"] != "winner":
                 raise SchedulerInvariantError("only a promoted winner can be crowned")
+            if row["model_digest"] != row["evaluated_model_digest"]:
+                raise SchedulerInvariantError("promotion model differs from evaluated model")
             existing = cursor.execute(
                 "SELECT reign_id FROM control_plane.king_reigns WHERE causing_evaluation_id = %s",
                 (row["evaluation_id"],),
@@ -1121,6 +1151,13 @@ class ValidatorRepository:
                 return str(existing["reign_id"])
             if row["verdict"] != "accepted":
                 raise SchedulerInvariantError("promotion has no accepted verdict")
+            ownership_error = model_ownership_error(cursor, row["winning_upload_id"])
+            if ownership_error:
+                reject_model_copy(
+                    cursor, upload_id=row["winning_upload_id"],
+                    evaluation_id=row["evaluation_id"], reason=ownership_error, now=now,
+                )
+                return None
             if (row["current_reign_id"] or row["main_reign_id"]) != row["claimed_king_reign_id"]:
                 cursor.execute(
                     """
@@ -1129,7 +1166,7 @@ class ValidatorRepository:
                            updated_at = clock_timestamp()
                      WHERE upload_id = %s
                     """,
-                    (row["upload_id"],),
+                    (row["winning_upload_id"],),
                 )
                 return None
             history = row["reward_main_hotkeys"]
@@ -1174,7 +1211,7 @@ class ValidatorRepository:
                 (
                     row["competition_id"],
                     reign_number,
-                    row["upload_id"],
+                    row["winning_upload_id"],
                     row["evaluation_id"],
                     row["model_digest"],
                     row["public_bucket"],
@@ -1202,7 +1239,7 @@ class ValidatorRepository:
                    SET state = 'accepted', updated_at = clock_timestamp()
                  WHERE upload_id = %s
                 """,
-                (row["upload_id"],),
+                (row["winning_upload_id"],),
             )
             cursor.execute(
                 "UPDATE control_plane.competitions SET reward_reign_id=%s, reward_main_hotkeys=%s WHERE competition_id=%s",

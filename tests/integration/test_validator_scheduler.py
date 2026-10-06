@@ -492,6 +492,119 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         self.assertEqual(second.competition_id, str(self.competition_id))
         self.assertEqual(second.upload_id, str(self.uploads[1]))
 
+    def test_same_coldkey_reuse_crowns_distinct_hotkeys_and_unblocks_global_queue(self):
+        from teutonic.promotion import PromotionRepository, PromotionWorker
+        from teutonic.validator.runtime import CrownCoordinator, FinalizedMetagraph
+
+        self.connection.execute(
+            """UPDATE control_plane.metagraph_uid_assignments SET coldkey='original-coldkey'
+                WHERE uid IN (1,2,3)"""
+        )
+        for key in ("math", "code"):
+            self._create_specialist(key)
+        for key, upload in zip(("math", "code", "main"), reversed(self.uploads)):
+            self.connection.execute(
+                "UPDATE control_plane.uploads SET competition_key=%s,model_digest=%s WHERE upload_id=%s",
+                (key, f"{4:064x}", upload),
+            )
+            self.connection.execute(
+                "UPDATE control_plane.verified_uploads SET model_digest=%s WHERE upload_id=%s",
+                (f"{4:064x}", upload),
+            )
+        self.connection.execute(
+            "UPDATE control_plane.competitions SET reward_main_hotkeys=%s WHERE competition_id=%s",
+            (["genesis-hotkey", "old-1", "old-2", "old-3", "old-4"], self.competition_id),
+        )
+
+        class Chain:
+            def snapshot(self):
+                return FinalizedMetagraph(120, {
+                    "genesis-hotkey": 0, "hotkey-1": 1, "hotkey-2": 2, "hotkey-3": 3,
+                    "old-1": 5, "old-2": 6, "old-3": 7, "old-4": 8,
+                })
+
+        coordinator = CrownCoordinator(self.repository, Chain())
+        promotions = PromotionRepository(
+            self.connection, netuid=306, chain_generation="test", competition="quasar",
+            instance_id="reuse-promotion-worker",
+        )
+        promotions.acquire_lock()
+        try:
+            # Storage completion is fixture-controlled here; the worker integration
+            # tests cover real copy/verify/delete. Reused artifacts need no I/O.
+            worker = PromotionWorker(promotions, object(), object(), clock=lambda: NOW,
+                                     on_winner_promoted=coordinator)
+            for expected_uid in (3, 2, 1):
+                claim = self.repository.claim_next(now=NOW, policy=policy())
+                self.assertIsNotNone(claim)
+                self.assertEqual(claim.request["miner"]["uid"], expected_uid)
+                promotion = self._accept_and_promote(claim)
+                if expected_uid == 3:
+                    self.connection.execute(
+                        "UPDATE control_plane.uploads SET state='promoted' WHERE upload_id=%s",
+                        (claim.upload_id,),
+                    )
+                self.assertEqual(promotions.pending_winner_crowns(), (str(promotion),))
+                self.assertTrue(worker.run_one(propagate=True))
+                self.assertEqual(self.connection.execute(
+                    "SELECT hotkey,uid,accepted_upload_id FROM control_plane.king_reigns WHERE causing_evaluation_id=%s",
+                    (claim.evaluation_id,),
+                ).fetchone(), (f"hotkey-{expected_uid}", expected_uid, self.uploads[expected_uid - 1]))
+                self.assertEqual(self.connection.execute(
+                    "SELECT state FROM control_plane.uploads WHERE upload_id=%s", (claim.upload_id,)
+                ).fetchone()[0], "accepted")
+                self.assertFalse(worker.run_one(propagate=True))
+            self.assertEqual(self.connection.execute(
+                "SELECT count(*) FROM control_plane.model_promotions"
+            ).fetchone()[0], 1)
+            rewards = self.repository.current_weight_policy()
+            self.assertEqual(dict(zip(rewards["policy_hotkeys"], rewards["policy_weights"])), {
+                "hotkey-1": 0.3, "genesis-hotkey": 0.2, "old-1": 0.2,
+                "hotkey-3": 0.15, "hotkey-2": 0.15,
+            })
+            next_upload = self._seed_upload(uid=4, block=103, extrinsic=1, event=0)
+            next_claim = self.repository.claim_next(now=NOW, policy=policy())
+            self.assertEqual(next_claim.upload_id, str(next_upload))
+        finally:
+            promotions.release_lock()
+
+    def test_foreign_copy_is_rejected_before_dispatch_and_queue_advances(self):
+        from teutonic.validator.runtime import CrownCoordinator, FinalizedMetagraph
+
+        self._create_specialist("math")
+        self.connection.execute(
+            "UPDATE control_plane.uploads SET competition_key='math' WHERE upload_id=%s",
+            (self.uploads[2],),
+        )
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        promotion = self._accept_and_promote(first)
+
+        class Chain:
+            def snapshot(self):
+                return FinalizedMetagraph(120, {"genesis-hotkey": 0, "hotkey-3": 3})
+
+        CrownCoordinator(self.repository, Chain())(str(promotion))
+        for table in ("uploads", "verified_uploads"):
+            self.connection.execute(
+                f"UPDATE control_plane.{table} SET model_digest=%s WHERE upload_id=%s",
+                (f"{4:064x}", self.uploads[1]),
+            )
+        self.assertIsNone(self.repository.claim_next(now=NOW, policy=policy()))
+        self.assertEqual(self.connection.execute(
+            """SELECT e.state,e.public_error_code,e.started_at,e.evaluator_job_id,u.state
+                 FROM control_plane.evaluations e JOIN control_plane.uploads u USING(upload_id)
+                WHERE e.upload_id=%s""", (self.uploads[1],),
+        ).fetchone(), ("terminal_failure", "model_copy", None, None, "evaluation_failed"))
+        self.assertEqual(self.connection.execute(
+            "SELECT upload_id FROM control_plane.model_promotions WHERE promotion_id=%s",
+            (promotion,),
+        ).fetchone()[0], self.uploads[2])
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM control_plane.weight_publications"
+        ).fetchone()[0], 1)
+        next_claim = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertEqual(next_claim.upload_id, str(self.uploads[0]))
+
     def test_all_split_crowns_then_main_win_complete_gradual_transition(self):
         from teutonic.validator.runtime import CrownCoordinator, FinalizedMetagraph
         from teutonic.weights.repository import WeightPublicationRepository

@@ -412,14 +412,14 @@ weights, sample counts, and thresholds. `chain.toml` supplies initialization def
 only. Editing it or restarting a service does not overwrite active database policy.
 `TEUTONIC_COMPETITION` continues to name the existing MAIN database competition;
 it must not be changed to a specialist name on the validator or weight publisher.
-One validator and one weight publisher serve all four competitions.
+One validator, one promotion worker, and one weight publisher serve all four competitions.
 
 Before this rollout, drain evaluations and promotions, then stop the validator,
 promotion worker, weight publisher, and dashboard publisher. Back up PostgreSQL and
 apply `scripts/db/add_split_competitions.sql` with `psql -v ON_ERROR_STOP=1`. The
 migration preserves current kings and payouts. Deploy all control-plane services
-together: the scheduler lock becomes global to the subnet/generation, and old and
-new schedulers must not run simultaneously.
+together: scheduler and promotion-worker locks are global to the subnet/generation.
+Stop the old validator and promotion worker before starting their updated versions.
 
 Build the specialist inventories from the existing public source manifests:
 
@@ -493,6 +493,16 @@ three-completed-evaluations limit for identical safetensors weights.
 The global queue follows finalized ready-commit order. A specialist without a king
 faces the current MAIN king on the specialist mix. A win creates only that split's
 king; a loss leaves it unfilled. Pending promotion/crowning blocks the next duel.
+The promotion worker handles MAIN and all three specialists, including recovery
+of copied winners awaiting a crown. An identical checkpoint may be resubmitted
+under a new hotkey only by its original coldkey, recorded at the original ready
+block. Another coldkey (or unverifiable ownership) is rejected before evaluation
+and checked again before verdict acceptance and crowning. The check also compares
+safetensors hashes regardless of filenames or changes to other inventory files.
+An allowed resubmission can reuse the verified public artifact while preserving
+its original provenance; the new winning evaluation determines the crowned
+upload and hotkey. Evaluation and submission limits still apply. This guard runs
+on the control plane and needs no GPU evaluator update or new database migration.
 
 Rewards transition only as first specialist winners appear:
 

@@ -21,7 +21,7 @@ class PromotionWorkerLockUnavailable(RuntimeError):
 
 
 def promotion_worker_lock_key(netuid: int, chain_generation: str, competition: str) -> int:
-    material = f"teutonic-promotion-worker-v1|{netuid}|{chain_generation}|{competition}".encode()
+    material = f"teutonic-promotion-worker-v1|{netuid}|{chain_generation}".encode()
     return int.from_bytes(hashlib.sha256(material).digest()[:8], "big", signed=True)
 
 
@@ -100,13 +100,18 @@ class PromotionRepository:
                 """
                 SELECT p.*, vu.manifest_sha256, vu.manifest_size_bytes,
                        e.state AS evaluation_state, e.verdict AS evaluation_verdict,
-                       u.state AS upload_state, u.registration_id
+                       winner.state AS upload_state, u.registration_id,
+                       winner_model.model_digest AS evaluated_model_digest
                   FROM control_plane.model_promotions p
                   JOIN control_plane.evaluations e ON e.evaluation_id = p.evaluation_id
                   JOIN control_plane.competitions c ON c.competition_id = e.competition_id
+                  JOIN control_plane.competitions main
+                    ON main.competition_id = COALESCE(c.main_competition_id, c.competition_id)
                   JOIN control_plane.verified_uploads vu ON vu.upload_id = p.upload_id
                   JOIN control_plane.uploads u ON u.upload_id = p.upload_id
-                 WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
+                  JOIN control_plane.verified_uploads winner_model ON winner_model.upload_id = e.upload_id
+                  JOIN control_plane.uploads winner ON winner.upload_id = e.upload_id
+                 WHERE c.netuid = %s AND c.chain_generation = %s AND main.name = %s
                    AND (
                        (p.state IN ('promotion_pending', 'retry_pending')
                         AND COALESCE(p.next_retry_at, '-infinity') <= %s)
@@ -132,6 +137,10 @@ class PromotionRepository:
             row = cursor.fetchone()
             if row is None:
                 return None
+            # The artifact source can differ from the winning submission when
+            # identical weights have already been published by another hotkey.
+            if row["model_digest"] != row["evaluated_model_digest"]:
+                raise PromotionInvariantError("promotion model differs from evaluated model")
             eligible = (
                 row["evaluation_state"] == "completed"
                 and (
@@ -317,7 +326,7 @@ class PromotionRepository:
                        updated_at = clock_timestamp()
                  WHERE promotion_id = %s AND owner_instance_id = %s
                    AND state = 'deleting_private_source'
-                 RETURNING upload_id
+                 RETURNING evaluation_id, disposition
                 """,
                 (
                     observed_object_count,
@@ -332,12 +341,14 @@ class PromotionRepository:
             ).fetchone()
             if row is None:
                 raise PromotionLeaseLostError("promotion completion lost its lease")
-            if claim.disposition == "winner":
+            if row[1] == "winner":
                 self.connection.execute(
                     """
                     UPDATE control_plane.uploads
                        SET state = 'promoted', updated_at = clock_timestamp()
-                     WHERE upload_id = %s AND state = 'accepted_pending_promotion'
+                     WHERE upload_id = (
+                         SELECT upload_id FROM control_plane.evaluations WHERE evaluation_id = %s
+                     ) AND state = 'accepted_pending_promotion'
                     """,
                     (row[0],),
                 )
@@ -388,8 +399,10 @@ class PromotionRepository:
               FROM control_plane.model_promotions p
               JOIN control_plane.evaluations e ON e.evaluation_id = p.evaluation_id
               JOIN control_plane.competitions c ON c.competition_id = e.competition_id
-              JOIN control_plane.uploads u ON u.upload_id = p.upload_id
-             WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
+              JOIN control_plane.competitions main
+                ON main.competition_id = COALESCE(c.main_competition_id, c.competition_id)
+              JOIN control_plane.uploads u ON u.upload_id = e.upload_id
+             WHERE c.netuid = %s AND c.chain_generation = %s AND main.name = %s
                AND p.state = 'promoted' AND p.disposition = 'winner'
                AND e.state = 'completed' AND e.verdict = 'accepted'
                AND u.state = 'promoted'

@@ -17,7 +17,10 @@ PUBLIC_ERROR_MESSAGES = {
     "verification_failed": "The uploaded model could not be verified.",
     "invalid_evaluation_input": "The submission did not satisfy the evaluation input policy.",
     "config_rejected": "The model configuration was rejected by the public evaluation policy.",
-    "model_copy": "The challenger's model weights are identical to the current king.",
+    "model_copy": (
+        "The checkpoint violates the model-copy policy: copies must belong to the original "
+        "coldkey and differ from the opposing king."
+    ),
     "evaluator_busy": "Evaluation capacity was temporarily unavailable.",
     "evaluator_job_lost": "The evaluation worker restarted before the result was durable.",
     "evaluation_failed": "The evaluation could not be completed.",
