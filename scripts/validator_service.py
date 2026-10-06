@@ -7,7 +7,6 @@ import contextlib
 import logging
 import os
 import signal
-from dataclasses import replace
 import socket
 from datetime import datetime, timezone
 
@@ -24,7 +23,7 @@ from teutonic.validator import (
 )
 
 
-SOFTWARE_VERSION = "postgres-validator-v2"
+SOFTWARE_VERSION = "postgres-validator-splits-v1"
 log = logging.getLogger("teutonic.validator")
 stopping = False
 STATUS_LOG_SECONDS = 60.0
@@ -154,8 +153,8 @@ async def run(*, once: bool) -> int:
                 repository,
                 evaluator,
                 policy=policy,
-                policy_loader=lambda: replace(
-                    policy,
+                policy_loader=lambda: evaluation_policy_from_env(
+                    settings=repository.load_evaluation_settings(),
                     early_stopping=repository.load_early_stopping_policy(),
                 ),
                 preflight=contract_preflight,

@@ -177,3 +177,6 @@ __all__ = [
     "SEED_NAMESPACE",
     "load_arch",
 ]
+
+# Consumed by administrative tooling only; never overrides active database settings.
+SPLIT_DEFAULTS = _doc.get("splits", {})

@@ -8,6 +8,7 @@
   var DATASET_POLL_MS = 60000;
   var BENCHMARK_POLL_MS = 60000;
   var lastPayload = null;
+  var mainQueueFailed = false;
   var benchmarkPayload = null;
   var benchmarkHistoryVisible = false;
   var historyShowErrors = false;
@@ -162,6 +163,7 @@
     });
   }
   async function loadDatasetManifest() {
+    el("dataset-manifest-link").href = DATASET_MANIFEST_URL;
     try {
       var manifest = await fetchFirstJson(["/datasets/manifest.json", DATASET_MANIFEST_URL]);
       renderDatasetManifest(manifest);
@@ -189,23 +191,85 @@
     var kingRepo = genesisKing ? genesisRepo : king.model_repo;
     var kingDigest = genesisKing ? genesisDigest : (king.king_digest || king.model_digest);
     var kingUrl = genesisKing ? genesisUrl : (king.model_reference ? new URL(king.model_reference + "manifest.json", MODEL_STORAGE_BASE).href : "");
-    setLink("king-link", kingRepo, kingUrl);
-    setLink("king-revision", revision(kingDigest), kingUrl);
+    setLink("king-link", d.king ? kingRepo : "Awaiting first winner", d.king ? kingUrl : "");
+    setLink("king-revision", d.king ? revision(kingDigest) : "--", d.king ? kingUrl : "");
     el("king-health").classList.toggle("is-live", !!d.king);
     text("king-reign", "REIGN " + (d.king ? "#" + number(king.reign_number) + " — " + compactTimestamp(king.crowned_at) : "--"));
     text("source-watermark", "WATERMARK " + number(d.source_watermark));
     document.title = (chain.name || "Teutonic") + " — Dashboard";
   }
-  function renderEvaluation(d) {
-    var ev = d.current_eval, service = d.service_status || {}, card = el("eval-card"), provisionalNode = el("eval-provisional"); text("validator-phase", "VALIDATOR " + String(service.validator_phase || "--").toUpperCase());
-    if (!ev) { card.dataset.active = "false"; provisionalNode.hidden = true; text("eval-title", d.queue && d.queue.length ? "NEXT CHALLENGE QUEUED" : "NO ACTIVE CHALLENGE"); el("eval-title").title = d.queue && d.queue.length ? d.queue[0].hotkey || "" : ""; if (d.queue && d.queue.length) hotkeyText("eval-meta", "HOTKEY ", d.queue[0].hotkey, 16, 8); else text("eval-meta", "THE VALIDATOR IS READY FOR THE NEXT MODEL"); text("eval-stage", "WAITING"); text("eval-percent", "0%"); el("eval-progress").style.width = "0%"; return; }
-    var pct = finite(ev.percent); if (pct == null && finite(ev.total) > 0) pct = finite(ev.progress) / finite(ev.total) * 100; pct = Math.max(0, Math.min(100, pct || 0));
-    var provisional = TeutonicDashboardV1.currentEvaluationPresentation(ev); provisionalNode.hidden = false; text("eval-mu-hat", metric(provisional.muHat)); text("eval-lcb", metric(provisional.lcb)); text("eval-delta", metric(provisional.threshold)); text("eval-lcb-meta", provisional.available ? number(provisional.sequences) + " PAIRED · " + number(provisional.bootstraps) + " BOOTSTRAPS · UPDATES AT 10% CHECKPOINTS" : "WAITING FOR FIRST 10% CHECKPOINT");
-    card.dataset.active = "true"; hotkeyText("eval-title", "HOTKEY ", ev.hotkey, 16, 8); text("eval-meta", "UID " + ev.uid + " · MODEL SHA256 " + short(ev.model_digest, 12, 6) + " · " + number(ev.elapsed_seconds) + "S ELAPSED"); el("eval-meta").title = ev.model_digest || ""; text("eval-stage", String(ev.stage || "PROCESSING").replaceAll("_", " ")); text("eval-percent", pct.toFixed(0) + "% · " + number(ev.progress) + "/" + number(ev.total)); el("eval-progress").style.width = pct + "%";
+  function competitionSources() {
+    return [{ key: "main", dashboard: lastPayload, failed: mainQueueFailed }].concat(specialists || []);
   }
-  function renderQueue(d) {
-    var body = el("queue-body"), rows = d.queue || []; text("queue-count", rows.length + (rows.length === 1 ? " MODEL" : " MODELS")); if (!rows.length) return emptyRow(body, 8, "QUEUE EMPTY — VALIDATOR READY"); clear(body);
-    rows.forEach(function (item, index) { var tr = document.createElement("tr"); cell(tr, "#" + (item.queue_position || index + 1)); cell(tr, item.uid); cell(tr, item.model_digest, "mono", item.model_digest); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); cell(tr, number(item.block)); cell(tr, String(item.state || "queued").toUpperCase()); cell(tr, date(item.submitted_at)); body.appendChild(tr); });
+  function globalQueueRows() {
+    var rows = [];
+    competitionSources().forEach(function (source) {
+      if (source.dashboard) source.dashboard.queue.forEach(function (item) { rows.push({ competition: source.key, item: item }); });
+    });
+    return rows.sort(function (a, b) {
+      var aPosition = finite(a.item.queue_position), bPosition = finite(b.item.queue_position);
+      return (aPosition == null ? Infinity : aPosition) - (bPosition == null ? Infinity : bPosition)
+        || Number(a.item.block || 0) - Number(b.item.block || 0)
+        || String(a.item.submitted_at || "").localeCompare(String(b.item.submitted_at || ""))
+        || String(a.item.challenge_id || a.item.hotkey || "").localeCompare(String(b.item.challenge_id || b.item.hotkey || ""));
+    });
+  }
+  function renderEvaluation() {
+    var sources = competitionSources(), missing = [], stale = [];
+    sources.forEach(function (source) { if (!source.dashboard) missing.push(source.key.toUpperCase()); else if (source.failed) stale.push(source.key.toUpperCase()); });
+    var notes = [];
+    if (missing.length) notes.push("WAITING FOR EVALUATION DATA: " + missing.join(", "));
+    if (stale.length) notes.push("LAST KNOWN EVALUATION DATA: " + stale.join(", "));
+    text("eval-data-status", notes.join(" · ")); el("eval-data-status").hidden = !notes.length;
+    // Publications arrive independently; prefer the freshest active snapshot.
+    var active = sources.filter(function (source) { return source.dashboard && source.dashboard.current_eval; }).sort(function (a, b) {
+      return Number(a.failed) - Number(b.failed)
+        || new Date(b.dashboard.updated_at || b.dashboard.generated_at || 0) - new Date(a.dashboard.updated_at || a.dashboard.generated_at || 0);
+    });
+    var selected = active[0], d = selected ? selected.dashboard : lastPayload || {}, ev = d.current_eval;
+    var service = d.service_status || {}, card = el("eval-card"), provisionalNode = el("eval-provisional");
+    text("validator-phase", "VALIDATOR " + String(service.validator_phase || "--").toUpperCase());
+    if (!ev) {
+      var next = globalQueueRows()[0];
+      card.dataset.active = "false"; provisionalNode.hidden = true;
+      text("eval-title", notes.length ? "EVALUATION STATUS INCOMPLETE" : next ? "NEXT CHALLENGE QUEUED · " + next.competition.toUpperCase() : "NO ACTIVE CHALLENGE");
+      el("eval-title").title = next ? next.item.hotkey || "" : "";
+      if (next) hotkeyText("eval-meta", next.competition.toUpperCase() + " · NEXT HOTKEY ", next.item.hotkey, 16, 8);
+      else text("eval-meta", notes.length ? "WAITING FOR ALL COMPETITION PUBLICATIONS" : "THE VALIDATOR IS READY FOR THE NEXT MODEL");
+      text("eval-stage", "WAITING"); text("eval-percent", "0%"); el("eval-progress").style.width = "0%"; return;
+    }
+    var pct = finite(ev.percent); if (pct == null && finite(ev.total) > 0) pct = finite(ev.progress) / finite(ev.total) * 100; pct = Math.max(0, Math.min(100, pct || 0));
+    var provisional = TeutonicDashboardV1.currentEvaluationPresentation(ev);
+    provisionalNode.hidden = false; text("eval-mu-hat", metric(provisional.muHat)); text("eval-lcb", metric(provisional.lcb)); text("eval-delta", metric(provisional.threshold));
+    text("eval-lcb-meta", provisional.available ? number(provisional.sequences) + " PAIRED · " + number(provisional.bootstraps) + " BOOTSTRAPS · UPDATES AT 10% CHECKPOINTS" : "WAITING FOR FIRST 10% CHECKPOINT");
+    card.dataset.active = "true";
+    hotkeyText("eval-title", selected.key.toUpperCase() + " · HOTKEY ", ev.hotkey, 16, 8); el("eval-title").title = ev.hotkey || "";
+    text("eval-meta", "UID " + ev.uid + " · MODEL SHA256 " + short(ev.model_digest, 12, 6) + " · " + number(ev.elapsed_seconds) + "S ELAPSED");
+    el("eval-meta").title = ev.model_digest || ""; text("eval-stage", String(ev.stage || "PROCESSING").replaceAll("_", " "));
+    text("eval-percent", pct.toFixed(0) + "% · " + number(ev.progress) + "/" + number(ev.total)); el("eval-progress").style.width = pct + "%";
+  }
+  function renderSharedEvaluation() { renderQueue(); renderEvaluation(); }
+  function renderQueue() {
+    var sources = competitionSources(), rows = globalQueueRows(), missing = [], stale = [];
+    sources.forEach(function (source) {
+      if (!source.dashboard) missing.push(source.key.toUpperCase());
+      else if (source.failed) stale.push(source.key.toUpperCase());
+    });
+    text("queue-count", rows.length + (rows.length === 1 ? " MODEL" : " MODELS"));
+    var status = [];
+    if (missing.length) status.push("WAITING FOR QUEUE DATA: " + missing.join(", "));
+    if (stale.length) status.push("LAST KNOWN QUEUE DATA: " + stale.join(", "));
+    text("queue-status", status.length ? status.join(" · ") : "MAIN · MATH · CODE · TEXT — GLOBAL READY-COMMIT ORDER");
+    var body = el("queue-body"); clear(body);
+    if (!rows.length) return emptyRow(body, 9, missing.length || stale.length ? "QUEUE DATA INCOMPLETE" : "QUEUE EMPTY");
+    rows.forEach(function (entry) {
+      var item = entry.item, row = document.createElement("tr");
+      cell(row, item.queue_position == null ? "--" : "#" + item.queue_position);
+      cell(row, entry.competition.toUpperCase()); cell(row, item.uid);
+      cell(row, item.model_digest, "mono", item.model_digest); hotkeyCell(row, item.hotkey); coldkeyCell(row, item.coldkey);
+      cell(row, number(item.block)); cell(row, String(item.state || "queued").toUpperCase()); cell(row, date(item.submitted_at));
+      body.appendChild(row);
+    });
   }
   function renderHistory(d) {
     var body = el("history-body"), view = TeutonicDashboardV1.historyPresentation(d.history || [], historyShowErrors), rows = view.rows.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
@@ -297,8 +361,8 @@
       marker.addEventListener("blur", hideTooltip);
     });
   }
-  function render(d) { TeutonicDashboardV1.validate(d); lastPayload = d; renderHeader(d); renderReigns(d); renderEvaluation(d); renderChart(d); renderQueue(d); renderHistory(d); renderWeightStatus(d); text("last-refresh", "LAST REFRESH " + new Date().toLocaleTimeString()); el("error-banner").hidden = true; }
-  async function poll() { try { var response = await fetch(ENDPOINT + "?t=" + Date.now(), { cache: "no-store" }); if (!response.ok) throw new Error("dashboard request returned HTTP " + response.status); render(await response.json()); } catch (error) { var banner = el("error-banner"); banner.textContent = "DATA REFRESH FAILED — " + error.message + (lastPayload ? " — SHOWING LAST GOOD PUBLICATION" : ""); banner.hidden = false; } }
+  function render(d) { TeutonicDashboardV1.validate(d); lastPayload = d; mainQueueFailed = false; renderHeader(d); renderReigns(d); renderChart(d); renderSharedEvaluation(); renderHistory(d); renderWeightStatus(d); text("last-refresh", "LAST REFRESH " + new Date().toLocaleTimeString()); el("error-banner").hidden = true; }
+  async function poll() { try { var response = await fetch(ENDPOINT + "?t=" + Date.now(), { cache: "no-store" }); if (!response.ok) throw new Error("dashboard request returned HTTP " + response.status); render(await response.json()); } catch (error) { mainQueueFailed = true; renderSharedEvaluation(); var banner = el("error-banner"); banner.textContent = "DATA REFRESH FAILED — " + error.message + (lastPayload ? " — SHOWING LAST GOOD PUBLICATION" : ""); banner.hidden = false; } }
   function setTheme(theme) { document.documentElement.dataset.theme = theme; el("theme-toggle").textContent = theme === "dark" ? "LIGHT" : "DARK"; if (lastPayload) renderChart(lastPayload); }
   var savedTheme = localStorage.getItem("dashboard-theme"); setTheme(savedTheme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")); el("theme-toggle").addEventListener("click", function () { var next = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; localStorage.setItem("dashboard-theme", next); setTheme(next); });
   var smoothSlider = el("smooth-slider"), savedSmoothing = localStorage.getItem("smoothing");
@@ -311,6 +375,86 @@
   el("benchmark-history-toggle").addEventListener("click", function () { benchmarkHistoryVisible = !benchmarkHistoryVisible; if (benchmarkPayload) renderBenchmarks(benchmarkPayload); });
   var chartResizeFrame = null;
   window.addEventListener("resize", function () { if (chartResizeFrame != null) cancelAnimationFrame(chartResizeFrame); chartResizeFrame = requestAnimationFrame(function () { chartResizeFrame = null; if (lastPayload) renderChart(lastPayload); }); });
+  var specialists = ["math", "code", "text"].map(function (key) {
+    var card = el("specialist-template").content.firstElementChild.cloneNode(true);
+    card.id = "specialist-" + key;
+    card.querySelector("h3").id = key + "-heading";
+    card.setAttribute("aria-labelledby", key + "-heading");
+    card.querySelector('[data-field="name"]').textContent = key.toUpperCase();
+    var prefix = "/competitions/" + key + "/";
+    card.querySelector('[data-field="manifest"]').href = prefix + "datasets/manifest.json";
+    el("specialist-grid").appendChild(card);
+    return { key: key, card: card, prefix: prefix, dashboard: null, failed: false, polling: false, loadingDataset: false };
+  });
+  function specialistNode(state, field) { return state.card.querySelector('[data-field="' + field + '"]'); }
+  function specialistText(state, field, value) { specialistNode(state, field).textContent = value; }
+  function renderSpecialist(state, d) {
+    TeutonicDashboardV1.validate(d);
+    state.dashboard = d;
+    state.failed = false;
+    var king = d.king, payout = d.king_payout || {};
+    specialistText(state, "status", king ? "REIGN #" + number(king.reign_number) : "AWAITING FIRST WINNER");
+    specialistNode(state, "error").hidden = true;
+    var kingNode = specialistNode(state, "king");
+    kingNode.textContent = king ? king.model_repo || "PUBLIC MODEL" : "Awaiting first winner";
+    kingNode.removeAttribute("href");
+    if (king && king.model_reference) kingNode.href = new URL(king.model_reference + "manifest.json", MODEL_STORAGE_BASE).href;
+    var identityNode = specialistNode(state, "identity"); clear(identityNode);
+    if (king) {
+      identityNode.appendChild(document.createTextNode("UID " + king.uid + " · "));
+      identityNode.appendChild(hotkeyLink(king.hotkey, 9, 5));
+    } else identityNode.textContent = "First challengers face the MAIN king.";
+    specialistText(state, "weight", king ? percent(payout.weight) : "--");
+    specialistText(state, "alpha", king ? metric(payout.alpha_per_hour, 3) : "--");
+    specialistText(state, "usd", king ? usd(payout.usd_per_hour) : "--");
+    var history = d.history.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
+    specialistText(state, "history-count", history.length + (history.length === 1 ? " RESULT" : " RESULTS"));
+    var historyBody = specialistNode(state, "history"); clear(historyBody);
+    if (!history.length) emptyRow(historyBody, 6, "NO EVALUATIONS YET");
+    history.forEach(function (item, index) {
+      var row = document.createElement("tr"), detailKey = state.key + "-" + historyDetailKey(item, index);
+      var details = historyShardRow(item, index, detailKey); details.firstElementChild.colSpan = 6;
+      cell(row, item.uid); cell(row, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message);
+      cell(row, metric(item.lcb)); cell(row, metric(item.avg_king_loss, 4)); cell(row, metric(item.avg_challenger_loss, 4)); cell(row, age(item.timestamp), "", date(item.timestamp));
+      makeHistoryRowExpandable(row, details, item, detailKey); historyBody.appendChild(row); historyBody.appendChild(details);
+    });
+    specialistText(state, "updated", "PUBLICATION " + age(d.updated_at || d.generated_at));
+  }
+  async function pollSpecialist(state) {
+    if (state.polling) return;
+    state.polling = true;
+    try { renderSpecialist(state, await fetchJson(state.prefix + "dashboard.json")); }
+    catch (error) {
+      state.failed = true;
+      var message = specialistNode(state, "error");
+      message.textContent = state.dashboard ? "Refresh failed · showing last publication" : "Competition data unavailable";
+      message.hidden = false;
+      if (!state.dashboard) {
+        specialistText(state, "status", "UNAVAILABLE"); specialistText(state, "king", "Awaiting publication");
+        specialistText(state, "identity", "");
+        emptyRow(specialistNode(state, "history"), 6, "RESULTS UNAVAILABLE");
+      }
+    } finally { state.polling = false; renderSharedEvaluation(); }
+  }
+  async function loadSpecialistDataset(state) {
+    if (state.loadingDataset) return;
+    state.loadingDataset = true;
+    try {
+      var manifest = await fetchJson(state.prefix + "datasets/manifest.json"), view = TeutonicDashboardV1.datasetPresentation(manifest);
+      specialistText(state, "policy", number(view.evalN) + " SAMPLES · REQUIRED LCB > " + metric(manifest.delta_threshold, 3));
+      var mix = specialistNode(state, "mix"); clear(mix);
+      view.rows.forEach(function (source) {
+        var row = document.createElement("li"), name = document.createElement("span"), share = document.createElement("strong");
+        name.textContent = source.name.toUpperCase(); share.textContent = percent(source.normalizedWeight) + " · " + number(source.evalSequences);
+        row.appendChild(name); row.appendChild(share); mix.appendChild(row);
+      });
+    } catch (error) { specialistText(state, "policy", "CONFIGURATION UNAVAILABLE · USE THE MANIFEST LINK"); }
+    finally { state.loadingDataset = false; }
+  }
+  function pollSpecialists() { specialists.forEach(pollSpecialist); }
+  function loadSpecialistDatasets() { specialists.forEach(loadSpecialistDataset); }
+  pollSpecialists(); setInterval(pollSpecialists, POLL_MS);
+  loadSpecialistDatasets(); setInterval(loadSpecialistDatasets, DATASET_POLL_MS);
   poll(); setInterval(poll, POLL_MS);
   loadDatasetManifest(); setInterval(loadDatasetManifest, DATASET_POLL_MS);
   loadBenchmarks(); setInterval(loadBenchmarks, BENCHMARK_POLL_MS);

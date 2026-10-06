@@ -13,8 +13,8 @@ except ImportError:
 
 from teutonic.evaluation import (
     EarlyStoppingPolicy,
-    EvaluatorJobNotFoundError,
     EvaluationRequestV2,
+    EvaluatorJobNotFoundError,
     result_provenance,
 )
 from teutonic.evaluation.configuration import DatasetManifestSnapshot, canonical_manifest_bytes
@@ -24,7 +24,6 @@ from teutonic.validator import (
     ValidatorRepository,
     ValidatorScheduler,
 )
-
 
 DATABASE_URL = os.environ.get("TEUTONIC_TEST_DATABASE_URL")
 NOW = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
@@ -380,6 +379,245 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         )
         return upload
 
+    def _create_specialist(self, key):
+        from psycopg.rows import dict_row
+
+        from teutonic.evaluation.configuration import store_evaluation_configuration
+
+        competition = self.connection.execute(
+            "INSERT INTO control_plane.competitions(netuid,chain_generation,name,competition_key,main_competition_id) VALUES (306,'test',%s,%s,%s) RETURNING competition_id",
+            (key, key, self.competition_id),
+        ).fetchone()[0]
+        self.connection.execute(
+            "INSERT INTO control_plane.evaluation_early_stopping_policies(competition_id,enabled,check_interval) VALUES (%s,true,8)",
+            (competition,),
+        )
+        original_factory = self.connection.row_factory
+        self.connection.row_factory = dict_row
+        try:
+            store_evaluation_configuration(
+                self.connection,
+                netuid=306,
+                chain_generation="test",
+                competition=key,
+                dataset_label=key,
+                n=32,
+                delta_threshold=0.007,
+                manifests=policy().dataset_manifests,
+                shards_per_dataset=4,
+            )
+        finally:
+            self.connection.row_factory = original_factory
+        return competition
+
+    def test_specialist_first_win_preserves_main_and_publishes_global_weights(self):
+        from teutonic.validator.runtime import CrownCoordinator, FinalizedMetagraph
+        from teutonic.weights.repository import WeightPublicationRepository
+
+        split = self._create_specialist("math")
+        self.connection.execute(
+            "UPDATE control_plane.uploads SET competition_key='math' WHERE upload_id=%s",
+            (self.uploads[2],),
+        )
+        self.connection.execute(
+            "UPDATE control_plane.competitions SET reward_main_hotkeys=%s WHERE competition_id=%s",
+            (["genesis-hotkey", "old-1", "old-2", "old-3", "old-4"], self.competition_id),
+        )
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertEqual(first.competition_id, str(split))
+        self.assertEqual(first.claimed_king_reign_id, str(self.genesis_reign_id))
+        self.assertEqual(first.request["limits"]["delta_threshold"], 0.007)
+        self.assertEqual(first.request["early_stopping"]["check_interval"], 8)
+        self.assertIsNone(self.repository.claim_next(now=NOW, policy=policy()))
+        promotion = self._accept_and_promote(first)
+
+        class Chain:
+            def snapshot(self):
+                return FinalizedMetagraph(
+                    110,
+                    {
+                        "genesis-hotkey": 0,
+                        "old-1": 5,
+                        "old-2": 6,
+                        "old-3": 7,
+                        "old-4": 8,
+                        "hotkey-3": 3,
+                    },
+                )
+
+        reign = CrownCoordinator(self.repository, Chain())(str(promotion))
+        self.assertIsNotNone(reign)
+        current, ended = self.connection.execute(
+            "SELECT c.current_reign_id,k.ended_at FROM control_plane.competitions c JOIN control_plane.king_reigns k ON k.reign_id=c.current_reign_id WHERE c.competition_id=%s",
+            (self.competition_id,),
+        ).fetchone()
+        self.assertEqual(current, self.genesis_reign_id)
+        self.assertIsNone(ended)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT previous_reign_id FROM control_plane.king_reigns WHERE reign_id=%s",
+                (reign,),
+            ).fetchone()[0],
+            None,
+        )
+        publisher = WeightPublicationRepository(
+            self.connection,
+            netuid=306,
+            chain_generation="test",
+            competition="quasar",
+            instance_id="test-publisher",
+        )
+        publisher.acquire_lock()
+        try:
+            plan = publisher.claim_next(now=NOW, lease=timedelta(minutes=1), current_block=110)
+            self.assertEqual(plan.source_reign_id, reign)
+            self.assertEqual(plan.competition_id, str(self.competition_id))
+            self.assertTrue(publisher.is_current(plan))
+            self.assertEqual(plan.normalized_weights, (0.25, 0.2, 0.2, 0.2, 0.15))
+        finally:
+            publisher.release_lock()
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT current_weight FROM control_plane.dashboard_current_king WHERE competition='quasar'"
+            ).fetchone()[0],
+            0.25,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT current_weight FROM control_plane.dashboard_current_king WHERE competition='math'"
+            ).fetchone()[0],
+            0.15,
+        )
+        second = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertEqual(second.competition_id, str(self.competition_id))
+        self.assertEqual(second.upload_id, str(self.uploads[1]))
+
+    def test_all_split_crowns_then_main_win_complete_gradual_transition(self):
+        from teutonic.validator.runtime import CrownCoordinator, FinalizedMetagraph
+        from teutonic.weights.repository import WeightPublicationRepository
+
+        for key, upload in zip(("math", "code", "text"), reversed(self.uploads)):
+            self._create_specialist(key)
+            self.connection.execute(
+                "UPDATE control_plane.uploads SET competition_key=%s WHERE upload_id=%s",
+                (key, upload),
+            )
+        self.connection.execute(
+            "UPDATE control_plane.competitions SET reward_main_hotkeys=%s WHERE competition_id=%s",
+            (["genesis-hotkey", "old-1", "old-2", "old-3", "old-4"], self.competition_id),
+        )
+
+        class Chain:
+            def snapshot(self):
+                return FinalizedMetagraph(
+                    120,
+                    {
+                        "genesis-hotkey": 0,
+                        "old-1": 5,
+                        "old-2": 6,
+                        "old-3": 7,
+                        "old-4": 8,
+                        "hotkey-1": 1,
+                        "hotkey-2": 2,
+                        "hotkey-3": 3,
+                        "hotkey-4": 4,
+                    },
+                )
+
+        coordinator = CrownCoordinator(self.repository, Chain())
+        for expected in (
+            (0.25, 0.2, 0.2, 0.2, 0.15),
+            (0.3, 0.2, 0.2, 0.15, 0.15),
+            (0.4, 0.15, 0.15, 0.15, 0.15),
+        ):
+            claim = self.repository.claim_next(now=NOW, policy=policy())
+            promotion = self._accept_and_promote(claim)
+            reign = coordinator(str(promotion))
+            self.assertEqual(coordinator(str(promotion)), reign)
+            state = self.repository.current_weight_policy()
+            self.assertEqual(state["policy_weights"], expected)
+            self.assertAlmostEqual(sum(state["policy_weights"]), 1)
+        self._seed_upload(uid=4, block=103, extrinsic=1, event=0)
+        main_claim = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertEqual(main_claim.competition_id, str(self.competition_id))
+        promotion = self._accept_and_promote(main_claim)
+        main_reign = coordinator(str(promotion))
+        state = self.repository.current_weight_policy()
+        self.assertEqual(
+            state["policy_hotkeys"],
+            ("hotkey-4", "genesis-hotkey", "hotkey-3", "hotkey-2", "hotkey-1"),
+        )
+        self.assertEqual(state["policy_weights"], (0.4, 0.15, 0.15, 0.15, 0.15))
+        publisher = WeightPublicationRepository(
+            self.connection,
+            netuid=306,
+            chain_generation="test",
+            competition="quasar",
+            instance_id="aggregate",
+        )
+        publisher.acquire_lock()
+        try:
+            plan = publisher.claim_next(now=NOW, lease=timedelta(minutes=1), current_block=120)
+            self.assertEqual(plan.source_reign_id, main_reign)
+            self.assertEqual(plan.normalized_weights, (0.4, 0.15, 0.15, 0.15, 0.15))
+            old_states = self.connection.execute(
+                "SELECT state FROM control_plane.weight_publications WHERE source_reign_id<>%s",
+                (main_reign,),
+            ).fetchall()
+            self.assertTrue(all(state == ("superseded",) for state in old_states))
+        finally:
+            publisher.release_lock()
+
+    def test_specialist_rejection_and_retry_keep_baseline_and_configuration(self):
+        self._create_specialist("math")
+        self.connection.execute(
+            "UPDATE control_plane.uploads SET competition_key='math' WHERE upload_id=%s",
+            (self.uploads[2],),
+        )
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        self.repository.start_evaluating(
+            first.evaluation_id, evaluator_job_id=first.eval_id, now=NOW, lease=timedelta(minutes=1)
+        )
+        self.repository.fail_attempt(
+            first.evaluation_id,
+            now=NOW,
+            failure_class="transient_infrastructure",
+            public_error_code="worker_lost",
+            retry=True,
+            retry_delay=timedelta(0),
+        )
+        self.connection.execute(
+            "UPDATE control_plane.evaluation_configs SET delta_threshold=.1 WHERE competition_id=%s",
+            (first.competition_id,),
+        )
+        retry = self.repository.claim_next(now=NOW, policy=policy())
+        for key in ("dataset", "limits", "king", "sampling", "versions", "early_stopping"):
+            self.assertEqual(retry.request[key], first.request[key])
+        self.assertEqual(retry.attempt_number, 2)
+        self.repository.complete_verdict(
+            retry.evaluation_id,
+            result=terminal_result(retry.request, accepted=False),
+            now=NOW,
+            publish_non_winning=False,
+        )
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT current_reign_id FROM control_plane.competitions WHERE competition_id=%s",
+                (first.competition_id,),
+            ).fetchone()[0]
+        )
+
+    def test_dashboard_queue_does_not_duplicate_main_submissions_into_splits(self):
+        self._create_specialist("math")
+        self.connection.execute(
+            "UPDATE control_plane.uploads SET competition_key='math' WHERE upload_id=%s",
+            (self.uploads[2],),
+        )
+        rows = self.connection.execute(
+            "SELECT competition,count(*) FROM control_plane.dashboard_queue GROUP BY competition ORDER BY competition"
+        ).fetchall()
+        self.assertEqual(rows, [("math", 1), ("quasar", 2)])
+
     def test_early_stopping_policy_is_loaded_and_bound_to_claim(self):
         loaded = self.repository.load_early_stopping_policy()
         self.assertEqual(
@@ -394,7 +632,7 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         )
         claim = self.repository.claim_next(
             now=NOW,
-            policy=policy(early_stopping=loaded),
+            policy=policy(n=128, early_stopping=loaded),
         )
         self.assertIsNotNone(claim)
         parsed = EvaluationRequestV2.from_mapping(claim.request)

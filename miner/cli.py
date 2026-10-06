@@ -271,11 +271,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     ready = subparsers.add_parser("ready", help="commit the uploaded model as ready")
     add_selection_argument(ready)
+    ready.add_argument("--competition", choices=("main", "math", "code", "text"), default="main")
 
     submit = subparsers.add_parser(
         "submit", help="run check, register, auth, upload, and ready for a saved hotkey"
     )
     add_selection_argument(submit)
+    submit.add_argument("--competition", choices=("main", "math", "code", "text"), default="main")
     submit.add_argument("model_dir", type=Path)
     submit.add_argument("--name", required=True, dest="model_name")
     submit.add_argument("--mailbox-base-url")
@@ -469,7 +471,7 @@ def dispatch(args: argparse.Namespace) -> int:
             + ["--model-dir", str(args.model_dir), "--model-name", args.model_name]
         )
     if args.command == "ready":
-        return commit_ready.main(wallet_args)
+        return commit_ready.main(wallet_args + ["--competition", args.competition])
     if args.command == "submit":
         check_hotkey.main(wallet_args[:-2])
         register_args = argparse.Namespace(
@@ -492,7 +494,7 @@ def dispatch(args: argparse.Namespace) -> int:
             wallet_arguments(miner, wallet_path)
             + ["--model-dir", str(args.model_dir), "--model-name", args.model_name]
         )
-        return commit_ready.main(wallet_arguments(miner, wallet_path))
+        return commit_ready.main(wallet_arguments(miner, wallet_path) + ["--competition", args.competition])
     raise RuntimeError(f"unsupported command: {args.command}")
 
 

@@ -88,3 +88,116 @@ proportion = 0.17
 name = "sft-reasoning"
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/sft-reasoning/manifest.json"
 proportion = 0.01
+
+# Bootstrap defaults only. Runtime evaluation policy is stored in PostgreSQL.
+
+[splits.math]
+n = 30000
+delta_threshold = 0.003
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/math/manifest.json"
+
+[splits.math.categories.math-dialogue]
+dataset = "math-reasoning"
+weight = 0.350
+
+[splits.math.categories.math-thinking-qwen]
+dataset = "math-reasoning"
+weight = 0.193
+
+[splits.math.categories.math-rewrite]
+dataset = "math-reasoning"
+weight = 0.155
+
+[splits.math.categories.math-thinking-oss]
+dataset = "math-reasoning"
+weight = 0.116
+
+[splits.math.categories.format-rewrites]
+dataset = "pretrain-behaviors"
+weight = 0.089
+
+[splits.math.categories.games]
+dataset = "pretrain-behaviors"
+weight = 0.040
+
+[splits.math.categories.socratic-math-dialogue]
+dataset = "math-reasoning"
+weight = 0.038
+
+[splits.math.categories.3efforts-pretrain]
+dataset = "sft-reasoning"
+weight = 0.019
+
+[splits.code]
+n = 30000
+delta_threshold = 0.003
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/code/manifest.json"
+
+[splits.code.categories.reasoning]
+dataset = "pretrain-behaviors"
+weight = 0.314
+
+[splits.code.categories.code-thinking-v0]
+dataset = "code-reasoning"
+weight = 0.105
+
+[splits.code.categories.other]
+dataset = "pretrain-behaviors"
+weight = 0.104
+
+[splits.code.categories.code-thinking-v1]
+dataset = "code-reasoning"
+weight = 0.098
+
+[splits.code.categories.code-no-thinking]
+dataset = "code-reasoning"
+weight = 0.093
+
+[splits.code.categories.data-science]
+dataset = "pretrain-behaviors"
+weight = 0.090
+
+[splits.code.categories.code-no-thinking-hard]
+dataset = "code-reasoning"
+weight = 0.072
+
+[splits.code.categories.code-thinking-hard]
+dataset = "code-reasoning"
+weight = 0.060
+
+[splits.code.categories.code-task-synthesis]
+dataset = "code-reasoning"
+weight = 0.059
+
+[splits.code.categories.codeio]
+dataset = "code-reasoning"
+weight = 0.005
+
+[splits.text]
+n = 30000
+delta_threshold = 0.003
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/text/manifest.json"
+
+[splits.text.categories.txt360-qa]
+dataset = "txt360-v2"
+weight = 0.265
+
+[splits.text.categories.web-high-nltk-qa]
+dataset = "txt360-v2"
+weight = 0.198
+
+[splits.text.categories.planning]
+dataset = "pretrain-behaviors"
+weight = 0.196
+
+[splits.text.categories.web-high-medium]
+dataset = "txt360-v2"
+weight = 0.188
+
+[splits.text.categories.general]
+dataset = "pretrain-behaviors"
+weight = 0.143
+
+[splits.text.categories.instruction-following]
+dataset = "sft-reasoning"
+weight = 0.010

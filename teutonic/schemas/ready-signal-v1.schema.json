@@ -13,11 +13,37 @@
     "event_index"
   ],
   "properties": {
-    "protocol_version": { "const": 1 },
-    "registration_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "block_number": { "type": "integer", "minimum": 0 },
-    "extrinsic_index": { "type": "integer", "minimum": 0 },
-    "event_index": { "type": "integer", "minimum": 0 }
+    "protocol_version": {
+      "const": 1
+    },
+    "registration_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "block_number": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "extrinsic_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "event_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "competition": {
+      "enum": [
+        "main",
+        "math",
+        "code",
+        "text"
+      ],
+      "default": "main"
+    }
   }
 }

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import random
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
@@ -50,17 +49,13 @@ def validate_dataset_manifest(manifest: object) -> Mapping[str, Any]:
                 "",
             )
             digest = shard.get("sha256")
-            if (
-                not isinstance(digest, str) or not _DIGEST.fullmatch(digest.lower())
-            ):
+            if not isinstance(digest, str) or not _DIGEST.fullmatch(digest.lower()):
                 raise EvaluationConfigurationError(
                     f"dataset manifest shard {index} has an invalid SHA-256"
                 )
             for field in ("n_tokens", "size_bytes"):
                 number = shard.get(field)
-                if (
-                    isinstance(number, bool) or not isinstance(number, int) or number <= 0
-                ):
+                if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
                     raise EvaluationConfigurationError(
                         f"dataset manifest shard {index} has invalid {field}"
                     )
@@ -70,6 +65,29 @@ def validate_dataset_manifest(manifest: object) -> Mapping[str, Any]:
             raise EvaluationConfigurationError(
                 f"dataset manifest shard {index} does not reference an .npy file"
             )
+    weights = value.get("category_weights")
+    if value.get("format") == "teutonic-split-v1" and weights is None:
+        raise EvaluationConfigurationError("split manifest requires category weights")
+    if weights is not None:
+        if (
+            not isinstance(weights, dict)
+            or not weights
+            or any(not isinstance(k, str) or not _NAME.fullmatch(k) for k in weights)
+            or any(
+                isinstance(v, bool)
+                or not isinstance(v, (int, float))
+                or not math.isfinite(v)
+                or v <= 0
+                for v in weights.values()
+            )
+            or not math.isclose(sum(weights.values()), 1.0, abs_tol=1e-9, rel_tol=0)
+        ):
+            raise EvaluationConfigurationError("category weights must be positive and sum to one")
+        if {s.get("category") for s in shards} != set(weights):
+            raise EvaluationConfigurationError("shards must cover exactly the declared categories")
+        references = [s.get("url") or s.get("key") for s in shards]
+        if len(set(references)) != len(references):
+            raise EvaluationConfigurationError("split manifest contains duplicate shards")
     return value
 
 
@@ -122,7 +140,7 @@ class EvaluationSettings:
             raise ValueError("dataset label is required")
         if self.n < 1:
             raise ValueError("evaluation sample count must be positive")
-        if not math.isfinite(self.delta_threshold):
+        if not math.isfinite(self.delta_threshold) or self.delta_threshold < 0:
             raise ValueError("evaluation delta threshold must be finite")
         if not self.manifests:
             raise ValueError("evaluation configuration needs dataset manifests")
@@ -175,9 +193,7 @@ def pretokenized_dataset_request(
         raise ValueError("evaluation sequence length must be at least 2")
     if category_rules is None:
         category_rules = load_rules(DEFAULT_RULES_PATH)
-    targets = _source_targets(
-        settings.n, [item.proportion for item in settings.manifests]
-    )
+    targets = _source_targets(settings.n, [item.proportion for item in settings.manifests])
     seed = _dataset_seed(block_hash=block_hash, hotkey=hotkey)
     sources: list[dict[str, Any]] = []
     for target, snapshot in zip(targets, settings.manifests, strict=True):
@@ -203,6 +219,10 @@ def pretokenized_dataset_request(
             rule=(category_rules or {}).get(snapshot.name),
             reference_of=lambda shard: str(shard.get("source_file") or reference_of(shard)),
             capacity_of=lambda shard: int(shard["n_tokens"]) // seq_len,
+            category_weights=snapshot.manifest.get("category_weights"),
+            category_of_shard=(lambda shard: shard["category"])
+            if "category_weights" in snapshot.manifest
+            else None,
         )
         planned_sequences = sum(count for _shard, count in planned)
         if planned_sequences < target:
@@ -280,7 +300,7 @@ def evaluation_config_version(
                 "manifest_sha256": item.manifest_sha256,
                 "manifest_url": item.manifest_url,
                 "name": item.name,
-                "proportion": item.proportion,
+                "proportion": float(item.proportion),
             }
             for item in manifests
         ],

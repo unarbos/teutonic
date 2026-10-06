@@ -16,18 +16,21 @@ _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _LEGACY_READY_SIGNAL = re.compile(
     r"^r2ready:v1\|(?P<registration_id>[0-9a-f]{64})\|(?P<manifest_sha256>[0-9a-f]{64})$"
 )
-_COMPACT_READY_SIGNAL = re.compile(r"^r2ready:v1:(?P<identity>[A-Za-z0-9_-]{86})$")
+_COMPACT_READY_SIGNAL = re.compile(r"^r2ready:v1:(?P<identity>[A-Za-z0-9_-]{86})(?::(?P<competition>main|math|code|text))?$")
 
 
-def ready_signal_payload(registration_id: str, manifest_sha256: str) -> str:
+def ready_signal_payload(registration_id: str, manifest_sha256: str, competition: str = "main") -> str:
     """Encode two SHA-256 identities into Bittensor-sized commitment text."""
     if not _HEX_DIGEST.fullmatch(registration_id):
         raise ValueError("ready signal registration ID must be a lowercase SHA-256 digest")
     if not _HEX_DIGEST.fullmatch(manifest_sha256):
         raise ValueError("ready signal manifest SHA-256 must be a lowercase digest")
+    if competition not in {"main", "math", "code", "text"}:
+        raise ValueError("unknown competition")
     identity = bytes.fromhex(registration_id) + bytes.fromhex(manifest_sha256)
     encoded = base64.urlsafe_b64encode(identity).rstrip(b"=").decode("ascii")
-    return f"r2ready:v1:{encoded}"
+    suffix = "" if competition == "main" else f":{competition}"
+    return f"r2ready:v1:{encoded}{suffix}"
 
 
 def _utc_text(value: datetime) -> str:
@@ -105,6 +108,7 @@ class ReadySignal:
     extrinsic_index: int
     event_index: int
     raw_payload: str
+    competition: str = "main"
 
     @classmethod
     def parse(
@@ -146,6 +150,7 @@ class ReadySignal:
             extrinsic_index=extrinsic_index,
             event_index=event_index,
             raw_payload=payload,
+            competition=(compact.group("competition") or "main") if compact else "main",
         )
 
 

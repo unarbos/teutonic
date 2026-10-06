@@ -23,7 +23,7 @@
       <img src="favicon.png" alt="Teuton" class="logo">
       <h1>Teutonic</h1>
       <div class="hero-links" aria-label="Teutonic model and project links">
-        <span><i id="king-health" class="status-dot" aria-hidden="true"></i> KING: <a id="king-link" href="#">--</a> <span class="model-revision">@ <a id="king-revision" href="#">--</a></span></span>
+        <span><i id="king-health" class="status-dot" aria-hidden="true"></i> MAIN KING: <a id="king-link" href="#">--</a> <span class="model-revision">@ <a id="king-revision" href="#">--</a></span></span>
         <span>GENESIS: <a id="genesis-link" href="#">--</a> <span class="model-revision">@ <a id="genesis-revision" href="#">--</a></span></span>
         <span>VALIDATOR: <a href="https://github.com/unarbos/teutonic">GitHub</a></span>
         <span>PAPER: <a href="https://teutonic.ai/paper.html">Teutonic-I 10B Technical Report</a></span>
@@ -31,7 +31,7 @@
       </div>
       <div class="dataset-panel" id="dataset-panel">
         <div class="dataset-panel-head">
-          <h2>DATASET MIX</h2>
+          <h2>MAIN DATASET MIX</h2>
           <a id="dataset-manifest-link" href="https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev/datasets/manifest.json" target="_blank" rel="noopener">MANIFEST</a>
         </div>
         <p class="dataset-overview" id="dataset-summary" aria-live="polite">LOADING DATASET MANIFEST...</p>
@@ -48,7 +48,7 @@
 
     <section aria-labelledby="performance-heading">
       <div class="section-heading chart-heading">
-        <h2 id="performance-heading">LOSS HISTORY</h2>
+        <h2 id="performance-heading">MAIN LOSS HISTORY</h2>
         <div class="chart-tools">
           <span class="chart-legend"><i class="legend king-line"></i>KINGS <i class="legend challenger-line"></i>CHALLENGERS</span>
           <label for="smooth-slider">SMOOTH <input type="range" id="smooth-slider" min="0" max="1" step="0.05" value="0.35"><output id="smooth-value" for="smooth-slider">0.35</output></label>
@@ -65,7 +65,7 @@
 
     <section class="bench-panel" aria-labelledby="benchmark-heading">
       <div class="bench-head">
-        <h2 id="benchmark-heading">KING BENCHMARKS</h2>
+        <h2 id="benchmark-heading">MAIN KING BENCHMARKS</h2>
         <span class="bench-actions">
           <span id="benchmark-meta" class="bench-meta">LOADING RESULTS</span>
           <button id="benchmark-history-toggle" type="button" aria-pressed="false">SHOW HISTORY</button>
@@ -89,8 +89,14 @@
       </div>
     </section>
 
+    <section class="specialists" aria-labelledby="specialists-heading">
+      <div class="section-heading"><h2 id="specialists-heading">SPECIALIST COMPETITIONS</h2><span>MATH · CODE · TEXT</span></div>
+      <p class="specialists-intro">Three focused competitions. One shared evaluation queue.</p>
+      <div id="specialist-grid" class="specialist-grid"></div>
+    </section>
+
     <section aria-labelledby="reigns-heading">
-      <div class="section-heading"><h2 id="reigns-heading">REIGNS</h2><span id="reign-count">0 / 5 KINGS</span></div>
+      <div class="section-heading"><h2 id="reigns-heading">MAIN REIGNS</h2><span id="reign-count">0 / 5 KINGS</span></div>
       <div class="table-wrap reigns-wrap"><table>
         <thead><tr><th>#</th><th>REIGN</th><th>UID</th><th>HOTKEY</th><th>COLDKEY</th><th>REPO</th><th>WEIGHT</th><th>α / HR</th><th>$ / HR</th><th>CROWNED</th></tr></thead>
         <tbody id="reigns-body"><tr><td colspan="10" class="empty-cell">NO REIGNS YET</td></tr></tbody>
@@ -98,7 +104,8 @@
     </section>
 
     <section aria-labelledby="evaluation-heading">
-      <div class="section-heading"><h2 id="evaluation-heading">EVALUATION FLOOR</h2><span id="validator-phase">VALIDATOR --</span></div>
+      <div class="section-heading"><h2 id="evaluation-heading">CURRENT EVALUATION</h2><span id="validator-phase">VALIDATOR --</span></div>
+      <p id="eval-data-status" class="queue-status muted" role="status"></p>
       <div id="eval-card" class="eval-card" data-active="false">
         <div class="eval-copy">
           <div><strong id="eval-title">NO ACTIVE CHALLENGE</strong><p id="eval-meta" class="muted">THE VALIDATOR IS READY FOR THE NEXT MODEL</p></div>
@@ -115,16 +122,17 @@
     </section>
 
     <section aria-labelledby="queue-heading">
-      <div class="section-heading"><h2 id="queue-heading">QUEUE</h2><span id="queue-count">0 MODELS</span></div>
-      <div class="table-wrap"><table class="queue-table">
-        <thead><tr><th>POSITION</th><th>UID</th><th>MODEL DIGEST</th><th>HOTKEY</th><th>COLDKEY</th><th>BLOCK</th><th>STATE</th><th>SUBMITTED</th></tr></thead>
-        <tbody id="queue-body"><tr><td colspan="8" class="empty-cell">QUEUE EMPTY</td></tr></tbody>
+      <div class="section-heading"><h2 id="queue-heading">GLOBAL QUEUE</h2><span id="queue-count">0 MODELS</span></div>
+      <p id="queue-status" class="queue-status muted" role="status">Loading all competitions…</p>
+      <div class="table-wrap"><table class="queue-table" aria-label="Global evaluation queue">
+        <thead><tr><th>POSITION</th><th>COMPETITION</th><th>UID</th><th>MODEL DIGEST</th><th>HOTKEY</th><th>COLDKEY</th><th>BLOCK</th><th>STATE</th><th>SUBMITTED</th></tr></thead>
+        <tbody id="queue-body"><tr><td colspan="9" class="empty-cell">LOADING QUEUE</td></tr></tbody>
       </table></div>
     </section>
 
     <section aria-labelledby="history-heading">
       <div class="section-heading">
-        <h2 id="history-heading">EVALUATION HISTORY</h2>
+        <h2 id="history-heading">MAIN EVALUATION HISTORY</h2>
         <span class="section-heading-actions"><span id="history-count">0 RESULTS</span><button id="history-errors-toggle" type="button" aria-pressed="false">SHOW ERRORS</button></span>
       </div>
       <div class="table-wrap history-wrap"><table class="history-table">
@@ -146,6 +154,35 @@
 
     <footer><span>TEUTONIC / DASHBOARD V1</span><span id="last-refresh">LAST REFRESH --</span></footer>
   </main>
+  <template id="specialist-template">
+    <article class="specialist-card">
+      <header class="specialist-heading"><h3 data-field="name"></h3><span data-field="status">LOADING</span></header>
+      <p data-field="error" class="specialist-error" role="status" hidden></p>
+      <div class="specialist-king">
+        <span class="specialist-label">CURRENT KING</span>
+        <a data-field="king">Loading king…</a>
+        <p data-field="identity" class="muted">—</p>
+      </div>
+      <dl class="specialist-metrics">
+        <div><dt>WEIGHT</dt><dd data-field="weight">--</dd></div>
+        <div><dt>α / HR</dt><dd data-field="alpha">--</dd></div>
+        <div><dt>$ / HR</dt><dd data-field="usd">--</dd></div>
+      </dl>
+      <div class="specialist-section">
+        <div class="specialist-subheading"><h4>DATASET MIX</h4><a data-field="manifest" target="_blank" rel="noopener">MANIFEST</a></div>
+        <p data-field="policy" class="muted">Loading configuration…</p>
+        <ul data-field="mix" class="specialist-mix"></ul>
+      </div>
+      <div class="specialist-section">
+        <div class="specialist-subheading"><h4>RESULTS</h4><span data-field="history-count">—</span></div>
+        <div class="table-wrap specialist-table-wrap"><table aria-label="Specialist evaluation results">
+          <thead><tr><th>UID</th><th>VERDICT</th><th>LCB</th><th>KING LOSS</th><th>CHALL LOSS</th><th>WHEN</th></tr></thead>
+          <tbody data-field="history"><tr><td colspan="6" class="empty-cell">LOADING RESULTS</td></tr></tbody>
+        </table></div>
+      </div>
+      <p data-field="updated" class="specialist-updated muted"></p>
+    </article>
+  </template>
   <script src="dashboard-v1.js"></script>
   <script src="app.js"></script>
 </body>

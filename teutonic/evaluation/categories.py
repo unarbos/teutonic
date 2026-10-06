@@ -12,13 +12,11 @@ its categories. That is a between-run variance source that more shards alone
 does not remove: spreading across 4 shards of the same category still measures
 one category.
 
-Apportionment is by SHARD COUNT within the live manifest, not by the shares
-declared in the rules file. The pipeline packs shards to a fixed token size, so
-the two agree closely, but shard count stays correct if that packing changes and
-needs nothing from the rules file beyond the regex. The declared shares are
-informational -- four of the five are raw-parquet-byte proxies taken before
-tokenization.
+MAIN apportions categories by shard count within the pinned manifest. Specialist
+manifests carry explicit category weights and category labels on each shard;
+those weights, rather than the shard counts, determine category sample quotas.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -119,7 +117,9 @@ def load_rules(path: str | Path | None) -> dict[str, dict[str, Any]]:
         try:
             compiled = re.compile(pattern)
             if compiled.groups != 1:
-                raise ValueError(f"{resolved}: dataset {name} regex needs exactly one capture group")
+                raise ValueError(
+                    f"{resolved}: dataset {name} regex needs exactly one capture group"
+                )
             rules[name] = {"re": compiled, "raw": pattern}
         except re.error as exc:
             raise ValueError(
@@ -151,10 +151,12 @@ def plan_source_shards(
     reference_of: Callable[[Any], str],
     capacity_of: Callable[[Any], int],
     min_sequences: int = 1,
+    category_weights: Mapping[str, float] | None = None,
+    category_of_shard: Callable[[Any], str] | None = None,
 ) -> list[tuple[Any, int]]:
     """Plan [(shard, sequences to draw)] for one source, stratified by category.
 
-    The source target is split across categories by shard count, every present
+    The source target is split by explicit weights (or shard count), every present
     category is guaranteed at least `min_sequences`, and each category's share is
     then spread across several of its own shards so no single shard carries a
     category. `shard_budget` is a floor, not a cap: a source with more categories
@@ -166,7 +168,12 @@ def plan_source_shards(
 
     groups: dict[str, list[Any]] = {}
     for shard in shards:
-        groups.setdefault(category_of(rule, reference_of(shard)), []).append(shard)
+        category = (
+            category_of_shard(shard)
+            if category_of_shard
+            else category_of(rule, reference_of(shard))
+        )
+        groups.setdefault(category, []).append(shard)
     names = sorted(groups)
     if target < len(names) * min_sequences:
         raise ValueError(
@@ -174,7 +181,12 @@ def plan_source_shards(
             f"sequences to cover all {len(names)} categories; got {target}"
         )
 
-    weights = [float(len(groups[name])) for name in names]
+    if category_weights is not None and set(category_weights) != set(names):
+        raise ValueError("manifest categories do not match declared weights")
+    weights = [
+        float(category_weights[name] if category_weights is not None else len(groups[name]))
+        for name in names
+    ]
     sequence_targets = apportion(target, len(names), weights if len(names) > 1 else None)
     if len(names) > 1:
         sequence_targets = raise_to_min(sequence_targets, min_sequences)
@@ -198,9 +210,7 @@ def plan_source_shards(
         if remaining <= 0:
             continue
         ordered = list(groups[name])
-        random.Random(
-            category_seed(seed, f"{source_name}|{name}")
-        ).shuffle(ordered)
+        random.Random(category_seed(seed, f"{source_name}|{name}")).shuffle(ordered)
         quotas = apportion(remaining, max(1, min(shard_counts[index], len(ordered))), None)
         assigned: list[tuple[Any, int]] = []
         overflow = 0

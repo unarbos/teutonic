@@ -889,8 +889,8 @@ class AccessControllerRepository:
                 INSERT INTO control_plane.uploads (
                     registration_id, chain_generation, signalling_hotkey, ready_payload,
                     ready_finalized_block, ready_extrinsic_index, ready_event_index,
-                    manifest_sha256, state, ready_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ready_signaled', %s)
+                    manifest_sha256, state, ready_at, competition_key
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ready_signaled', %s, %s)
                 RETURNING upload_id
                 """,
                 (
@@ -903,6 +903,7 @@ class AccessControllerRepository:
                     signal.event_index,
                     signal.manifest_sha256,
                     now,
+                    signal.competition,
                 ),
             )
             upload_id = cursor.fetchone()["upload_id"]

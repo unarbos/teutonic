@@ -404,3 +404,120 @@ pm2 logs teutonic-mock-evaluator --lines 100
 ```
 
 Do not add the mock evaluator to either production ecosystem file.
+
+## MAIN, MATH, CODE, and TEXT competitions
+
+PostgreSQL is the runtime source of truth for evaluation manifests, their category
+weights, sample counts, and thresholds. `chain.toml` supplies initialization defaults
+only. Editing it or restarting a service does not overwrite active database policy.
+`TEUTONIC_COMPETITION` continues to name the existing MAIN database competition;
+it must not be changed to a specialist name on the validator or weight publisher.
+One validator and one weight publisher serve all four competitions.
+
+Before this rollout, drain evaluations and promotions, then stop the validator,
+promotion worker, weight publisher, and dashboard publisher. Back up PostgreSQL and
+apply `scripts/db/add_split_competitions.sql` with `psql -v ON_ERROR_STOP=1`. The
+migration preserves current kings and payouts. Deploy all control-plane services
+together: the scheduler lock becomes global to the subnet/generation, and old and
+new schedulers must not run simultaneously.
+
+Build the specialist inventories from the existing public source manifests:
+
+```bash
+python scripts/publish_split_manifests.py --output-dir artifacts/split-manifests
+```
+
+With dataset-bucket credentials exported as `TEUTONIC_R2_ENDPOINT`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (optional `R2_SESSION_TOKEN`), publish:
+
+```bash
+python scripts/publish_split_manifests.py \
+  --output-dir artifacts/split-manifests --bucket datasets --publish
+```
+
+The three public discovery keys are `splits/math/manifest.json`,
+`splits/code/manifest.json`, and `splits/text/manifest.json`. Content-addressed copies
+are also stored under `splits/<name>/versions/<sha256>.json`. The files reference
+existing shards; no token files are copied. Category percentages are explicit:
+CODE reasoning is 31.4%, TEXT txt360-qa is 26.5%, and every group totals 100%.
+
+Initialize the missing specialist configurations without replacing MAIN's active
+settings. Run administrative commands with the configured database owner credentials
+and the existing `TEUTONIC_NETUID`, `TEUTONIC_CHAIN_GENERATION`, and
+`TEUTONIC_COMPETITION` environment values:
+
+```bash
+python scripts/configure_evaluation.py --all --initialize --dry-run
+python scripts/configure_evaluation.py --all --initialize
+```
+
+Each specialist plans 30,000 sequences: 21,000 from its own manifest and 4,500
+from each other manifest. Category percentages apply inside all three allocations.
+Integer quotas use deterministic largest-remainder rounding. The combined sample
+mix produces one paired-bootstrap verdict. Each competition has its own threshold,
+initially 0.003; specialist early stopping is enabled by default. MAIN's existing
+sampling and early-stopping configuration is retained.
+
+Administrative updates are explicit, versioned, and atomic (`--all` changes all
+four in one transaction). Unspecified settings retain their active database values:
+
+```bash
+# Update only MATH's threshold; performs no manifest downloads.
+python scripts/configure_evaluation.py --competition math --delta-threshold 0.004 --dry-run
+python scripts/configure_evaluation.py --competition math --delta-threshold 0.004
+
+# Update MAIN's threshold independently.
+python scripts/configure_evaluation.py --competition main --delta-threshold 0.003
+
+# Refresh R2 inventories deliberately, retaining each competition's threshold.
+python scripts/configure_evaluation.py --all --refresh-manifests --dry-run
+python scripts/configure_evaluation.py --all --refresh-manifests
+
+# Change one inventory URL in one specialist competition's pinned mix.
+python scripts/configure_evaluation.py --competition code \
+  --manifest math=https://example.org/splits/math/manifest.json --dry-run
+```
+
+`--n` and `--shards-per-dataset` are also supported. Manifest updates validate
+hashes, category coverage, proportions, and sample capacity before activation.
+Newly claimed evaluations read the active policy; existing attempts and retries
+retain their recorded samples, threshold, versions, and evaluated king.
+
+Miners select a competition with `teutonic-miner ready --competition math` or
+`teutonic-miner submit ... --competition math`. Omission selects MAIN, including
+all existing commitments. The compact commitment suffix is `:math`, `:code`, or
+`:text`; the server preserves legacy MAIN commitments. Selection is immutable.
+The one-ready-submission-per-hotkey constraint remains global, as does the existing
+three-completed-evaluations limit for identical safetensors weights.
+
+The global queue follows finalized ready-commit order. A specialist without a king
+faces the current MAIN king on the specialist mix. A win creates only that split's
+king; a loss leaves it unfilled. Pending promotion/crowning blocks the next duel.
+
+Rewards transition only as first specialist winners appear:
+
+| Established specialist kings | MAIN shares, newest to oldest | Each established specialist |
+|---|---|---|
+| 0 | 20%, 20%, 20%, 20%, 20% | — |
+| 1 | 25%, 20%, 20%, 20% | 15% |
+| 2 | 30%, 20%, 20% | 15% |
+| 3 | 40%, 15% | 15% |
+
+A new MAIN winner shifts MAIN history and removes the oldest paid MAIN recipient.
+A split's first winner replaces the oldest paid MAIN recipient; a later split winner
+replaces that split's recipient. Failed evaluations do not move the transition.
+The migration itself changes no shares. Rewards are combined into one publication
+anchored to the latest crown in any competition, with the existing 101-block cadence.
+Hotkey-to-UID remapping retains relative shares; unavailable recipients are omitted
+and remaining shares normalized, with the existing burn fallback if none remain.
+
+The dashboard publisher retains MAIN's `dashboard.json` and `datasets/manifest.json`
+and adds `competitions/<math|code|text>/dashboard.json` plus each competition's
+`datasets/manifest.json`. `competitions.json` lists configured competitions. Deploy
+the updated website assets to show all four competitions together. MAIN retains
+the primary dashboard and benchmarks; specialist panels show their own kings,
+configurations and results. One global queue combines all competition entries,
+labels each competition, and preserves the published global queue positions.
+One current-evaluation panel shows the active duel and its competition.
+Restart the updated services after configuration, and check all four public dataset
+summaries and the combined weight plan before enabling new submissions.

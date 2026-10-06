@@ -20,9 +20,9 @@ class FakeRepository:
     def __init__(self):
         self.crown = None
 
-    def promotion_weight_hotkeys(self, promotion_id, *, limit):
-        self.lookup = (promotion_id, limit)
-        return ("new", "old", "gone")
+    def promotion_weight_policy(self, promotion_id):
+        self.lookup = promotion_id
+        return ("new", "old", "gone"), (0.4, 0.4, 0.2)
 
     def crown_promoted_winner(self, promotion_id, **values):
         self.crown = (promotion_id, values)
@@ -34,6 +34,7 @@ class FakeRepository:
             "payload_revision": 1,
             "mapping_finalized_block": 4000,
             "policy_hotkeys": ("new", "old", "gone"),
+            "policy_weights": (0.4, 0.4, 0.2),
         }
 
     def refresh_current_weight_plan(self, **values):
@@ -92,7 +93,7 @@ class ValidatorRuntimeTests(unittest.TestCase):
         repository = FakeRepository()
         result = CrownCoordinator(repository, FakeChain(), king_chain_size=5)("promotion-1")
         self.assertEqual(result, "reign-2")
-        self.assertEqual(repository.lookup, ("promotion-1", 5))
+        self.assertEqual(repository.lookup, "promotion-1")
         promotion_id, values = repository.crown
         self.assertEqual(promotion_id, "promotion-1")
         self.assertEqual(values["crowned_finalized_block"], 4321)

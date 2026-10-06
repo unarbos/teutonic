@@ -232,6 +232,10 @@ ALTER TABLE control_plane.chain_cursors OWNER TO teutonic_schema_owner;
 --
 
 CREATE TABLE control_plane.competitions (
+    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key IN ('main', 'math', 'code', 'text')),
+    main_competition_id uuid,
+    reward_reign_id uuid,
+    reward_main_hotkeys text[],
     competition_id uuid DEFAULT gen_random_uuid() NOT NULL,
     netuid integer NOT NULL,
     chain_generation text NOT NULL,
@@ -426,7 +430,9 @@ CREATE VIEW control_plane.dashboard_dataset_manifests WITH (security_barrier='tr
     manifest.manifest_url,
     manifest.manifest_sha256,
     manifest.sample_proportion,
-    manifest.manifest_json
+    CASE WHEN manifest.manifest_json ? 'total_tokens' AND manifest.manifest_json ? 'total_shards'
+         THEN manifest.manifest_json - 'shards'
+         ELSE manifest.manifest_json END AS manifest_json
    FROM ((control_plane.competitions competition
      JOIN control_plane.evaluation_configs config ON (((config.competition_id = competition.competition_id) AND config.active)))
      JOIN control_plane.dataset_manifests manifest ON ((manifest.evaluation_config_id = config.evaluation_config_id)));
@@ -452,7 +458,9 @@ CREATE VIEW control_plane.dashboard_dataset_versions WITH (security_barrier='tru
     manifest.manifest_url,
     manifest.manifest_sha256,
     manifest.sample_proportion,
-    manifest.manifest_json
+    CASE WHEN manifest.manifest_json ? 'total_tokens' AND manifest.manifest_json ? 'total_shards'
+         THEN manifest.manifest_json - 'shards'
+         ELSE manifest.manifest_json END AS manifest_json
    FROM ((control_plane.competitions competition
      JOIN control_plane.evaluation_configs config ON (config.competition_id = competition.competition_id))
      JOIN control_plane.dataset_manifests manifest ON (manifest.evaluation_config_id = config.evaluation_config_id));
@@ -602,6 +610,7 @@ ALTER TABLE control_plane.registrations OWNER TO teutonic_schema_owner;
 --
 
 CREATE TABLE control_plane.uploads (
+    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key IN ('main', 'math', 'code', 'text')),
     upload_id uuid DEFAULT gen_random_uuid() NOT NULL,
     registration_id character(64) NOT NULL,
     chain_generation text NOT NULL,
@@ -724,6 +733,7 @@ ALTER TABLE control_plane.king_reigns OWNER TO teutonic_schema_owner;
 --
 
 CREATE TABLE control_plane.weight_publications (
+    policy_weights double precision[],
     weight_publication_id uuid DEFAULT gen_random_uuid() NOT NULL,
     competition_id uuid NOT NULL,
     source_reign_id uuid NOT NULL,
@@ -808,7 +818,7 @@ CREATE VIEW control_plane.dashboard_current_king WITH (security_barrier='true') 
      JOIN control_plane.king_reigns r ON ((r.reign_id = c.current_reign_id)))
      LEFT JOIN control_plane.uploads public_upload ON ((public_upload.upload_id = r.accepted_upload_id)))
      LEFT JOIN control_plane.evaluations cause ON ((cause.evaluation_id = r.causing_evaluation_id)))
-     LEFT JOIN control_plane.weight_publications current_weights ON ((current_weights.source_reign_id = r.reign_id)))
+     LEFT JOIN control_plane.weight_publications current_weights ON ((current_weights.source_reign_id = (SELECT COALESCE(main.reward_reign_id, main.current_reign_id) FROM control_plane.competitions main WHERE main.competition_id = COALESCE(c.main_competition_id, c.competition_id)))))
      LEFT JOIN LATERAL ( SELECT assignment.coldkey
            FROM (control_plane.metagraph_snapshots snapshot
              JOIN control_plane.metagraph_uid_assignments assignment ON ((assignment.snapshot_id = snapshot.snapshot_id)))
@@ -986,7 +996,7 @@ CREATE VIEW control_plane.dashboard_upload_failures WITH (security_barrier='true
     u.updated_at AS failed_at
    FROM (((control_plane.uploads u
      JOIN control_plane.registrations r ON ((r.registration_id = u.registration_id)))
-     JOIN control_plane.competitions c ON (((c.netuid = r.netuid) AND (c.chain_generation = r.chain_generation))))
+     JOIN control_plane.competitions c ON (((c.netuid = r.netuid) AND (c.chain_generation = r.chain_generation) AND (c.competition_key = u.competition_key))))
      JOIN control_plane.king_reigns baseline ON ((baseline.reign_id = c.current_reign_id)))
      LEFT JOIN LATERAL ( SELECT assignment.coldkey
            FROM (control_plane.metagraph_snapshots snapshot
@@ -1032,7 +1042,7 @@ CREATE VIEW control_plane.dashboard_king_reigns WITH (security_barrier='true') A
    FROM ((((control_plane.king_reigns r
      JOIN control_plane.competitions c ON ((c.competition_id = r.competition_id)))
      LEFT JOIN control_plane.uploads public_upload ON ((public_upload.upload_id = r.accepted_upload_id)))
-     LEFT JOIN control_plane.weight_publications current_weights ON ((current_weights.source_reign_id = c.current_reign_id)))
+     LEFT JOIN control_plane.weight_publications current_weights ON ((current_weights.source_reign_id = (SELECT COALESCE(main.reward_reign_id, main.current_reign_id) FROM control_plane.competitions main WHERE main.competition_id = COALESCE(c.main_competition_id, c.competition_id)))))
      LEFT JOIN LATERAL ( SELECT assignment.coldkey
            FROM (control_plane.metagraph_snapshots snapshot
              JOIN control_plane.metagraph_uid_assignments assignment ON ((assignment.snapshot_id = snapshot.snapshot_id)))
@@ -1056,7 +1066,7 @@ CREATE VIEW control_plane.dashboard_queue WITH (security_barrier='true') AS
     identity.coldkey,
     r.uid,
     u.ready_finalized_block,
-    row_number() OVER (PARTITION BY c.competition_id ORDER BY u.ready_finalized_block, u.ready_extrinsic_index, u.ready_event_index, u.upload_id) AS queue_position,
+    row_number() OVER (PARTITION BY c.netuid, c.chain_generation ORDER BY u.ready_finalized_block, u.ready_extrinsic_index, u.ready_event_index, u.upload_id) AS queue_position,
         CASE
             WHEN (u.state = 'ready_for_evaluation'::text) THEN 'queued'::text
             WHEN (u.state = 'retry_pending'::text) THEN 'retrying'::text
@@ -1065,7 +1075,7 @@ CREATE VIEW control_plane.dashboard_queue WITH (security_barrier='true') AS
     u.ready_at AS submitted_at
    FROM (((control_plane.uploads u
      JOIN control_plane.registrations r ON ((r.registration_id = u.registration_id)))
-     JOIN control_plane.competitions c ON (((c.netuid = r.netuid) AND (c.chain_generation = r.chain_generation))))
+     JOIN control_plane.competitions c ON (((c.netuid = r.netuid) AND (c.chain_generation = r.chain_generation) AND (c.competition_key = u.competition_key))))
      LEFT JOIN LATERAL ( SELECT assignment.coldkey
            FROM (control_plane.metagraph_snapshots snapshot
              JOIN control_plane.metagraph_uid_assignments assignment ON ((assignment.snapshot_id = snapshot.snapshot_id)))
@@ -1152,7 +1162,7 @@ CREATE VIEW control_plane.dashboard_stats WITH (security_barrier='true') AS
     ( SELECT count(*) AS count
            FROM (control_plane.uploads u
              JOIN control_plane.registrations r ON ((r.registration_id = u.registration_id)))
-          WHERE ((r.netuid = c.netuid) AND (r.chain_generation = c.chain_generation) AND (u.state = ANY (ARRAY['ready_for_evaluation'::text, 'retry_pending'::text])))) AS queue_depth,
+          WHERE ((r.netuid = c.netuid) AND (r.chain_generation = c.chain_generation) AND (u.competition_key = c.competition_key) AND (u.state = ANY (ARRAY['ready_for_evaluation'::text, 'retry_pending'::text])))) AS queue_depth,
     ( SELECT count(*) AS count
            FROM control_plane.evaluations e
           WHERE ((e.competition_id = c.competition_id) AND (e.state = ANY (ARRAY['completed'::text, 'terminal_failure'::text])))) AS completed_evaluations,
@@ -1251,7 +1261,7 @@ CREATE VIEW control_plane.dashboard_weight_status WITH (security_barrier='true')
     attempt.submitted_at,
     attempt.finalized_at
    FROM ((control_plane.competitions c
-     JOIN control_plane.weight_publications weights ON ((weights.source_reign_id = c.current_reign_id)))
+     JOIN control_plane.weight_publications weights ON ((weights.source_reign_id = (SELECT COALESCE(main.reward_reign_id, main.current_reign_id) FROM control_plane.competitions main WHERE main.competition_id = COALESCE(c.main_competition_id, c.competition_id)))))
      LEFT JOIN LATERAL ( SELECT a.state,
             a.scheduled_block,
             a.finalized_block,
@@ -2507,5 +2517,18 @@ ALTER DEFAULT PRIVILEGES FOR ROLE teutonic_schema_owner IN SCHEMA control_plane
 
 INSERT INTO control_plane.public_state_revision (singleton)
 VALUES (true);
+
+ALTER TABLE control_plane.competitions ADD CONSTRAINT competitions_main_fkey
+    FOREIGN KEY (main_competition_id) REFERENCES control_plane.competitions(competition_id);
+
+CREATE OR REPLACE VIEW control_plane.dashboard_competitions WITH (security_barrier=true) AS
+SELECT c.netuid, c.chain_generation, c.name AS competition, c.competition_key,
+       main.name AS main_competition, c.current_reign_id IS NOT NULL AS has_king,
+       ec.config_version, ec.eval_n, ec.delta_threshold
+  FROM control_plane.competitions c
+  JOIN control_plane.competitions main ON main.competition_id=COALESCE(c.main_competition_id,c.competition_id)
+  JOIN control_plane.evaluation_configs ec ON ec.competition_id=c.competition_id AND ec.active;
+ALTER VIEW control_plane.dashboard_competitions OWNER TO teutonic_schema_owner;
+GRANT SELECT ON control_plane.dashboard_competitions TO teutonic_dashboard_view;
 
 COMMIT;

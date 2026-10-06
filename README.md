@@ -138,3 +138,13 @@ teutonic-miner list
 teutonic-miner use your-other-hotkey
 teutonic-miner status
 ```
+
+## Competitions
+
+Miners can select `main`, `math`, `code`, or `text` with
+`teutonic-miner ready --competition math` (also supported by `submit`). Omission
+selects MAIN. One ready submission per hotkey is shared across all competitions.
+Specialists use 30,000 planned samples with a 70/15/15 category-group mix;
+early stopping remains enabled. PostgreSQL controls active manifests and thresholds.
+See [deployment and configuration](DEPLOY.md#main-math-code-and-text-competitions)
+for manifest publication, `scripts/configure_evaluation.py`, and gradual rewards.

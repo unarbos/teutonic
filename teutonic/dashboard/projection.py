@@ -134,9 +134,13 @@ def _dataset_source(row: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(manifest, Mapping):
         raise DashboardProjectionError("dataset manifest metadata is not an object")
     shards = manifest.get("shards")
-    if not isinstance(shards, list) or not shards:
-        raise DashboardProjectionError("dataset manifest metadata has no shards")
     total_tokens = _int(manifest.get("total_tokens"))
+    total_shards = _int(manifest.get("total_shards"))
+    if shards is None and total_tokens is not None and total_shards is not None and total_shards > 0:
+        # Sanitized SQL views omit large inventories when totals are available.
+        shards = []
+    elif not isinstance(shards, list) or not shards:
+        raise DashboardProjectionError("dataset manifest metadata has no shards")
     if total_tokens is None:
         shard_tokens = [
             _int(shard.get("n_tokens")) if isinstance(shard, Mapping) else None
@@ -245,6 +249,19 @@ class DashboardProjectionRepository:
         if self._lock_held:
             self.connection.execute("SELECT pg_advisory_unlock(%s)", (DASHBOARD_LOCK_ID,))
             self._lock_held = False
+
+    def competition_scope(self, competition: str) -> DashboardProjectionRepository:
+        """Share the already-held publisher lock for another competition projection."""
+        if not self._lock_held:
+            raise DashboardProjectionError("dashboard publisher lock is not held")
+        scoped = DashboardProjectionRepository(
+            self.connection, netuid=self.netuid, chain_generation=self.chain_generation,
+            competition=competition, chain_name=self.chain_name,
+            seed_repo=self.seed_repo, seed_digest=self.seed_digest,
+            seed_repo_backend=self.seed_repo_backend,
+        )
+        scoped._lock_held = True
+        return scoped
 
     def project(self, *, now: datetime | None = None) -> dict[str, Any]:
         if not self._lock_held:

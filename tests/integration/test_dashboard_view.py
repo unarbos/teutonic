@@ -720,6 +720,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             names,
             {
                 "dashboard_chain",
+                "dashboard_competitions",
                 "dashboard_contract",
                 "dashboard_current_evaluation",
                 "dashboard_current_king",

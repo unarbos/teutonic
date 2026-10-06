@@ -9,6 +9,7 @@ from typing import Any
 from teutonic.evaluation.configuration import EvaluationSettings
 from teutonic.evaluation.early_stopping import EarlyStoppingPolicy
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE
+from teutonic.weights.policy import mapped_weight_plan
 
 from .contracts import EvaluationPolicyConfig
 
@@ -57,19 +58,13 @@ def evaluation_policy_from_env(
         dataset_source="pretokenized_npy",
         dataset_label=settings.dataset_label,
         shards_per_dataset=settings.shards_per_dataset,
-        batch_size=int(
-            env.get("TEUTONIC_EVAL_BATCH_SIZE", str(DEFAULT_EVAL_BATCH_SIZE))
-        ),
+        batch_size=int(env.get("TEUTONIC_EVAL_BATCH_SIZE", str(DEFAULT_EVAL_BATCH_SIZE))),
         dataset_manifests=settings.manifests,
         early_stopping=early_stopping or EarlyStoppingPolicy(),
         lease=timedelta(seconds=int(env.get("TEUTONIC_EVALUATION_LEASE_SECONDS", "120"))),
-        retry_base_delay=timedelta(
-            seconds=int(env.get("TEUTONIC_EVALUATION_RETRY_SECONDS", "30"))
-        ),
+        retry_base_delay=timedelta(seconds=int(env.get("TEUTONIC_EVALUATION_RETRY_SECONDS", "30"))),
         max_attempts=int(env.get("TEUTONIC_EVALUATION_MAX_ATTEMPTS", "3")),
-        publish_non_winning_models=_boolean(
-            env, "TEUTONIC_PUBLISH_NON_WINNING_MODELS"
-        ),
+        publish_non_winning_models=_boolean(env, "TEUTONIC_PUBLISH_NON_WINNING_MODELS"),
     )
 
 
@@ -132,26 +127,25 @@ class CrownCoordinator:
         burn_uid: int = 0,
         king_chain_size: int = 5,
     ) -> None:
-        if burn_uid < 0 or king_chain_size < 1:
-            raise ValueError("crown weight policy is invalid")
+        if burn_uid < 0 or king_chain_size != 5:
+            raise ValueError("crown policy requires five reward slots and a nonnegative burn UID")
         self.repository = repository
         self.chain = chain
         self.burn_uid = burn_uid
         self.king_chain_size = king_chain_size
 
     def __call__(self, promotion_id: str) -> str | None:
-        hotkeys = self.repository.promotion_weight_hotkeys(
-            promotion_id, limit=self.king_chain_size
-        )
+        hotkeys, shares = self.repository.promotion_weight_policy(promotion_id)
         snapshot = self.chain.snapshot()
-        target_hotkeys, target_uids, weights = equal_weight_plan(
-            hotkeys, snapshot.uid_by_hotkey, burn_uid=self.burn_uid
+        target_hotkeys, target_uids, weights = mapped_weight_plan(
+            hotkeys, shares, snapshot.uid_by_hotkey, burn_uid=self.burn_uid
         )
         return self.repository.crown_promoted_winner(
             promotion_id,
             now=datetime.now(timezone.utc),
             crowned_finalized_block=snapshot.block,
             policy_hotkeys=hotkeys,
+            policy_weights=shares,
             target_hotkeys=target_hotkeys,
             target_uids=target_uids,
             normalized_weights=weights,
@@ -164,8 +158,11 @@ class CrownCoordinator:
         snapshot = self.chain.snapshot()
         if snapshot.block <= policy["mapping_finalized_block"]:
             return False
-        target_hotkeys, target_uids, weights = equal_weight_plan(
-            policy["policy_hotkeys"], snapshot.uid_by_hotkey, burn_uid=self.burn_uid
+        target_hotkeys, target_uids, weights = mapped_weight_plan(
+            policy["policy_hotkeys"],
+            policy["policy_weights"],
+            snapshot.uid_by_hotkey,
+            burn_uid=self.burn_uid,
         )
         return self.repository.refresh_current_weight_plan(
             publication_id=policy["publication_id"],

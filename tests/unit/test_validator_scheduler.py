@@ -79,7 +79,7 @@ class ValidatorSchedulerPolicyTests(unittest.TestCase):
         self.assertEqual(first, scheduler_lock_key(306, "test", "quasar"))
         self.assertNotEqual(first, scheduler_lock_key(307, "test", "quasar"))
         self.assertNotEqual(first, scheduler_lock_key(306, "test-2", "quasar"))
-        self.assertNotEqual(first, scheduler_lock_key(306, "test", "mimo"))
+        self.assertEqual(first, scheduler_lock_key(306, "test", "mimo"))
 
     def test_promotion_worker_uses_an_independent_lock(self) -> None:
         promotion = promotion_worker_lock_key(306, "test", "quasar")

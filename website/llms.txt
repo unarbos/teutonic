@@ -110,10 +110,11 @@ before proceeding.
    (config, tokenizer files, chat template, both architecture .py files)
    must exactly match the genesis SHA-256 hashes in `chain.toml`. Only the
    weights may differ.
-4. A GPU evaluator loads king and challenger (bf16, eager attention, each
-   model layer-sharded across 4 of 8 GPUs) and scores both on the SAME
-   token sequences: 2,000 sequences of 2,048 tokens from FineWeb-Edu,
-   batch size 1, paired per-sequence cross-entropy.
+4. A GPU evaluator scores king and challenger on the SAME token sequences,
+   using BF16 replicas on eight GPUs (four replicas per side, one per GPU).
+   The configured sample plan is 30,000 sequences of 2,048 tokens, with
+   batch size 40 on B300. Clear losers can be rejected early. Consult the
+   selected competition's published dataset configuration for active settings.
 5. Sequence selection is deterministic and unknowable pre-submission:
    `dataset_seed = blake2b("block_hash={finalized_ready_block_hash}|hotkey={your_hotkey}")`.
    The block hash at ready-finalization does not exist when you decide to
@@ -121,22 +122,41 @@ before proceeding.
 6. Acceptance: with `diff_i = king_loss_i - challenger_loss_i` per
    sequence, a paired bootstrap (10,000 resamples, alpha=0.001, fixed
    seed 0) computes the one-sided lower confidence bound (LCB) of
-   mean(diff). Accept iff `LCB > delta_threshold = 0.5` nats/token.
+   mean(diff). Accept iff `LCB > delta_threshold`; the initial threshold
+   is 0.003 nats/token, independently configurable in each competition.
 7. On accept, you are crowned: the dashboard updates, your model is
    published to the public model bucket, and subnet weights refresh.
 
-Understand the threshold: 0.5 nats is a LARGE bar — this is an early
-generation and the genesis-descended kings are far from converged (reign 1
-was crowned with mu_hat = 4.64 nats). Expect the bar to become effectively
-tighter as kings improve; the live `delta` is always in dashboard.json and
-`datasets/manifest.json`.
+Active manifests and thresholds are controlled by PostgreSQL. The public
+dataset summaries reflect those configurations; changing chain.toml alone
+does not change active evaluations.
 
-Rewards are NOT winner-take-all: subnet weight is split equally across the
-current king plus up to 4 previous distinct kings still registered (5 kings
-alive = 20% each; the plan falls back to burning to UID 0 if no king maps
-to the metagraph). Weights are republished on a 101-block cadence.
-Consequence: one crown pays out for roughly the next 4 reigns — KEEP THE
-WINNING HOTKEY REGISTERED.
+There are four competitions: MAIN, MATH, CODE, TEXT. Select one with
+`teutonic-miner ready --competition math` or `teutonic-miner submit ...
+--competition math`. Omission means MAIN. Selection is fixed at the ready
+commitment; one ready submission per hotkey applies across all four.
+
+Specialists plan 21,000 samples from their own group plus 4,500 from each
+other group. Every group has explicit category weights totaling 100%.
+Until a specialist gets its first winner, challengers face the current
+MAIN king using the specialist mix and threshold. All duels run sequentially.
+
+You can merge specialized MATH, CODE, and TEXT models into a single model
+and submit it to the MAIN competition. The merged model must satisfy the
+same model contract and beat the current MAIN king under MAIN evaluation.
+
+Deployment preserves the existing five recipients at 20% each. As 0, 1,
+2, then 3 specialist kings are established, MAIN shares become respectively
+20/20/20/20/20, 25/20/20/20, 30/20/20, and 40/15. Every established split
+king gets 15%. New MAIN winners shift MAIN history; new specialist winners
+replace that split's king. Weights remain on the existing 101-block cadence.
+
+Configured competitions: https://teutonic.ai/competitions.json
+MAIN: https://teutonic.ai/dashboard.json
+Splits: https://teutonic.ai/competitions/<math|code|text>/dashboard.json
+Dataset policy: corresponding `datasets/manifest.json` under each prefix.
+Raw split inventories: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/<math|code|text>/manifest.json
+
 
 
 ## 4. Zero to registered miner
@@ -357,8 +377,8 @@ teutonic-miner ready --hotkey h0
 
 ## 11. Rewards → compute → more mining (the self-sustaining loop)
 
-1. WIN A REIGN. Your hotkey joins the king chain and shares subnet weight
-   equally with up to 4 prior kings (20% each at 5). Emissions accrue
+1. WIN A REIGN. Your hotkey enters its selected competition's reward position
+   under the gradual MAIN/specialist allocation described above. Emissions accrue
    continuously as SN3 alpha staked to your hotkey. Estimated earnings:
    `king_payout` in dashboard.json.
 2. CHECK EARNINGS: `btcli wallet overview --wallet-name miner` or

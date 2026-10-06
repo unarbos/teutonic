@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -40,7 +41,9 @@ def stop(_signum, _frame) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Publish dashboard-v1 from sanitized PostgreSQL views")
+    parser = argparse.ArgumentParser(
+        description="Publish dashboard-v1 from sanitized PostgreSQL views"
+    )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(
@@ -116,6 +119,46 @@ def main() -> int:
                     while not stopping:
                         try:
                             result, dataset_result, active = service.publish_once()
+                            rows = connection.execute(
+                                "SELECT competition, competition_key, has_king, eval_n, delta_threshold FROM control_plane.dashboard_competitions WHERE netuid=%s AND chain_generation=%s AND main_competition=%s ORDER BY competition_key",
+                                (netuid, repository.chain_generation, repository.competition),
+                            ).fetchall()
+                            index = []
+                            for name, key, has_king, eval_n, delta in rows:
+                                prefix = "" if key == "main" else f"competitions/{key}/"
+                                index.append(
+                                    {
+                                        "competition": key,
+                                        "name": name,
+                                        "has_king": has_king,
+                                        "eval_n": eval_n,
+                                        "delta_threshold": delta,
+                                        "dashboard": prefix + "dashboard.json",
+                                    }
+                                )
+                                if key == "main":
+                                    continue
+                                split_repository = repository.competition_scope(name)
+                                split_store = DashboardObjectStore(
+                                    client,
+                                    bucket=store.bucket,
+                                    maximum_bytes=store.maximum_bytes,
+                                    prefix=prefix,
+                                )
+                                _, _, split_active = DashboardViewService(
+                                    split_repository,
+                                    split_store,
+                                    market_client=market,
+                                    maximum_market_stale=maximum_market_stale,
+                                ).publish_once()
+                                active = active or split_active
+                            client.put_object(
+                                Bucket=store.bucket,
+                                Key="competitions.json",
+                                Body=json.dumps({"competitions": index}).encode(),
+                                ContentType="application/json",
+                                CacheControl="public, max-age=15, must-revalidate",
+                            )
                             failures = 0
                             log.info(
                                 "dashboard %s bytes=%d sha256=%s",
@@ -136,9 +179,7 @@ def main() -> int:
                             raise
                         except Exception as exc:
                             failures += 1
-                            log.error(
-                                "dashboard publication failed type=%s", type(exc).__name__
-                            )
+                            log.error("dashboard publication failed type=%s", type(exc).__name__)
                             overlay = market_service.publish_market_only()
                             log.info(
                                 "market overlay %s bytes=%d sha256=%s",

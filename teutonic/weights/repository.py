@@ -70,10 +70,10 @@ class WeightPublicationRepository:
         with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
-                SELECT w.*, c.current_reign_id, r.reign_number
+                SELECT w.*, COALESCE(c.reward_reign_id, c.current_reign_id) AS current_reign_id, r.reign_number
                   FROM control_plane.competitions c
                   JOIN control_plane.weight_publications w
-                    ON w.source_reign_id = c.current_reign_id
+                    ON w.source_reign_id = COALESCE(c.reward_reign_id, c.current_reign_id)
                   JOIN control_plane.king_reigns r ON r.reign_id = w.source_reign_id
                  WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
                  FOR UPDATE OF w
@@ -256,7 +256,7 @@ class WeightPublicationRepository:
     def is_current(self, plan: WeightPlan) -> bool:
         row = self.connection.execute(
             """
-            SELECT c.current_reign_id = %s
+            SELECT COALESCE(c.reward_reign_id, c.current_reign_id) = %s
               FROM control_plane.competitions c
              WHERE c.competition_id = %s
             """,
@@ -540,7 +540,7 @@ class WeightPublicationRepository:
             raise WeightLeaseLostError("weight plan has no claimed attempt")
         with self.connection.transaction():
             newer = self.connection.execute(
-                "SELECT current_reign_id FROM control_plane.competitions WHERE competition_id = %s",
+                "SELECT COALESCE(reward_reign_id, current_reign_id) FROM control_plane.competitions WHERE competition_id = %s",
                 (plan.competition_id,),
             ).fetchone()
             if newer is None or str(newer[0]) == plan.source_reign_id:

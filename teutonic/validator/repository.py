@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 
@@ -28,7 +29,7 @@ class LeaseLostError(RuntimeError):
 
 
 def scheduler_lock_key(netuid: int, chain_generation: str, competition: str) -> int:
-    material = f"teutonic-validator-v1|{netuid}|{chain_generation}|{competition}".encode()
+    material = f"teutonic-validator-v1|{netuid}|{chain_generation}".encode()
     return int.from_bytes(hashlib.sha256(material).digest()[:8], "big", signed=True)
 
 
@@ -58,6 +59,7 @@ class ValidatorRepository:
         self.public_model_bucket = public_model_bucket
         self._lock_key = scheduler_lock_key(netuid, chain_generation, competition)
         self._lock_held = False
+        self._settings_cache: dict[str, EvaluationSettings] = {}
 
     def acquire_lock(self) -> None:
         acquired = self.connection.execute(
@@ -76,8 +78,18 @@ class ValidatorRepository:
         if not self._lock_held:
             raise SchedulerLockUnavailable("competition scheduler lock is not held")
 
-    def load_evaluation_settings(self) -> EvaluationSettings:
+    def load_evaluation_settings(self, competition: str | None = None) -> EvaluationSettings:
+        competition = competition or self.competition
         with self.connection.cursor(row_factory=dict_row) as cursor:
+            active = cursor.execute(
+                """SELECT ec.config_version FROM control_plane.competitions c
+                     JOIN control_plane.evaluation_configs ec ON ec.competition_id=c.competition_id AND ec.active
+                     WHERE c.netuid=%s AND c.chain_generation=%s AND c.name=%s""",
+                (self.netuid, self.chain_generation, competition),
+            ).fetchone()
+            cached = self._settings_cache.get(competition)
+            if active and cached and cached.config_version == active["config_version"]:
+                return cached
             cursor.execute(
                 """
                 SELECT ec.config_version, ec.dataset_label, ec.eval_n,
@@ -92,7 +104,7 @@ class ValidatorRepository:
                  WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
                  ORDER BY dm.position
                 """,
-                (self.netuid, self.chain_generation, self.competition),
+                (self.netuid, self.chain_generation, competition or self.competition),
             )
             rows = cursor.fetchall()
         if not rows:
@@ -108,7 +120,7 @@ class ValidatorRepository:
             )
             for row in rows
         )
-        return EvaluationSettings(
+        settings = EvaluationSettings(
             config_version=str(first["config_version"]),
             dataset_label=str(first["dataset_label"]),
             n=int(first["eval_n"]),
@@ -116,8 +128,10 @@ class ValidatorRepository:
             manifests=manifests,
             shards_per_dataset=int(first["shards_per_dataset"]),
         )
+        self._settings_cache[competition] = settings
+        return settings
 
-    def load_early_stopping_policy(self) -> EarlyStoppingPolicy:
+    def load_early_stopping_policy(self, competition: str | None = None) -> EarlyStoppingPolicy:
         with self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
@@ -131,7 +145,7 @@ class ValidatorRepository:
                    AND competition.chain_generation = %s
                    AND competition.name = %s
                 """,
-                (self.netuid, self.chain_generation, self.competition),
+                (self.netuid, self.chain_generation, competition or self.competition),
             )
             row = cursor.fetchone()
         if row is None:
@@ -150,12 +164,13 @@ class ValidatorRepository:
         self, *, now: datetime, policy: EvaluationPolicyConfig
     ) -> ClaimedEvaluation | None:
         self._require_lock()
-        with self.connection.transaction(), self.connection.cursor(
-            row_factory=dict_row
-        ) as cursor:
+        with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
-                SELECT c.competition_id, c.current_reign_id,
+                SELECT c.competition_id, c.name AS competition_name,
+                       (SELECT ec.config_version FROM control_plane.evaluation_configs ec
+                         WHERE ec.competition_id=c.competition_id AND ec.active) AS config_version,
+                       COALESCE(c.current_reign_id, main.current_reign_id) AS current_reign_id,
                        k.model_digest AS king_digest, k.public_bucket AS king_bucket,
                        k.public_prefix AS king_prefix,
                        u.upload_id, u.registration_id, u.model_digest, u.model_name,
@@ -175,7 +190,10 @@ class ValidatorRepository:
                        previous.claimed_king_reign_id AS previous_king_reign_id,
                        previous.request_payload AS previous_request
                   FROM control_plane.competitions c
-                  JOIN control_plane.king_reigns k ON k.reign_id = c.current_reign_id
+                  JOIN control_plane.competitions main
+                    ON main.competition_id = COALESCE(c.main_competition_id, c.competition_id)
+                  JOIN control_plane.king_reigns k
+                    ON k.reign_id = COALESCE(c.current_reign_id, main.current_reign_id)
                   JOIN LATERAL (
                       SELECT candidate.*
                         FROM control_plane.uploads candidate
@@ -183,6 +201,7 @@ class ValidatorRepository:
                           ON candidate_registration.registration_id = candidate.registration_id
                        WHERE candidate_registration.netuid = c.netuid
                          AND candidate.chain_generation = c.chain_generation
+                         AND candidate.competition_key = c.competition_key
                          AND candidate.state IN ('ready_for_evaluation', 'retry_pending')
                          AND NOT EXISTS (
                              SELECT 1
@@ -231,14 +250,32 @@ class ValidatorRepository:
                        ORDER BY s.finalized_block DESC
                        LIMIT 1
                   ) assignment ON true
-                 WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
-                 FOR UPDATE OF c
+                 WHERE c.netuid = %s AND c.chain_generation = %s AND main.name = %s
+                 ORDER BY u.ready_finalized_block, u.ready_extrinsic_index, u.ready_event_index, u.upload_id
+                 LIMIT 1
+                 FOR UPDATE OF c, main
                 """,
                 (self.netuid, self.chain_generation, self.competition),
             )
             row = cursor.fetchone()
             if row is None:
                 return None
+            frozen_retry = row["previous_state"] == "retryable_failure" and row["previous_request"]
+            if not frozen_retry and (
+                row["competition_name"] != self.competition
+                or (row["config_version"] and row["config_version"] != policy.dataset_version)
+            ):
+                settings = self.load_evaluation_settings(row["competition_name"])
+                policy = replace(
+                    policy,
+                    dataset_version=settings.config_version,
+                    n=settings.n,
+                    delta_threshold=settings.delta_threshold,
+                    dataset_label=settings.dataset_label,
+                    dataset_manifests=settings.manifests,
+                    shards_per_dataset=settings.shards_per_dataset,
+                    early_stopping=self.load_early_stopping_policy(row["competition_name"]),
+                )
             if row["current_reign_id"] is None:
                 raise SchedulerInvariantError("competition has no current king")
             if row["next_retry_at"] is not None and row["next_retry_at"] > now:
@@ -248,10 +285,7 @@ class ValidatorRepository:
             # same durable attempt and request identity instead of spending a miner retry.
             # Reposting this request is safe because the evaluator binds eval_id to the
             # original request and returns the existing job after an ambiguous response.
-            if (
-                row["previous_state"] == "retryable_failure"
-                and row["previous_started_at"] is None
-            ):
+            if row["previous_state"] == "retryable_failure" and row["previous_started_at"] is None:
                 request = EvaluationRequestV2.from_mapping(row["previous_request"])
                 evaluation_id = str(row["previous_evaluation_id"])
                 cursor.execute(
@@ -299,49 +333,55 @@ class ValidatorRepository:
 
             cursor.execute("SELECT gen_random_uuid() AS evaluation_id")
             evaluation_id = str(cursor.fetchone()["evaluation_id"])
-            request = EvaluationRequestV2.from_mapping(
-                {
-                    "protocol_version": "teutonic-evaluator-v2",
-                    "evaluation_id": evaluation_id,
-                    "attempt_number": attempt_number,
-                    "king": {
-                        "kind": "r2-prefix",
-                        "bucket": row["king_bucket"],
-                        "prefix": row["king_prefix"],
-                        "expected_digest": row["king_digest"],
-                    },
-                    "challenger": {
-                        "kind": "r2-prefix",
-                        "bucket": row["challenger_bucket"],
-                        "prefix": row["challenger_prefix"],
-                        "expected_digest": row["model_digest"],
-                    },
-                    "miner": {
-                        "hotkey": row["hotkey"],
-                        "coldkey": row["coldkey"] or "unavailable",
-                        "uid": row["uid"],
-                        "netuid": self.netuid,
-                        "challenge_id": str(row["upload_id"]),
-                    },
-                    "versions": {
-                        "evaluation_policy": policy.policy_version,
-                        "dataset": policy.dataset_version,
-                        "code": policy.code_version,
-                        "evaluator": policy.evaluator_version,
-                    },
-                    "sampling": {
-                        "seed": policy.sampling_seed,
-                        "bootstrap_seed": policy.bootstrap_seed,
-                        "block_hash": row["ready_finalized_block_hash"],
-                    },
-                    "limits": policy.thresholds,
-                    "early_stopping": policy.early_stopping.request_dict(),
-                    "dataset": policy.dataset_request(
-                        block_hash=str(row["ready_finalized_block_hash"]),
-                        hotkey=str(row["hotkey"]),
-                    ),
-                }
-            )
+            if frozen_retry:
+                payload = dict(row["previous_request"])
+                payload.update(evaluation_id=evaluation_id, attempt_number=attempt_number)
+                request = EvaluationRequestV2.from_mapping(payload)
+                row["current_reign_id"] = row["previous_king_reign_id"]
+            else:
+                request = EvaluationRequestV2.from_mapping(
+                    {
+                        "protocol_version": "teutonic-evaluator-v2",
+                        "evaluation_id": evaluation_id,
+                        "attempt_number": attempt_number,
+                        "king": {
+                            "kind": "r2-prefix",
+                            "bucket": row["king_bucket"],
+                            "prefix": row["king_prefix"],
+                            "expected_digest": row["king_digest"],
+                        },
+                        "challenger": {
+                            "kind": "r2-prefix",
+                            "bucket": row["challenger_bucket"],
+                            "prefix": row["challenger_prefix"],
+                            "expected_digest": row["model_digest"],
+                        },
+                        "miner": {
+                            "hotkey": row["hotkey"],
+                            "coldkey": row["coldkey"] or "unavailable",
+                            "uid": row["uid"],
+                            "netuid": self.netuid,
+                            "challenge_id": str(row["upload_id"]),
+                        },
+                        "versions": {
+                            "evaluation_policy": policy.policy_version,
+                            "dataset": policy.dataset_version,
+                            "code": policy.code_version,
+                            "evaluator": policy.evaluator_version,
+                        },
+                        "sampling": {
+                            "seed": policy.sampling_seed,
+                            "bootstrap_seed": policy.bootstrap_seed,
+                            "block_hash": row["ready_finalized_block_hash"],
+                        },
+                        "limits": policy.thresholds,
+                        "early_stopping": policy.early_stopping.request_dict(),
+                        "dataset": policy.dataset_request(
+                            block_hash=str(row["ready_finalized_block_hash"]),
+                            hotkey=str(row["hotkey"]),
+                        ),
+                    }
+                )
             cursor.execute(
                 """
                 INSERT INTO control_plane.evaluations (
@@ -364,13 +404,18 @@ class ValidatorRepository:
                     self.instance_id,
                     now + policy.lease,
                     now,
-                    policy.policy_version,
-                    policy.code_version,
-                    policy.dataset_version,
-                    policy.evaluator_version,
-                    policy.sampling_seed,
-                    policy.bootstrap_seed,
-                    Jsonb(policy.persisted_thresholds),
+                    request.request_payload["versions"]["evaluation_policy"],
+                    request.request_payload["versions"]["code"],
+                    request.request_payload["versions"]["dataset"],
+                    request.request_payload["versions"]["evaluator"],
+                    request.request_payload["sampling"]["seed"],
+                    request.request_payload["sampling"]["bootstrap_seed"],
+                    Jsonb(
+                        {
+                            **request.request_payload["limits"],
+                            "early_stopping": request.request_payload.get("early_stopping", {}),
+                        }
+                    ),
                     request.request_sha256,
                     Jsonb(dict(request.request_payload)),
                 ),
@@ -712,12 +757,15 @@ class ValidatorRepository:
                    e.claimed_king_reign_id, e.request_payload
               FROM control_plane.evaluations e
               JOIN control_plane.competitions c ON c.competition_id = e.competition_id
-             WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
+             WHERE c.netuid = %s AND c.chain_generation = %s
+               AND (c.name = %s OR c.main_competition_id = (
+                   SELECT competition_id FROM control_plane.competitions
+                   WHERE netuid = c.netuid AND chain_generation = c.chain_generation AND name = %s))
                AND e.state IN ('claimed', 'evaluating')
                AND (e.lease_expires_at < %s OR e.owner_instance_id = %s)
              ORDER BY e.created_at, e.evaluation_id
             """,
-            (self.netuid, self.chain_generation, self.competition, now, self.instance_id),
+            (self.netuid, self.chain_generation, self.competition, self.competition, now, self.instance_id),
         ).fetchall()
         return tuple(
             RecoveryCandidate(
@@ -749,6 +797,51 @@ class ValidatorRepository:
             ).fetchone()
             if row is None:
                 raise LeaseLostError("evaluation cannot be adopted")
+
+    def promotion_weight_policy(self, promotion_id: str):
+        from teutonic.weights.policy import competition_rewards
+
+        with self.connection.cursor(row_factory=dict_row) as cursor:
+            row = cursor.execute(
+                """SELECT u.signalling_hotkey, c.competition_key,
+                          main.competition_id AS main_id, main.reward_main_hotkeys,
+                          w.policy_hotkeys
+                     FROM control_plane.model_promotions p
+                     JOIN control_plane.evaluations e ON e.evaluation_id=p.evaluation_id
+                     JOIN control_plane.uploads u ON u.upload_id=e.upload_id
+                     JOIN control_plane.competitions c ON c.competition_id=e.competition_id
+                     JOIN control_plane.competitions main
+                       ON main.competition_id=COALESCE(c.main_competition_id,c.competition_id)
+                     LEFT JOIN control_plane.weight_publications w ON w.source_reign_id=main.current_reign_id
+                    WHERE p.promotion_id=%s AND p.state='promoted' AND p.disposition='winner'""",
+                (promotion_id,),
+            ).fetchone()
+            if row is None:
+                raise SchedulerInvariantError("only promoted winners have reward policies")
+            history = row["reward_main_hotkeys"] or row["policy_hotkeys"]
+            if not history:
+                history = [
+                    r["hotkey"]
+                    for r in cursor.execute(
+                        "SELECT hotkey FROM control_plane.king_reigns WHERE competition_id=%s ORDER BY reign_number DESC LIMIT 5",
+                        (row["main_id"],),
+                    ).fetchall()
+                ]
+            kings = {
+                r["competition_key"]: r["hotkey"]
+                for r in cursor.execute(
+                    """SELECT c.competition_key, k.hotkey FROM control_plane.competitions c
+                     JOIN control_plane.king_reigns k ON k.reign_id=c.current_reign_id
+                     WHERE c.main_competition_id=%s""",
+                    (row["main_id"],),
+                ).fetchall()
+            }
+            if row["competition_key"] == "main":
+                history = list(dict.fromkeys([row["signalling_hotkey"], *history]))[:5]
+            else:
+                kings[row["competition_key"]] = row["signalling_hotkey"]
+            hotkeys, shares = competition_rewards(history, kings)
+            return hotkeys, shares
 
     def promotion_weight_hotkeys(self, promotion_id: str, *, limit: int = 5) -> tuple[str, ...]:
         """Return the promoted challenger followed by the current durable policy.
@@ -806,10 +899,10 @@ class ValidatorRepository:
             row = cursor.execute(
                 """
                 SELECT w.weight_publication_id, w.payload_revision,
-                       w.mapping_finalized_block, w.policy_hotkeys
+                       w.mapping_finalized_block, w.policy_hotkeys, w.policy_weights
                   FROM control_plane.competitions c
                   JOIN control_plane.weight_publications w
-                    ON w.source_reign_id = c.current_reign_id
+                    ON w.source_reign_id = COALESCE(c.reward_reign_id, c.current_reign_id)
                  WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
                 """,
                 (self.netuid, self.chain_generation, self.competition),
@@ -821,6 +914,10 @@ class ValidatorRepository:
             "payload_revision": int(row["payload_revision"]),
             "mapping_finalized_block": int(row["mapping_finalized_block"]),
             "policy_hotkeys": tuple(str(value) for value in row["policy_hotkeys"]),
+            "policy_weights": tuple(
+                row["policy_weights"]
+                or [1 / len(row["policy_hotkeys"])] * len(row["policy_hotkeys"])
+            ),
         }
 
     def refresh_current_weight_plan(
@@ -857,7 +954,7 @@ class ValidatorRepository:
                 SELECT w.*
                   FROM control_plane.competitions c
                   JOIN control_plane.weight_publications w
-                    ON w.source_reign_id = c.current_reign_id
+                    ON w.source_reign_id = COALESCE(c.reward_reign_id, c.current_reign_id)
                  WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
                    AND w.weight_publication_id = %s
                  FOR UPDATE OF w
@@ -983,6 +1080,7 @@ class ValidatorRepository:
         target_hotkeys: Sequence[str],
         target_uids: Sequence[int],
         normalized_weights: Sequence[float],
+        policy_weights: Sequence[float] | None = None,
     ) -> str | None:
         if (
             len(target_uids) != len(normalized_weights)
@@ -995,14 +1093,18 @@ class ValidatorRepository:
             cursor.execute(
                 """
                 SELECT p.*, e.competition_id, e.claimed_king_reign_id, e.policy_version, e.verdict,
-                       u.signalling_hotkey, r.uid, c.current_reign_id, c.next_reign_number
+                       u.signalling_hotkey, r.uid, c.current_reign_id, c.next_reign_number,
+                       c.competition_key, main.competition_id AS main_id,
+                       main.current_reign_id AS main_reign_id, main.reward_main_hotkeys
                   FROM control_plane.model_promotions p
                   JOIN control_plane.evaluations e ON e.evaluation_id = p.evaluation_id
                   JOIN control_plane.uploads u ON u.upload_id = p.upload_id
                   JOIN control_plane.registrations r ON r.registration_id = u.registration_id
                   JOIN control_plane.competitions c ON c.competition_id = e.competition_id
+                  JOIN control_plane.competitions main
+                    ON main.competition_id = COALESCE(c.main_competition_id, c.competition_id)
                  WHERE p.promotion_id = %s
-                 FOR UPDATE OF p, e, u, c
+                 FOR UPDATE OF p, e, u, c, main
                 """,
                 (promotion_id,),
             )
@@ -1019,7 +1121,7 @@ class ValidatorRepository:
                 return str(existing["reign_id"])
             if row["verdict"] != "accepted":
                 raise SchedulerInvariantError("promotion has no accepted verdict")
-            if row["current_reign_id"] != row["claimed_king_reign_id"]:
+            if (row["current_reign_id"] or row["main_reign_id"]) != row["claimed_king_reign_id"]:
                 cursor.execute(
                     """
                     UPDATE control_plane.uploads
@@ -1030,6 +1132,25 @@ class ValidatorRepository:
                     (row["upload_id"],),
                 )
                 return None
+            history = row["reward_main_hotkeys"]
+            if not history:
+                old = cursor.execute(
+                    "SELECT policy_hotkeys FROM control_plane.weight_publications WHERE source_reign_id=%s",
+                    (row["main_reign_id"],),
+                ).fetchone()
+                history = (
+                    old["policy_hotkeys"]
+                    if old
+                    else [
+                        r["hotkey"]
+                        for r in cursor.execute(
+                            "SELECT hotkey FROM control_plane.king_reigns WHERE competition_id=%s ORDER BY reign_number DESC LIMIT 5",
+                            (row["main_id"],),
+                        ).fetchall()
+                    ]
+                )
+            if row["competition_key"] == "main":
+                history = list(dict.fromkeys([row["signalling_hotkey"], *history]))[:5]
             previous = row["current_reign_id"]
             reign_number = row["next_reign_number"]
             cursor.execute(
@@ -1083,6 +1204,10 @@ class ValidatorRepository:
                 """,
                 (row["upload_id"],),
             )
+            cursor.execute(
+                "UPDATE control_plane.competitions SET reward_reign_id=%s, reward_main_hotkeys=%s WHERE competition_id=%s",
+                (reign_id, history, row["main_id"]),
+            )
             weight_payload = {
                 "target_uids": list(target_uids),
                 "normalized_weights": list(normalized_weights),
@@ -1090,17 +1215,18 @@ class ValidatorRepository:
             cursor.execute(
                 """
                 INSERT INTO control_plane.weight_publications (
-                    competition_id, source_reign_id, policy_version, policy_hotkeys,
+                    competition_id, source_reign_id, policy_version, policy_hotkeys, policy_weights,
                     target_hotkeys, target_uids, normalized_weights, payload_sha256,
                     mapping_finalized_block, idempotency_key, state
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'requested')
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'requested')
                 ON CONFLICT (source_reign_id) DO NOTHING
                 """,
                 (
-                    row["competition_id"],
+                    row["main_id"],
                     reign_id,
                     row["policy_version"],
                     list(policy_hotkeys),
+                    list(policy_weights) if policy_weights is not None else None,
                     list(target_hotkeys),
                     list(target_uids),
                     list(normalized_weights),

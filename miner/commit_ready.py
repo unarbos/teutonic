@@ -31,6 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "ready identity on chain."
         )
     )
+    parser.add_argument("--competition", choices=("main", "math", "code", "text"), default="main")
     add_wallet_arguments(parser)
     return parser.parse_args(argv)
 
@@ -59,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     state_dir = state_dir_from_args(args, wallet)
     state = load_registration(state_dir, wallet)
     manifest = load_manifest(state_dir / MANIFEST_FILE, state)
-    payload = ready_signal_payload(state.registration_id, manifest.manifest_sha256)
+    payload = ready_signal_payload(state.registration_id, manifest.manifest_sha256, args.competition)
 
     with subtensor_connection(state.network) as subtensor:
         current_state = require_current_registration(subtensor, saved=state, wallet=wallet)
@@ -76,12 +77,13 @@ def main(argv: list[str] | None = None) -> int:
             if (
                 existing.registration_id == state.registration_id
                 and existing.manifest_sha256 == manifest.manifest_sha256
+                and existing.competition == args.competition
             ):
                 remove_local_auth(state_dir)
                 print("matching ready commitment already exists")
                 return 0
             if existing.registration_id == state.registration_id:
-                raise RuntimeError("registration already committed a different model manifest")
+                raise RuntimeError("registration already committed a different model manifest or competition")
 
         print("Submitting ready commitment and waiting for finalization", flush=True)
         result = subtensor.set_commitment(

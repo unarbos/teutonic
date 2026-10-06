@@ -26,11 +26,15 @@ class DashboardObjectStore:
         bucket: str,
         maximum_bytes: int = 10 * 1024 * 1024,
         cache_control: str = "public, max-age=15, must-revalidate",
+        prefix: str = "",
     ) -> None:
         if not bucket:
             raise ValueError("dashboard bucket is required")
         if maximum_bytes < 1024:
             raise ValueError("dashboard maximum object size is too small")
+        if prefix not in {"", "competitions/math/", "competitions/code/", "competitions/text/"}:
+            raise ValueError("invalid competition publication prefix")
+        self.prefix = prefix
         self.client = client
         self.bucket = bucket
         self.maximum_bytes = maximum_bytes
@@ -38,7 +42,7 @@ class DashboardObjectStore:
 
     def previous_payload(self) -> dict[str, Any] | None:
         try:
-            response = self.client.get_object(Bucket=self.bucket, Key=DASHBOARD_KEY)
+            response = self.client.get_object(Bucket=self.bucket, Key=self.prefix + DASHBOARD_KEY)
         except ClientError as exc:
             code = str(exc.response.get("Error", {}).get("Code", ""))
             if code in {"NoSuchKey", "404", "NotFound"}:
@@ -75,7 +79,7 @@ class DashboardObjectStore:
                 return PublicationResult("unchanged", digest, len(body))
         self.client.put_object(
             Bucket=self.bucket,
-            Key=DASHBOARD_KEY,
+            Key=self.prefix + DASHBOARD_KEY,
             Body=body,
             ContentType="application/json; charset=utf-8",
             CacheControl=self.cache_control,
@@ -108,7 +112,7 @@ class DashboardObjectStore:
             return PublicationResult("unchanged", digest, len(body))
         self.client.put_object(
             Bucket=self.bucket,
-            Key=DATASET_MANIFEST_KEY,
+            Key=self.prefix + DATASET_MANIFEST_KEY,
             Body=body,
             ContentType="application/json; charset=utf-8",
             CacheControl=self.cache_control,
@@ -127,7 +131,7 @@ class DashboardObjectStore:
 
     def _head(self, key: str = DASHBOARD_KEY) -> Mapping[str, Any] | None:
         try:
-            return self.client.head_object(Bucket=self.bucket, Key=key)
+            return self.client.head_object(Bucket=self.bucket, Key=self.prefix + key)
         except ClientError as exc:
             code = str(exc.response.get("Error", {}).get("Code", ""))
             if code in {"NoSuchKey", "404", "NotFound"}:
