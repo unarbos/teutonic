@@ -98,35 +98,35 @@ manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/math/
 
 [splits.math.categories.math-dialogue]
 dataset = "math-reasoning"
-weight = 0.350
+weight = 0.413
 
 [splits.math.categories.math-thinking-qwen]
 dataset = "math-reasoning"
-weight = 0.193
+weight = 0.174
 
 [splits.math.categories.math-rewrite]
 dataset = "math-reasoning"
-weight = 0.155
+weight = 0.140
 
 [splits.math.categories.math-thinking-oss]
 dataset = "math-reasoning"
-weight = 0.116
+weight = 0.104
 
 [splits.math.categories.format-rewrites]
 dataset = "pretrain-behaviors"
-weight = 0.089
+weight = 0.081
 
 [splits.math.categories.games]
 dataset = "pretrain-behaviors"
-weight = 0.040
+weight = 0.036
 
 [splits.math.categories.socratic-math-dialogue]
 dataset = "math-reasoning"
-weight = 0.038
+weight = 0.034
 
 [splits.math.categories.3efforts-pretrain]
 dataset = "sft-reasoning"
-weight = 0.019
+weight = 0.018
 
 [splits.code]
 n = 30000
