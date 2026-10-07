@@ -99,6 +99,8 @@ class ValidatorScheduler:
             miner.get("uid", "-"),
         )
         try:
+            if await self._reconcile_stale_dispatch(claim):
+                return True
             failure = await self.preflight(claim.request)
             if failure is not None:
                 error_code = str(failure.get("error_code", "invalid_evaluation_input"))
@@ -143,6 +145,37 @@ class ValidatorScheduler:
             self._persist_error(claim, exc)
         return True
 
+    async def _reconcile_stale_dispatch(self, claim: ClaimedEvaluation) -> bool:
+        baseline = self.repository.dispatch_baseline(claim.evaluation_id)
+        if baseline == "pending":
+            return True
+        if baseline == "current":
+            return False
+        try:
+            status = await self.evaluator.status(claim.eval_id)
+        except EvaluatorJobNotFoundError:
+            self.repository.requeue_stale_dispatch(claim.evaluation_id, now=self.clock())
+            return True
+        except Exception as exc:
+            # A failed status lookup cannot establish that replacement is safe.
+            if not self._defer_dispatch_error(claim, exc):
+                log.warning("stale dispatch reconciliation paused evaluation=%s", claim.evaluation_id)
+            return True
+        self.repository.start_evaluating(
+            claim.evaluation_id, evaluator_job_id=claim.eval_id,
+            now=self.clock(), lease=self.policy.lease,
+        )
+        if status.get("state") == "completed" and isinstance(status.get("verdict"), Mapping):
+            self._persist_terminal(claim, status["verdict"])
+        elif status.get("state") == "failed":
+            self._persist_error(
+                claim, RuntimeError(f"eval server error: {_evaluator_error_code(status)}"),
+                terminal=True,
+            )
+        else:
+            self._persist_terminal(claim, await self._consume(claim, claim.eval_id))
+        return True
+
     def _defer_dispatch_error(self, claim: ClaimedEvaluation, exc: Exception) -> bool:
         transient, marker = classify_eval_error(exc)
         if isinstance(exc, EvaluatorBusyError):
@@ -154,7 +187,9 @@ class ValidatorScheduler:
             claim.evaluation_id,
             now=self.clock(),
             public_error_code=error_code,
-            retry_delay=self.policy.retry_delay(claim.attempt_number),
+            retry_delay=self.policy.retry_delay(
+                self.repository.retry_attempt_number(claim.evaluation_id)
+            ),
             private_diagnostic_reference=(
                 f"diagnostic:{claim.evaluation_id}:{type(exc).__name__}"
             ),
@@ -202,7 +237,7 @@ class ValidatorScheduler:
         validate_result_v2(result, request)
         persisted = dict(result)
         persisted.setdefault("delta", persisted["delta_threshold"])
-        self.repository.complete_verdict(
+        disposition = self.repository.complete_verdict(
             claim.evaluation_id,
             result=persisted,
             now=self.clock(),
@@ -211,16 +246,19 @@ class ValidatorScheduler:
         )
         log.info(
             "evaluation completed evaluation=%s upload=%s accepted=%s "
-            "verdict=%s challenger_loss=%s delta=%s",
+            "verdict=%s challenger_loss=%s delta=%s disposition=%s",
             claim.evaluation_id,
             claim.upload_id,
             persisted.get("accepted", "-"),
             persisted.get("verdict", "-"),
             persisted.get("avg_challenger_loss", "-"),
             persisted.get("delta", "-"),
+            disposition,
         )
 
-    def _persist_error(self, claim: ClaimedEvaluation, exc: Exception) -> None:
+    def _persist_error(
+        self, claim: ClaimedEvaluation, exc: Exception, *, terminal: bool = False
+    ) -> None:
         transient, marker = classify_eval_error(exc)
         if isinstance(exc, EvaluatorBusyError):
             transient, marker = True, "evaluator_busy"
@@ -228,7 +266,17 @@ class ValidatorScheduler:
             transient, marker = True, "evaluator_job_lost"
         elif isinstance(exc, (EvaluatorConflictError, ProtocolValidationError)):
             transient, marker = False, "evaluator_policy_mismatch"
-        attempt_remaining = claim.attempt_number < self.policy.max_attempts
+        if (
+            not terminal
+            and not isinstance(exc, EvaluatorJobNotFoundError)
+            and self.repository.dispatch_baseline(claim.evaluation_id) != "current"
+        ):
+            # Streaming/transport failure is not evidence that accepted stale work
+            # has stopped. Leave it owned for status reconciliation before replacement.
+            log.warning("stale evaluation awaiting reconciliation evaluation=%s", claim.evaluation_id)
+            return
+        retry_number = self.repository.retry_attempt_number(claim.evaluation_id)
+        attempt_remaining = retry_number < self.policy.max_attempts
         retry = transient and attempt_remaining
         failure_class = (
             "transient_infrastructure"
@@ -244,7 +292,7 @@ class ValidatorScheduler:
             failure_class=failure_class,
             public_error_code=marker or type(exc).__name__,
             retry=retry,
-            retry_delay=self.policy.retry_delay(claim.attempt_number),
+            retry_delay=self.policy.retry_delay(retry_number),
             private_diagnostic_reference=f"diagnostic:{claim.evaluation_id}:{type(exc).__name__}",
         )
         log.warning(
@@ -281,6 +329,14 @@ class ValidatorScheduler:
                 self.repository.adopt(
                     candidate.evaluation_id, now=self.clock(), lease=self.policy.lease
                 )
+                try:
+                    if await self._reconcile_stale_dispatch(claim):
+                        recovered += 1
+                        continue
+                except Exception as exc:
+                    self._persist_error(claim, exc)
+                    recovered += 1
+                    continue
                 try:
                     response = await self.evaluator.start_attempt(candidate.request)
                 except Exception as exc:
@@ -334,6 +390,7 @@ class ValidatorScheduler:
                 self._persist_error(
                     claim,
                     RuntimeError(f"eval server error: {_evaluator_error_code(status)}"),
+                    terminal=True,
                 )
             else:
                 try:

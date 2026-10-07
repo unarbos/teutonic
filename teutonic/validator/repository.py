@@ -168,7 +168,7 @@ class ValidatorRepository:
         with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
-                SELECT c.competition_id, c.name AS competition_name,
+                SELECT c.competition_id, c.name AS competition_name, c.competition_key,
                        (SELECT ec.config_version FROM control_plane.evaluation_configs ec
                          WHERE ec.competition_id=c.competition_id AND ec.active) AS config_version,
                        COALESCE(c.current_reign_id, main.current_reign_id) AS current_reign_id,
@@ -262,6 +262,12 @@ class ValidatorRepository:
             if row is None:
                 return None
             frozen_retry = row["previous_state"] == "retryable_failure" and row["previous_request"]
+            if (
+                row["competition_key"] != "main"
+                and row["previous_started_at"] is not None
+                and row["previous_king_reign_id"] != row["current_reign_id"]
+            ):
+                frozen_retry = False
             if not frozen_retry and (
                 row["competition_name"] != self.competition
                 or (row["config_version"] and row["config_version"] != policy.dataset_version)
@@ -282,10 +288,8 @@ class ValidatorRepository:
             if row["next_retry_at"] is not None and row["next_retry_at"] > now:
                 return None
 
-            # Dispatch failures happen before the evaluator accepts the job. Reclaim the
-            # same durable attempt and request identity instead of spending a miner retry.
-            # Reposting this request is safe because the evaluator binds eval_id to the
-            # original request and returns the existing job after an ambiguous response.
+            # Missing started_at does not prove non-acceptance. Reclaim the exact
+            # identity; the scheduler reconciles stale split requests before dispatch.
             if row["previous_state"] == "retryable_failure" and row["previous_started_at"] is None:
                 request = EvaluationRequestV2.from_mapping(row["previous_request"])
                 evaluation_id = str(row["previous_evaluation_id"])
@@ -327,7 +331,12 @@ class ValidatorRepository:
                 )
 
             attempt_number = int(row["previous_attempt"] or 0) + 1
-            if attempt_number > policy.max_attempts:
+            superseded = cursor.execute(
+                """SELECT count(*) AS n FROM control_plane.evaluations
+                    WHERE upload_id = %s AND public_error_code = 'stale_king'""",
+                (row["upload_id"],),
+            ).fetchone()["n"]
+            if attempt_number - superseded > policy.max_attempts:
                 cursor.execute(
                     """
                     UPDATE control_plane.uploads
@@ -453,6 +462,96 @@ class ValidatorRepository:
             request=request.request_payload,
         )
 
+    def retry_attempt_number(self, evaluation_id: str) -> int:
+        """Baseline replacements retain history but do not spend failure retries."""
+        row = self.connection.execute(
+            """SELECT e.attempt_number - (
+                   SELECT count(*) FROM control_plane.evaluations old
+                    WHERE old.upload_id = e.upload_id
+                      AND old.attempt_number < e.attempt_number
+                      AND old.public_error_code = 'stale_king')
+                 FROM control_plane.evaluations e WHERE e.evaluation_id = %s""",
+            (evaluation_id,),
+        ).fetchone()
+        return int(row[0])
+
+    def _split_baseline_changed(self, cursor, row) -> bool:
+        current = cursor.execute(
+            """SELECT c.competition_key,
+                      COALESCE(c.current_reign_id, main.current_reign_id) AS reign_id
+                 FROM control_plane.competitions c
+                 JOIN control_plane.competitions main
+                   ON main.competition_id = COALESCE(c.main_competition_id, c.competition_id)
+                WHERE c.competition_id = %s FOR UPDATE OF c, main""",
+            (row["competition_id"],),
+        ).fetchone()
+        return (
+            current["competition_key"] != "main"
+            and current["reign_id"] != row["claimed_king_reign_id"]
+        )
+
+    def dispatch_baseline(self, evaluation_id: str) -> str:
+        """Revalidate split dispatch, including claims recovered across a restart."""
+        self._require_lock()
+        with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
+            row = cursor.execute(
+                """SELECT e.*, c.competition_key FROM control_plane.evaluations e
+                     JOIN control_plane.competitions c USING (competition_id)
+                    WHERE e.evaluation_id = %s""",
+                (evaluation_id,),
+            ).fetchone()
+            if row["competition_key"] == "main":
+                return "current"
+            # claim_next already gates new claims. Recovered claims must also wait
+            # for promotion/coronation before resolving their effective baseline.
+            pending = cursor.execute(
+                """SELECT 1 FROM control_plane.uploads u
+                     JOIN control_plane.registrations r USING (registration_id)
+                    WHERE r.netuid = %s AND u.chain_generation = %s
+                      AND u.state IN ('accepted_pending_promotion', 'promoted') LIMIT 1""",
+                (self.netuid, self.chain_generation),
+            ).fetchone()
+            if pending:
+                return "pending"
+            return "stale" if self._split_baseline_changed(cursor, row) else "current"
+
+    def _requeue_stale(self, cursor, row, *, now: datetime) -> None:
+        # Keep immutable requests and any completed verdict for the audit trail.
+        cursor.execute(
+            """UPDATE control_plane.evaluations
+                  SET public_error_code = 'stale_king',
+                      state = CASE WHEN state = 'completed' THEN state ELSE 'terminal_failure' END,
+                      verdict = COALESCE(verdict, 'failed'),
+                      verdict_summary = COALESCE(verdict_summary, '{"error_code":"stale_king"}'::jsonb),
+                      completed_at = COALESCE(completed_at, %s), lease_expires_at = NULL,
+                      next_retry_at = NULL, updated_at = clock_timestamp()
+                WHERE evaluation_id = %s""",
+            (now, row["evaluation_id"]),
+        )
+        cursor.execute(
+            """UPDATE control_plane.uploads u
+                  SET state = 'retry_pending', failure_code = 'stale_king',
+                      updated_at = clock_timestamp()
+                WHERE u.upload_id = %s AND NOT EXISTS (
+                    SELECT 1 FROM control_plane.evaluations e
+                     WHERE e.upload_id = u.upload_id AND e.attempt_number > %s)""",
+            (row["upload_id"], row["attempt_number"]),
+        )
+
+    def requeue_stale_dispatch(self, evaluation_id: str, *, now: datetime) -> None:
+        """Call only after the evaluator confirms this identity is absent."""
+        self._require_lock()
+        with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
+            row = cursor.execute(
+                "SELECT * FROM control_plane.evaluations WHERE evaluation_id = %s FOR UPDATE",
+                (evaluation_id,),
+            ).fetchone()
+            if row["state"] != "claimed" or row["owner_instance_id"] != self.instance_id:
+                raise LeaseLostError("evaluation is no longer owned")
+            if not self._split_baseline_changed(cursor, row):
+                raise SchedulerInvariantError("dispatch baseline is no longer stale")
+            self._requeue_stale(cursor, row, now=now)
+
     def start_evaluating(
         self, evaluation_id: str, *, evaluator_job_id: str, now: datetime, lease: timedelta
     ) -> None:
@@ -557,7 +656,7 @@ class ValidatorRepository:
                     raise SchedulerInvariantError(
                         "terminal evaluation replay conflicts with verdict"
                     )
-                return str(row["verdict"])
+                return "stale_king" if row["public_error_code"] == "stale_king" else str(row["verdict"])
             if row["owner_instance_id"] != self.instance_id or row["state"] not in {
                 "claimed",
                 "evaluating",
@@ -598,6 +697,9 @@ class ValidatorRepository:
                 """,
                 (upload_state, row["upload_id"]),
             )
+            if self._split_baseline_changed(cursor, row):
+                self._requeue_stale(cursor, row, now=now)
+                return "stale_king"
             if accepted or publish_non_winning:
                 # A digest owns one public artifact. Reuse its storage provenance,
                 # but associate a new win with the new evaluation. Crowning must
@@ -671,6 +773,9 @@ class ValidatorRepository:
                 return str(row["state"])
             if row["owner_instance_id"] != self.instance_id:
                 raise LeaseLostError("evaluation is no longer owned")
+            if self._split_baseline_changed(cursor, row):
+                self._requeue_stale(cursor, row, now=now)
+                return "retry_pending"
             target = "retryable_failure" if retry else "terminal_failure"
             upload_state = (
                 "retry_pending"
@@ -724,7 +829,7 @@ class ValidatorRepository:
         retry_delay: timedelta,
         private_diagnostic_reference: str | None = None,
     ) -> None:
-        """Defer a job the evaluator has not accepted without consuming its attempt."""
+        """Defer unconfirmed dispatch, retaining identity for ambiguous acceptance."""
         self._require_lock()
         with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
@@ -1119,7 +1224,7 @@ class ValidatorRepository:
             cursor.execute(
                 """
                 SELECT p.*, e.upload_id AS winning_upload_id,
-                       winner_model.model_digest AS evaluated_model_digest, e.competition_id, e.claimed_king_reign_id, e.policy_version, e.verdict,
+                       winner_model.model_digest AS evaluated_model_digest, e.competition_id, e.claimed_king_reign_id, e.policy_version, e.verdict, e.attempt_number,
                        u.signalling_hotkey, r.uid, c.current_reign_id, c.next_reign_number,
                        c.competition_key, main.competition_id AS main_id,
                        main.current_reign_id AS main_reign_id, main.reward_main_hotkeys
@@ -1159,6 +1264,11 @@ class ValidatorRepository:
                 )
                 return None
             if (row["current_reign_id"] or row["main_reign_id"]) != row["claimed_king_reign_id"]:
+                if row["competition_key"] != "main":
+                    self._requeue_stale(
+                        cursor, {**row, "upload_id": row["winning_upload_id"]}, now=now
+                    )
+                    return None
                 cursor.execute(
                     """
                     UPDATE control_plane.uploads

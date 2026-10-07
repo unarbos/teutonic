@@ -204,6 +204,56 @@ class DispatchOutageEvaluator(FakeEvaluator):
         return {"eval_id": parsed.eval_id, "duplicate": False}
 
 
+class AbsentEvaluator(FakeEvaluator):
+    def __init__(self, result):
+        super().__init__(result)
+        self.lookups = []
+
+    async def status(self, eval_id):
+        self.lookups.append(eval_id)
+        raise EvaluatorJobNotFoundError(eval_id)
+
+
+class AcceptedEvaluator(FakeEvaluator):
+    def __init__(self, request, result, *, state="running"):
+        super().__init__(result)
+        self.started = [request]
+        self.posts = []
+        self.lookups = []
+        self.state = state
+
+    async def start_attempt(self, request):
+        self.posts.append(request)
+        parsed = EvaluationRequestV2.from_mapping(request)
+        for existing in self.started:
+            if existing["evaluation_id"] == request["evaluation_id"]:
+                assert existing == request, "payload mutated under existing evaluator identity"
+                return {"eval_id": parsed.eval_id, "duplicate": True}
+        return await super().start_attempt(request)
+
+    async def status(self, eval_id):
+        self.lookups.append(eval_id)
+        return {"state": self.state, "verdict": self.result(self.started[-1]), "code": "worker_lost"}
+
+
+class InterruptedEvaluator(AcceptedEvaluator):
+    def __init__(self, request, result, *, fail_status):
+        super().__init__(request, result)
+        self.fail_status = fail_status
+        self.interrupted = True
+
+    async def status(self, eval_id):
+        if self.interrupted and self.fail_status:
+            raise ConnectionError("connecterror")
+        return await super().status(eval_id)
+
+    async def events(self, eval_id):
+        if self.interrupted:
+            raise ConnectionError("connecterror")
+        async for event in super().events(eval_id):
+            yield event
+
+
 @unittest.skipUnless(DATABASE_URL and psycopg, "TEUTONIC_TEST_DATABASE_URL and psycopg required")
 class ValidatorSchedulerIntegrationTests(unittest.TestCase):
     @classmethod
@@ -778,6 +828,439 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         )
         return promotion
 
+
+    def _stale_fixture(self, key):
+        # Each subtest gets a fresh database and scheduler lock.
+        self.tearDown()
+        self.setUp()
+        competition = self.competition_id if key == "main" else self._create_specialist(key)
+        self.connection.execute(
+            "UPDATE control_plane.uploads SET state='rejected' WHERE upload_id<>%s",
+            (self.uploads[2],),
+        )
+        self.connection.execute(
+            "UPDATE control_plane.uploads SET competition_key=%s WHERE upload_id=%s",
+            (key, self.uploads[2]),
+        )
+        return competition
+
+    def _replace_test_king(self, competition, digest="e" * 64):
+        row = self.connection.execute(
+            "SELECT current_reign_id,next_reign_number FROM control_plane.competitions WHERE competition_id=%s",
+            (competition,),
+        ).fetchone()
+        self.connection.execute(
+            "UPDATE control_plane.king_reigns SET ended_at=%s,replacement_reason='test' WHERE reign_id=%s",
+            (NOW + timedelta(seconds=1), row[0]),
+        )
+        reign = self.connection.execute(
+            """INSERT INTO control_plane.king_reigns (
+                   competition_id,reign_number,model_digest,public_bucket,public_prefix,
+                   hotkey,uid,previous_reign_id,crowned_at,crowned_finalized_block,operator_provenance)
+               VALUES (%s,%s,%s,'public-models',%s,'replacement',99,%s,%s,110,'test')
+               RETURNING reign_id""",
+            (competition, row[1], digest, f"models/sha256/{digest}/", row[0], NOW),
+        ).fetchone()[0]
+        self.connection.execute(
+            "UPDATE control_plane.competitions SET current_reign_id=%s,next_reign_number=next_reign_number+1 WHERE competition_id=%s",
+            (reign, competition),
+        )
+        return str(reign)
+
+    def _defer_test_claim(self, claim):
+        self.repository.defer_dispatch(
+            claim.evaluation_id,
+            now=NOW,
+            public_error_code="connecterror",
+            retry_delay=timedelta(0),
+        )
+
+    def _stale_scheduler(self, evaluator, *, max_attempts=1):
+        async def preflight(_request):
+            return None
+
+        return ValidatorScheduler(
+            self.repository,
+            evaluator,
+            policy=policy(max_attempts=max_attempts),
+            preflight=preflight,
+            clock=lambda: NOW + timedelta(minutes=3),
+        )
+
+    @staticmethod
+    def _split_result(request, accepted=False):
+        result = terminal_result(request, accepted=accepted)
+        result["delta_threshold"] = request["limits"]["delta_threshold"]
+        return result
+
+    def test_split_deferred_baselines_refresh_after_fallback_and_existing_king(self):
+        for key in ("code", "math", "text"):
+            for own_king in (False, True):
+                with self.subTest(key=key, own_king=own_king):
+                    competition = self._stale_fixture(key)
+                    if own_king:
+                        self._replace_test_king(competition, "d" * 64)
+                    first = self.repository.claim_next(now=NOW, policy=policy(max_attempts=1))
+                    self._defer_test_claim(first)
+                    reign = self._replace_test_king(competition)
+                    evaluator = AbsentEvaluator(self._split_result)
+                    scheduler = self._stale_scheduler(evaluator)
+                    self.assertTrue(asyncio.run(scheduler.run_once()))
+                    self.assertEqual(evaluator.lookups, [first.eval_id])
+                    self.assertEqual(evaluator.started, [])
+                    self.assertTrue(asyncio.run(scheduler.run_once()))
+                    self.assertEqual(len(evaluator.started), 1)
+                    fresh = evaluator.started[0]
+                    self.assertNotEqual(fresh["evaluation_id"], first.evaluation_id)
+                    self.assertEqual(fresh["king"]["expected_digest"], "e" * 64)
+                    self.assertEqual(fresh["limits"]["delta_threshold"], 0.007)
+                    rows = self.connection.execute(
+                        "SELECT claimed_king_reign_id::text,state,public_error_code,request_payload FROM control_plane.evaluations WHERE upload_id=%s ORDER BY attempt_number",
+                        (first.upload_id,),
+                    ).fetchall()
+                    self.assertEqual(len(rows), 2)
+                    self.assertEqual(rows[0][1:3], ("terminal_failure", "stale_king"))
+                    self.assertEqual(rows[0][3], first.request)
+                    self.assertEqual(rows[1][:3], (reign, "completed", None))
+                    self.assertEqual(
+                        self.repository.retry_attempt_number(fresh["evaluation_id"]), 1
+                    )
+
+    def test_split_unchanged_deferred_baseline_preserves_identity(self):
+        for key in ("code", "math", "text", "main"):
+            with self.subTest(key=key):
+                self._stale_fixture(key)
+                first = self.repository.claim_next(now=NOW, policy=policy())
+                self._defer_test_claim(first)
+                evaluator = AbsentEvaluator(self._split_result)
+                self.assertTrue(asyncio.run(self._stale_scheduler(evaluator).run_once()))
+                self.assertEqual(evaluator.started, [first.request])
+                self.assertEqual(evaluator.lookups, [])
+
+    def test_split_stale_dispatch_reconciles_accepted_work_before_replacement(self):
+        for key in ("code", "math", "text"):
+            for state in ("running", "completed", "failed"):
+                with self.subTest(key=key, state=state):
+                    competition = self._stale_fixture(key)
+                    first = self.repository.claim_next(now=NOW, policy=policy())
+                    self._defer_test_claim(
+                        first
+                    )  # POST accepted, response lost: started_at is NULL.
+                    self._replace_test_king(competition)
+                    evaluator = AcceptedEvaluator(first.request, self._split_result, state=state)
+                    scheduler = self._stale_scheduler(evaluator)
+                    self.assertTrue(asyncio.run(scheduler.run_once()))
+                    self.assertEqual(evaluator.posts, [])
+                    self.assertEqual(evaluator.lookups, [first.eval_id])
+                    row = self.connection.execute(
+                        "SELECT state,failure_code FROM control_plane.uploads WHERE upload_id=%s",
+                        (first.upload_id,),
+                    ).fetchone()
+                    self.assertEqual(row, ("retry_pending", "stale_king"))
+                    self.assertTrue(asyncio.run(scheduler.run_once()))
+                    self.assertEqual(len(evaluator.posts), 1)
+                    self.assertNotEqual(evaluator.posts[0]["evaluation_id"], first.evaluation_id)
+
+    def test_split_ambiguous_status_and_stream_failures_preserve_identity(self):
+        for fail_status in (True, False):
+            with self.subTest(fail_status=fail_status):
+                competition = self._stale_fixture("code")
+                first = self.repository.claim_next(now=NOW, policy=policy())
+                self._defer_test_claim(first)
+                self._replace_test_king(competition)
+                evaluator = InterruptedEvaluator(
+                    first.request, self._split_result, fail_status=fail_status
+                )
+                scheduler = self._stale_scheduler(evaluator)
+                self.assertTrue(asyncio.run(scheduler.run_once()))
+                self.assertEqual(evaluator.posts, [])
+                self.assertEqual(
+                    self.connection.execute(
+                        "SELECT count(*) FROM control_plane.evaluations WHERE upload_id=%s",
+                        (first.upload_id,),
+                    ).fetchone()[0],
+                    1,
+                )
+                evaluator.interrupted = False
+                if fail_status:
+                    self.connection.execute(
+                        "UPDATE control_plane.evaluations SET next_retry_at=%s", (NOW,)
+                    )
+                    self.assertTrue(asyncio.run(scheduler.run_once()))
+                else:
+                    self.assertEqual(asyncio.run(scheduler.reconcile()), 1)
+                self.assertEqual(evaluator.posts, [])
+                self.assertEqual(
+                    self.connection.execute(
+                        "SELECT failure_code FROM control_plane.uploads WHERE upload_id=%s",
+                        (first.upload_id,),
+                    ).fetchone()[0],
+                    "stale_king",
+                )
+
+    def test_split_stale_winning_and_losing_results_requeue_and_keep_history(self):
+        for key in ("code", "math", "text"):
+            for accepted in (False, True):
+                with self.subTest(key=key, accepted=accepted):
+                    competition = self._stale_fixture(key)
+                    first = self.repository.claim_next(now=NOW, policy=policy())
+                    reign = self._replace_test_king(competition)
+                    result = self._split_result(first.request, accepted=accepted)
+                    self.assertEqual(
+                        self.repository.complete_verdict(
+                            first.evaluation_id,
+                            result=result,
+                            now=NOW,
+                            publish_non_winning=True,
+                        ),
+                        "stale_king",
+                    )
+                    self.assertEqual(
+                        self.repository.complete_verdict(
+                            first.evaluation_id,
+                            result=result,
+                            now=NOW,
+                            publish_non_winning=True,
+                        ),
+                        "stale_king",
+                    )  # Replay must not create a promotion or overwrite the result.
+                    self.assertEqual(
+                        self.connection.execute(
+                            "SELECT state,verdict_summary,public_error_code FROM control_plane.evaluations WHERE evaluation_id=%s",
+                            (first.evaluation_id,),
+                        ).fetchone(),
+                        ("completed", result, "stale_king"),
+                    )
+                    self.assertEqual(
+                        self.connection.execute(
+                            "SELECT count(*) FROM control_plane.model_promotions"
+                        ).fetchone()[0],
+                        0,
+                    )
+                    fresh = self.repository.claim_next(now=NOW, policy=policy(max_attempts=1))
+                    self.assertEqual(fresh.claimed_king_reign_id, reign)
+                    self.assertNotEqual(fresh.evaluation_id, first.evaluation_id)
+
+    def test_split_known_failure_refreshes_frozen_baseline_but_counts_failure(self):
+        competition = self._stale_fixture("code")
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        self.repository.start_evaluating(
+            first.evaluation_id, evaluator_job_id=first.eval_id, now=NOW, lease=policy().lease
+        )
+        self.repository.fail_attempt(
+            first.evaluation_id,
+            now=NOW,
+            failure_class="transient_infrastructure",
+            public_error_code="worker_lost",
+            retry=True,
+        )
+        reign = self._replace_test_king(competition)
+        second = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertEqual(second.claimed_king_reign_id, reign)
+        self.assertEqual(second.request["king"]["expected_digest"], "e" * 64)
+        self.assertEqual(self.repository.retry_attempt_number(second.evaluation_id), 2)
+
+    def test_split_replacement_preserves_remaining_failure_retry_budget(self):
+        competition = self._stale_fixture("code")
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        self._defer_test_claim(first)
+        self._replace_test_king(competition)
+        scheduler = self._stale_scheduler(AbsentEvaluator(self._split_result), max_attempts=2)
+        asyncio.run(scheduler.run_once())
+        second = self.repository.claim_next(now=NOW, policy=policy(max_attempts=2))
+        self.repository.start_evaluating(
+            second.evaluation_id, evaluator_job_id=second.eval_id, now=NOW, lease=policy().lease
+        )
+        scheduler._persist_error(second, ConnectionError("connecterror"))
+        # A real accepted failure spends one retry; the baseline replacement did not.
+        self.connection.execute(
+            "UPDATE control_plane.evaluations SET next_retry_at=%s WHERE evaluation_id=%s",
+            (NOW, second.evaluation_id),
+        )
+        third = self.repository.claim_next(now=NOW, policy=policy(max_attempts=2))
+        self.assertEqual(self.repository.retry_attempt_number(third.evaluation_id), 2)
+        scheduler._persist_error(third, ConnectionError("connecterror"))
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT state FROM control_plane.uploads WHERE upload_id=%s", (first.upload_id,)
+            ).fetchone()[0],
+            "evaluation_failed",
+        )
+
+    def test_split_promotion_and_coronation_gate_deferred_dispatch(self):
+        for key in ("code", "math", "text"):
+            with self.subTest(key=key):
+                self._stale_fixture(key)
+                deferred = self.repository.claim_next(now=NOW, policy=policy())
+                self._defer_test_claim(deferred)
+                self.connection.execute(
+                    "UPDATE control_plane.uploads SET ready_finalized_block=103 WHERE upload_id=%s",
+                    (deferred.upload_id,),
+                )
+                self.connection.execute(
+                    "UPDATE control_plane.uploads SET state='ready_for_evaluation',competition_key=%s WHERE upload_id=%s",
+                    (key, self.uploads[1]),
+                )
+                winner = self.repository.claim_next(now=NOW, policy=policy())
+                self.repository.complete_verdict(
+                    winner.evaluation_id,
+                    result=terminal_result(winner.request, accepted=True),
+                    now=NOW,
+                    publish_non_winning=False,
+                )
+                self.assertIsNone(self.repository.claim_next(now=NOW, policy=policy()))
+                promotion = self._accept_and_promote(winner)
+                self.assertIsNone(self.repository.claim_next(now=NOW, policy=policy()))
+                self.connection.execute(
+                    "UPDATE control_plane.uploads SET state='promoted' WHERE upload_id=%s",
+                    (winner.upload_id,),
+                )
+                self.assertIsNone(self.repository.claim_next(now=NOW, policy=policy()))
+                reign = self._crown_test_promotion(promotion)
+                evaluator = AbsentEvaluator(self._split_result)
+                scheduler = self._stale_scheduler(evaluator)
+                asyncio.run(scheduler.run_once())
+                asyncio.run(scheduler.run_once())
+                self.assertEqual(len(evaluator.started), 1)
+                self.assertEqual(
+                    evaluator.started[0]["king"]["expected_digest"],
+                    winner.request["challenger"]["expected_digest"],
+                )
+                self.assertEqual(
+                    self.connection.execute(
+                        "SELECT claimed_king_reign_id::text FROM control_plane.evaluations WHERE evaluation_id=%s",
+                        (evaluator.started[0]["evaluation_id"],),
+                    ).fetchone()[0],
+                    reign,
+                )
+
+    def _crown_test_promotion(self, promotion):
+        return self.repository.crown_promoted_winner(
+            str(promotion),
+            now=NOW,
+            crowned_finalized_block=110,
+            policy_hotkeys=["hotkey-2"],
+            target_hotkeys=["hotkey-2"],
+            target_uids=[2],
+            normalized_weights=[1.0],
+        )
+
+    def test_split_stale_coronation_requeues_without_charging_retry(self):
+        competition = self._stale_fixture("code")
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        promotion = self._accept_and_promote(first)
+        reign = self._replace_test_king(competition)
+        self.assertIsNone(self._crown_test_promotion(promotion))
+        second = self.repository.claim_next(now=NOW, policy=policy(max_attempts=1))
+        self.assertEqual(second.claimed_king_reign_id, reign)
+        self.assertEqual(self.repository.retry_attempt_number(second.evaluation_id), 1)
+        self.assertIsNone(self._crown_test_promotion(promotion))
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT state FROM control_plane.uploads WHERE upload_id=%s", (first.upload_id,)
+            ).fetchone()[0],
+            "evaluation_claimed",
+        )
+
+    def test_split_recovered_claim_waits_for_coronation_then_refreshes(self):
+        competition = self._stale_fixture("code")
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        # A pre-existing claim recovered while another winner awaits coronation.
+        evaluator = AbsentEvaluator(self._split_result)
+        scheduler = self._stale_scheduler(evaluator)
+        for state in ("accepted_pending_promotion", "promoted"):
+            self.connection.execute(
+                "UPDATE control_plane.uploads SET state=%s WHERE upload_id=%s",
+                (state, self.uploads[1]),
+            )
+            self.assertEqual(asyncio.run(scheduler.reconcile()), 1)
+            self.assertEqual(evaluator.started, [])
+            self.assertEqual(evaluator.lookups, [])
+        self._replace_test_king(competition)
+        self.connection.execute(
+            "UPDATE control_plane.uploads SET state='accepted' WHERE upload_id=%s",
+            (self.uploads[1],),
+        )
+        self.assertEqual(asyncio.run(scheduler.reconcile()), 1)
+        self.assertEqual(evaluator.lookups, [first.eval_id])
+        self.assertTrue(asyncio.run(scheduler.run_once()))
+        self.assertEqual(len(evaluator.started), 1)
+
+    def test_split_uses_main_only_while_it_has_no_king(self):
+        for own_king in (False, True):
+            with self.subTest(own_king=own_king):
+                competition = self._stale_fixture("text")
+                if own_king:
+                    self._replace_test_king(competition, "d" * 64)
+                first = self.repository.claim_next(now=NOW, policy=policy())
+                self._defer_test_claim(first)
+                self._replace_test_king(self.competition_id)
+                evaluator = AbsentEvaluator(self._split_result)
+                scheduler = self._stale_scheduler(evaluator)
+                asyncio.run(scheduler.run_once())
+                if own_king:
+                    self.assertEqual(evaluator.started, [first.request])
+                    self.assertEqual(evaluator.lookups, [])
+                else:
+                    self.assertEqual(evaluator.started, [])
+                    asyncio.run(scheduler.run_once())
+                    self.assertEqual(evaluator.started[0]["king"]["expected_digest"], "e" * 64)
+
+    def test_split_lost_post_response_recovers_one_accepted_job(self):
+        competition = self._stale_fixture("code")
+        result = self._split_result
+
+        class LostResponseEvaluator(AcceptedEvaluator):
+            def __init__(self):
+                FakeEvaluator.__init__(self, result)
+                self.posts = []
+                self.lookups = []
+                self.state = "completed"
+
+            async def start_attempt(self, request):
+                response = await super().start_attempt(request)
+                if len(self.posts) == 1:
+                    raise ConnectionError("connecterror: response lost after acceptance")
+                return response
+
+        evaluator = LostResponseEvaluator()
+        scheduler = self._stale_scheduler(evaluator)
+        asyncio.run(scheduler.run_once())
+        original = evaluator.started[0]
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT state,started_at FROM control_plane.evaluations WHERE evaluation_id=%s",
+                (original["evaluation_id"],),
+            ).fetchone(),
+            ("retryable_failure", None),
+        )
+        self._replace_test_king(competition)
+        self.connection.execute("UPDATE control_plane.evaluations SET next_retry_at=%s", (NOW,))
+        asyncio.run(scheduler.run_once())
+        self.assertEqual(evaluator.posts, [original])
+        self.assertEqual(evaluator.started, [original])
+        asyncio.run(scheduler.run_once())
+        self.assertEqual(len(evaluator.started), 2)
+        self.assertEqual(len({p["evaluation_id"] for p in evaluator.started}), 2)
+
+    def test_split_unchanged_ambiguous_acceptance_reposts_exact_identity(self):
+        self._stale_fixture("math")
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        self._defer_test_claim(first)
+        evaluator = AcceptedEvaluator(first.request, self._split_result)
+        asyncio.run(self._stale_scheduler(evaluator).run_once())
+        self.assertEqual(evaluator.posts, [first.request])
+        self.assertEqual(evaluator.started, [first.request])
+
+    def test_main_frozen_retry_behavior_is_unchanged_after_king_change(self):
+        competition = self._stale_fixture("main")
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        self._defer_test_claim(first)
+        self._replace_test_king(competition)
+        evaluator = AbsentEvaluator(self._split_result)
+        asyncio.run(self._stale_scheduler(evaluator).run_once())
+        self.assertEqual(evaluator.started, [first.request])
+        self.assertEqual(evaluator.lookups, [])
 
     def test_next_submission_waits_until_winner_is_crowned(self) -> None:
         first = self.repository.claim_next(now=NOW, policy=policy())
