@@ -384,7 +384,13 @@
     var prefix = "/competitions/" + key + "/";
     card.querySelector('[data-field="manifest"]').href = prefix + "datasets/manifest.json";
     el("specialist-grid").appendChild(card);
-    return { key: key, card: card, prefix: prefix, dashboard: null, failed: false, polling: false, loadingDataset: false };
+    var state = { key: key, card: card, prefix: prefix, dashboard: null, failed: false, polling: false, loadingDataset: false, showErrors: false };
+    var toggle = specialistNode(state, "history-errors-toggle");
+    toggle.addEventListener("click", function () {
+      state.showErrors = !state.showErrors;
+      renderSpecialistHistory(state);
+    });
+    return state;
   });
   function specialistNode(state, field) { return state.card.querySelector('[data-field="' + field + '"]'); }
   function specialistText(state, field, value) { specialistNode(state, field).textContent = value; }
@@ -407,10 +413,21 @@
     specialistText(state, "weight", king ? percent(payout.weight) : "--");
     specialistText(state, "alpha", king ? metric(payout.alpha_per_hour, 3) : "--");
     specialistText(state, "usd", king ? usd(payout.usd_per_hour) : "--");
-    var history = d.history.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
-    specialistText(state, "history-count", history.length + (history.length === 1 ? " RESULT" : " RESULTS"));
+    renderSpecialistHistory(state);
+    specialistText(state, "updated", "PUBLICATION " + age(d.updated_at || d.generated_at));
+  }
+  function renderSpecialistHistory(state) {
+    var toggle = specialistNode(state, "history-errors-toggle");
+    toggle.textContent = state.showErrors ? "HIDE ERRORS" : "SHOW ERRORS";
+    toggle.setAttribute("aria-pressed", state.showErrors ? "true" : "false");
+    if (!state.dashboard) return;
+    var view = TeutonicDashboardV1.historyPresentation(state.dashboard.history || [], state.showErrors);
+    var history = view.rows.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
+    var countLabel = history.length + (history.length === 1 ? " RESULT" : " RESULTS");
+    if (!state.showErrors && view.errorCount) countLabel += " · " + view.errorCount + (view.errorCount === 1 ? " ERROR HIDDEN" : " ERRORS HIDDEN");
+    specialistText(state, "history-count", countLabel);
     var historyBody = specialistNode(state, "history"); clear(historyBody);
-    if (!history.length) emptyRow(historyBody, 6, "NO EVALUATIONS YET");
+    if (!history.length) emptyRow(historyBody, 6, view.errorCount && !state.showErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET");
     history.forEach(function (item, index) {
       var row = document.createElement("tr"), detailKey = state.key + "-" + historyDetailKey(item, index);
       var details = historyShardRow(item, index, detailKey); details.firstElementChild.colSpan = 6;
@@ -418,7 +435,6 @@
       cell(row, metric(item.lcb)); cell(row, metric(item.avg_king_loss, 4)); cell(row, metric(item.avg_challenger_loss, 4)); cell(row, age(item.timestamp), "", date(item.timestamp));
       makeHistoryRowExpandable(row, details, item, detailKey); historyBody.appendChild(row); historyBody.appendChild(details);
     });
-    specialistText(state, "updated", "PUBLICATION " + age(d.updated_at || d.generated_at));
   }
   async function pollSpecialist(state) {
     if (state.polling) return;

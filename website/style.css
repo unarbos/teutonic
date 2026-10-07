@@ -45,6 +45,9 @@
 .specialist-section{margin-top:16px;min-width:0}
 .specialist-subheading{margin-bottom:8px;font-size:9px;color:var(--muted)}
 .specialist-subheading h4{color:var(--ink);font-size:10px}
+.specialist-history-heading{flex-wrap:wrap}
+.specialist-history-heading .section-heading-actions{flex-wrap:wrap;margin-left:auto;text-align:right}
+.specialist-history-heading button{white-space:nowrap}
 .specialist-section p{font-size:10px;overflow-wrap:anywhere}
 .specialist-mix{margin-top:7px;list-style:none;font:10px var(--mono)}
 .specialist-mix li{display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px dotted var(--faint)}
