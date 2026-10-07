@@ -93,7 +93,7 @@ proportion = 0.01
 
 [splits.math]
 n = 30000
-delta_threshold = 0.003
+delta_threshold = 0.002
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/math/manifest.json"
 
 [splits.math.categories.math-dialogue]
@@ -130,7 +130,7 @@ weight = 0.018
 
 [splits.code]
 n = 30000
-delta_threshold = 0.003
+delta_threshold = 0.002
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/code/manifest.json"
 
 [splits.code.categories.reasoning]
@@ -175,7 +175,7 @@ weight = 0.005
 
 [splits.text]
 n = 30000
-delta_threshold = 0.003
+delta_threshold = 0.002
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/text/manifest.json"
 
 [splits.text.categories.txt360-qa]

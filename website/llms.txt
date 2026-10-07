@@ -123,7 +123,8 @@ before proceeding.
    sequence, a paired bootstrap (10,000 resamples, alpha=0.001, fixed
    seed 0) computes the one-sided lower confidence bound (LCB) of
    mean(diff). Accept iff `LCB > delta_threshold`; the initial threshold
-   is 0.003 nats/token, independently configurable in each competition.
+   is 0.003 nats/token for MAIN and 0.002 for MATH, CODE, and TEXT,
+   independently configurable in each competition.
 7. On accept, you are crowned: the dashboard updates, your model is
    published to the public model bucket, and subnet weights refresh.
 

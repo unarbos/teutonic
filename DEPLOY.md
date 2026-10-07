@@ -486,7 +486,7 @@ Each specialist plans 30,000 sequences: 21,000 from its own manifest and 4,500
 from each other manifest. Category percentages apply inside all three allocations.
 Integer quotas use deterministic largest-remainder rounding. The combined sample
 mix produces one paired-bootstrap verdict. Each competition has its own threshold,
-initially 0.003; specialist early stopping is enabled by default. MAIN's existing
+initially 0.002; specialist early stopping is enabled by default. MAIN's existing
 sampling and early-stopping configuration is retained.
 
 Administrative updates are explicit, versioned, and atomic (`--all` changes all
