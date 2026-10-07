@@ -261,10 +261,10 @@ def build_parser() -> argparse.ArgumentParser:
     auth = subparsers.add_parser("auth", help="retrieve and decrypt upload authorization")
     add_selection_argument(auth)
     auth.add_argument("--mailbox-base-url")
-    auth.add_argument("--generation", type=int, default=1)
+    auth.add_argument("--generation", type=int, help="pin a generation; default: latest")
     auth.add_argument("--timeout", type=int, default=600)
 
-    upload = subparsers.add_parser("upload", help="upload a model using saved authorization")
+    upload = subparsers.add_parser("upload", help="refresh authorization and upload a model")
     add_selection_argument(upload)
     upload.add_argument("model_dir", type=Path)
     upload.add_argument("--name", required=True, dest="model_name")
@@ -281,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("model_dir", type=Path)
     submit.add_argument("--name", required=True, dest="model_name")
     submit.add_argument("--mailbox-base-url")
-    submit.add_argument("--generation", type=int, default=1)
+    submit.add_argument("--generation", type=int, help="pin a generation; default: latest")
     submit.add_argument("--auth-timeout", type=int, default=600)
     submit.add_argument("--registration-timeout", type=int, default=600)
     return parser
@@ -378,11 +378,9 @@ def run_auth(
         + [
             "--mailbox-base-url",
             mailbox_url,
-            "--generation",
-            str(args.generation),
             "--timeout",
             str(args.timeout),
-        ],
+        ] + (["--generation", str(args.generation)] if args.generation is not None else []),
         on_mailbox_not_found=stop_if_revoked,
     )
 
@@ -465,7 +463,10 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "auth":
         return run_auth(args, miner, root, settings, wallet_path)
     if args.command == "upload":
-        require_available_eligibility(miner, wallet_path)
+        run_auth(
+            argparse.Namespace(mailbox_base_url=None, generation=None, timeout=600),
+            miner, root, settings, wallet_path,
+        )
         return upload_model.main(
             wallet_args
             + ["--model-dir", str(args.model_dir), "--model-name", args.model_name]

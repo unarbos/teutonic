@@ -368,6 +368,37 @@ Run the system command printed by `pm2 startup`. Secure `~/.pm2/dump.pm2`
 because PM2 can persist process environments there. PostgreSQL already uses
 `restart: unless-stopped` in Compose; ensure Docker itself starts at boot.
 
+## Credential renewal update
+
+This update needs no database migration or GPU evaluator changes. Deploy the
+updated control-host checkout and restart only the access controller:
+
+```bash
+pm2 restart ecosystem.config.js --only teutonic-access-controller --update-env
+pm2 logs teutonic-access-controller --lines 100 --nostream
+pm2 save
+```
+
+The controller checks its configured subnet and chain generation every 60 seconds.
+It schedules seven-day replacement credentials when an active registration's
+published credentials have at most one day left, including those already expired.
+Only active parent tokens for hotkeys whose submission eligibility is unconsumed
+can renew. Revoked authority is never restored. Pending publication jobs are
+retried without creating duplicate generations; expired jobs are completed and
+replaced on a subsequent scan.
+
+Each publication retains its immutable generation object and updates the encrypted
+`mailbox/v1/<registration_id>/latest.bin` alias with cache storage disabled.
+Revocation deletes both generation objects and the alias. No plaintext credentials
+are published. Ensure any custom mailbox cache rules respect `Cache-Control: no-store`.
+
+Miners should update their CLI. `auth` discovers and decrypts the latest generation;
+`upload` and `submit` retrieve it before uploading. An explicit `--generation N`
+still pins a generation. Old registrations without an alias fall back to generation
+one until their first renewal. Existing exported credentials or external S3 clients
+must be refreshed separately; running uploads do not swap credentials mid-transfer.
+Publish the updated website documentation through the normal website deployment.
+
 ## Start another competition generation
 
 1. Back up PostgreSQL.

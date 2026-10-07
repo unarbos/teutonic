@@ -279,7 +279,13 @@ Violate any of these and you burn your hotkey's one shot.
    (default base: https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev)
    and decrypts your temporary, prefix-scoped R2 credential into
    `upload-auth.json` (mode 0600 — never share, commit, or print it;
-   TTL up to 7 days). Then:
+   TTL up to 7 days). Eligible registrations are renewed automatically one day
+   before expiry, including catch-up for credentials that have already expired.
+   Use the current miner CLI: `auth` discovers and decrypts the latest generation;
+   `upload` and `submit` retrieve current credentials before uploading. The same
+   hotkey and upload prefix are retained. Expired secrets/session tokens are
+   replaced, not reactivated. Ready-submitted, deregistered, and quota-revoked
+   registrations cannot renew. Then:
 
 ```bash
 teutonic-miner upload --hotkey h0 --name teutonic-II-110B-<suffix> /path/to/model

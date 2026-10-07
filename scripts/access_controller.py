@@ -37,6 +37,7 @@ stopping = False
 STATUS_LOG_SECONDS = 60.0
 UPLOAD_QUOTA_SCAN_SECONDS = 5.0
 FAILED_MODEL_CLEANUP_SCAN_SECONDS = 5.0
+CREDENTIAL_RENEWAL_SCAN_SECONDS = 60.0
 
 
 def required(name: str) -> str:
@@ -176,6 +177,7 @@ def main() -> int:
         next_chain_scan = 0.0
         next_upload_quota_scan = 0.0
         next_failed_model_cleanup_scan = 0.0
+        next_credential_renewal_scan = 0.0
         next_status_log = 0.0
         mailboxes_reconciled = False
         while not stopping:
@@ -210,6 +212,18 @@ def main() -> int:
                 recovered = repository.recover_expired_jobs(
                     now=datetime.now(timezone.utc)
                 )
+                if time.monotonic() >= next_credential_renewal_scan:
+                    renewed = repository.schedule_credential_renewals(
+                        now=datetime.now(timezone.utc),
+                        netuid=int(required("TEUTONIC_NETUID")),
+                        chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
+                        private_model_bucket=buckets.private_models,
+                    )
+                    next_credential_renewal_scan = (
+                        time.monotonic() + CREDENTIAL_RENEWAL_SCAN_SECONDS
+                    )
+                    if renewed:
+                        log.info("scheduled %d credential renewals", renewed)
                 processed = runner.run_until_idle(maximum_jobs=1000)
                 if (
                     scanned

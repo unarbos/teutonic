@@ -36,6 +36,7 @@ from teutonic.credentials import (
     activation_message,
     activation_signal_payload,
     mailbox_object_key,
+    latest_mailbox_object_key,
 )
 from teutonic.storage.artifacts import model_digest_from_inventory
 
@@ -265,6 +266,93 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         self.runner.run_until_idle(propagate=True)
         return registration
 
+    def renew(self, now):
+        return self.repository.schedule_credential_renewals(
+            now=now, netuid=3, chain_generation="phase4-chain", private_model_bucket="private",
+        )
+
+    def test_automatic_renewal_and_expired_credentials_catchup(self):
+        registration = self.activate()
+        original = MailboxCipher.decrypt_for_test(
+            self.s3.objects[("mailbox", latest_mailbox_object_key(registration))], self.miner,
+        )
+        self.assertEqual(self.renew(NOW + timedelta(days=5)), 0)
+        now = NOW + timedelta(days=6)
+        self.assertEqual(self.renew(now), 1)
+        self.assertEqual(self.renew(now), 0)
+        self.assertEqual(self.repository.request_credential_rotation(
+            registration, now=now, credential_ttl=timedelta(days=7), private_model_bucket="private",
+        ), 2)
+        self.runner.clock = lambda: now
+        self.runner.run_until_idle(propagate=True)
+        renewed = MailboxCipher.decrypt_for_test(
+            self.s3.objects[("mailbox", latest_mailbox_object_key(registration))], self.miner,
+        )
+        self.assertEqual(renewed['credential_generation'], 2)
+        self.assertEqual(renewed['access_key_id'], original['access_key_id'])
+        self.assertEqual(renewed['allowed_prefix'], original['allowed_prefix'])
+        self.assertNotEqual(renewed['secret_access_key'], original['secret_access_key'])
+        self.assertNotEqual(renewed['session_token'], original['session_token'])
+        self.assertEqual(datetime.fromisoformat(renewed['expires_at']), now + timedelta(days=7))
+        self.assertEqual(self.renew(now), 0)
+        now = NOW + timedelta(days=14)
+        self.assertEqual(self.renew(now), 1)
+        self.runner.run_until_idle(propagate=True)
+        self.assertEqual(MailboxCipher.decrypt_for_test(
+            self.s3.objects[("mailbox", latest_mailbox_object_key(registration))], self.miner,
+        )['credential_generation'], 3)
+
+    def test_expired_publication_job_does_not_block_fresh_generation(self):
+        registration = self.activate()
+        self.repository.request_credential_rotation(
+            registration, now=NOW, credential_ttl=timedelta(days=7), private_model_bucket="private",
+        )
+        now = NOW + timedelta(days=9)
+        self.runner.clock = lambda: now
+        self.assertEqual(self.renew(now), 0)
+        self.runner.run_until_idle(propagate=True)
+        self.assertNotIn(("mailbox", mailbox_object_key(registration, 2)), self.s3.objects)
+        self.assertEqual(self.renew(now), 1)
+        self.runner.run_until_idle(propagate=True)
+        self.assertEqual(MailboxCipher.decrypt_for_test(
+            self.s3.objects[("mailbox", latest_mailbox_object_key(registration))], self.miner,
+        )['credential_generation'], 3)
+
+    def test_renewal_does_not_restore_quota_revoked_or_deregistered_authority(self):
+        registration = self.activate()
+        self.assertEqual(self.renew(NOW + timedelta(days=6)), 1)
+        self.repository.request_upload_quota_revocation(
+            registration, observed_bytes=2, limit_bytes=1, now=NOW,
+        )
+        self.assertEqual(self.renew(NOW + timedelta(days=10)), 0)
+        self.runner.run_until_idle(propagate=True)
+        self.assertEqual(self.renew(NOW + timedelta(days=10)), 0)
+        self.assertNotIn(("mailbox", latest_mailbox_object_key(registration)), self.s3.objects)
+        self.assertNotIn(("mailbox", mailbox_object_key(registration, 2)), self.s3.objects)
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM control_plane.controller_jobs WHERE state = 'retry_pending'"
+        ).fetchone()[0], 0)
+        self.repository.apply_finalized_snapshot(self.snapshot(101, None))
+        self.assertEqual(self.renew(NOW + timedelta(days=10)), 0)
+
+    def test_latest_publication_retry_preserves_generation_and_ciphertext(self):
+        registration = self.activate()
+        now = NOW + timedelta(days=6)
+        self.runner.clock = lambda: now
+        self.assertEqual(self.renew(now), 1)
+        publish_latest = self.runner.mailbox_store.publish_latest
+        def fail(*args):
+            raise RuntimeError('temporary mailbox failure')
+        self.runner.mailbox_store.publish_latest = fail
+        self.runner.run_until_idle()
+        ciphertext = self.s3.objects[("mailbox", mailbox_object_key(registration, 2))]
+        self.assertEqual(self.renew(now), 0)
+        self.runner.mailbox_store.publish_latest = publish_latest
+        now += timedelta(seconds=10)
+        self.runner.run_until_idle(propagate=True)
+        self.assertEqual(self.s3.objects[("mailbox", latest_mailbox_object_key(registration))], ciphertext)
+        self.assertEqual(self.renew(now), 0)
+
     def test_full_one_shot_lifecycle_replay_rotation_and_immutable_snapshot(self) -> None:
         partial = replace(self.snapshot(100, self.hotkey), complete=False)
         with self.assertRaises(ControllerInvariantError):
@@ -326,6 +414,10 @@ class AccessControllerIntegrationTests(unittest.TestCase):
                 "Parts": [],
             }
         )
+        self.repository.request_credential_rotation(
+            registration, now=NOW + timedelta(minutes=2),
+            credential_ttl=timedelta(days=7), private_model_bucket="private",
+        )
         upload_id = self.repository.accept_ready_signal(
             ReadySignal.parse(
                 f"r2ready:v1|{registration}|{manifest.manifest_sha256}",
@@ -359,6 +451,12 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(token_state, "revoked")
         self.assertEqual(len(self.gateway.revoked), 1)
+        self.assertNotIn(("mailbox", mailbox_object_key(registration, 3)), self.s3.objects)
+        self.assertEqual(self.connection.execute(
+            "SELECT count(*) FROM control_plane.controller_jobs WHERE state = 'retry_pending'"
+        ).fetchone()[0], 0)
+        self.assertEqual(self.renew(NOW + timedelta(days=10)), 0)
+        self.assertNotIn(("mailbox", latest_mailbox_object_key(registration)), self.s3.objects)
         self.assertEqual(self.s3.multipart, [])
         self.assertNotIn(
             ("mailbox", mailbox_object_key(registration, 1)),

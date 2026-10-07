@@ -153,3 +153,9 @@ def mailbox_object_key(registration_id: str, generation: int) -> str:
     if generation < 1:
         raise ValueError("credential generation must start at one")
     return f"mailbox/v1/{registration_id}/generations/{generation:020d}.bin"
+
+
+def latest_mailbox_object_key(registration_id: str) -> str:
+    """Return the mutable alias containing the latest encrypted generation."""
+    _require_hash(registration_id, "registration_id")
+    return f"mailbox/v1/{registration_id}/latest.bin"

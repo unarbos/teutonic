@@ -535,6 +535,49 @@ class AccessControllerRepository:
                 },
             )
 
+    def schedule_credential_renewals(
+        self,
+        *,
+        now: datetime,
+        netuid: int,
+        chain_generation: str,
+        private_model_bucket: str,
+        renew_before: timedelta = timedelta(days=1),
+    ) -> int:
+        """Renew expiring or expired credentials without restoring revoked authority."""
+        self._require_lock()
+        rows = self.connection.execute(
+            """
+            SELECT registration.registration_id
+              FROM control_plane.registrations registration
+              JOIN control_plane.r2_parent_tokens token USING (registration_id)
+             WHERE registration.state = 'active' AND token.state = 'active'
+               AND registration.netuid = %s AND registration.chain_generation = %s
+               AND NOT EXISTS (
+                   SELECT 1 FROM control_plane.uploads upload
+                    WHERE upload.signalling_hotkey = registration.hotkey)
+               AND NOT EXISTS (
+                   SELECT 1 FROM control_plane.controller_jobs job
+                    WHERE job.registration_id = registration.registration_id
+                      AND job.operation = 'publish_credentials'
+                      AND job.state IN ('pending', 'claimed', 'running', 'retry_pending'))
+               AND NOT EXISTS (
+                   SELECT 1 FROM control_plane.credential_generations generation
+                    WHERE generation.registration_id = registration.registration_id
+                      AND generation.state = 'published' AND generation.expires_at > %s)
+             ORDER BY registration.registration_id
+            """,
+            (netuid, chain_generation, now + renew_before),
+        ).fetchall()
+        for row in rows:
+            self.request_credential_rotation(
+                str(row[0]),
+                now=now,
+                credential_ttl=timedelta(days=7),
+                private_model_bucket=private_model_bucket,
+            )
+        return len(rows)
+
     def request_credential_rotation(
         self,
         registration: str,
@@ -568,8 +611,30 @@ class AccessControllerRepository:
                 (row["hotkey"],),
             )
             if cursor.fetchone()["exists"]:
-                raise ControllerInvariantError("hotkey submission eligibility is permanently consumed")
-            generation = int(row["generation"]) + 1
+                raise ControllerInvariantError(
+                    "hotkey submission eligibility is permanently consumed"
+                )
+            pending = cursor.execute(
+                """
+                SELECT (payload->>'generation')::bigint AS generation
+                  FROM control_plane.controller_jobs
+                 WHERE registration_id = %s AND operation = 'publish_credentials'
+                   AND state IN ('pending', 'claimed', 'running', 'retry_pending')
+                 ORDER BY (payload->>'generation')::bigint DESC LIMIT 1
+                """,
+                (registration,),
+            ).fetchone()
+            if pending:
+                return int(pending["generation"])
+            reserved = cursor.execute(
+                """
+                SELECT COALESCE(MAX((payload->>'generation')::bigint), 0) AS generation
+                  FROM control_plane.controller_jobs
+                 WHERE registration_id = %s AND operation = 'publish_credentials'
+                """,
+                (registration,),
+            ).fetchone()
+            generation = max(int(row["generation"]), int(reserved["generation"])) + 1
             self._enqueue_job(
                 cursor,
                 registration_id=registration,

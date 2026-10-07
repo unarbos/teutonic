@@ -90,6 +90,18 @@ teutonic-miner auth --hotkey "$HOTKEY_NAME"
 The public mailbox URL is built in. The encrypted result is written locally as
 `upload-auth.json` with mode `0600`. Never share or commit this file.
 
+Credentials last seven days. While the registration remains eligible, the
+controller renews them one day before expiry and replaces already-expired
+credentials after an outage. The same hotkey and upload prefix are retained;
+the expired secret and session token cannot be reused.
+
+The current CLI discovers and decrypts the latest generation automatically.
+`auth` refreshes the local file, and `upload` and `submit` retrieve current
+credentials before uploading. Update older CLI installations to use automatic
+discovery; `auth --generation N` remains available to select an explicit generation.
+Renewal never restores upload access after a finalized ready submission,
+deregistration, or upload quota revocation.
+
 ### Upload and submit a model
 
 The model directory must contain a complete checkpoint. It must not contain

@@ -243,10 +243,13 @@ class AccessControllerContractTests(unittest.TestCase):
         second = f"mailbox/v1/{self.registration}/generations/{2:020d}.bin"
         s3.put_object(Bucket="dashboard", Key=first, Body=b"first")
         s3.put_object(Bucket="dashboard", Key=second, Body=b"second")
+        latest = f"mailbox/v1/{self.registration}/latest.bin"
+        store.publish_latest(self.registration, b"second")
         s3.put_object(Bucket="dashboard", Key="dashboard.json", Body=b"public")
 
-        self.assertEqual(store.delete((first, second)), 2)
-        self.assertEqual(store.delete((first, second)), 2)
+        self.assertEqual(store.delete((first, second)), 3)
+        self.assertEqual(store.delete((first, second)), 3)
+        self.assertNotIn(("dashboard", latest), s3.objects)
         self.assertNotIn(("dashboard", first), s3.objects)
         self.assertNotIn(("dashboard", second), s3.objects)
         self.assertEqual(s3.objects[("dashboard", "dashboard.json")], b"public")
@@ -277,7 +280,7 @@ class AccessControllerContractTests(unittest.TestCase):
             now=datetime(2026, 8, 20, tzinfo=timezone.utc),
         )
         self.assertTrue(first["revoked"])
-        self.assertEqual(first["mailbox_credentials_removed"], 1)
+        self.assertEqual(first["mailbox_credentials_removed"], 2)
         self.assertEqual(gateway.revoked, ["parent-token"])
         self.assertNotIn(("dashboard", key), s3.objects)
 

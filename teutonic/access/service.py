@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterable
 
 from botocore.exceptions import ClientError
 
-from teutonic.credentials import mailbox_object_key
+from teutonic.credentials import latest_mailbox_object_key, mailbox_object_key
 from teutonic.storage.artifacts import ArtifactIntegrityError
 from teutonic.storage.r2_credentials import create_local_temporary_credentials
 
@@ -24,9 +24,7 @@ log = logging.getLogger("teutonic.access-controller.jobs")
 class MailboxStore:
     """Publish encrypted generations and remove them after authority revocation."""
 
-    _KEY = re.compile(
-        r"^mailbox/v1/[0-9a-f]{64}/generations/[0-9]{20}\.bin$"
-    )
+    _KEY = re.compile(r"^mailbox/v1/[0-9a-f]{64}/(?:generations/[0-9]{20}|latest)\.bin$")
 
     def __init__(self, s3_client: Any, *, bucket: str) -> None:
         if not bucket:
@@ -63,10 +61,23 @@ class MailboxStore:
             Metadata={"sha256": self._digest(ciphertext)},
         )
 
+    def publish_latest(self, registration: str, ciphertext: bytes) -> None:
+        self.s3.put_object(
+            Bucket=self.bucket,
+            Key=latest_mailbox_object_key(registration),
+            Body=ciphertext,
+            ContentType="application/octet-stream",
+            CacheControl="no-store",
+            Metadata={"sha256": self._digest(ciphertext)},
+        )
+
     def delete(self, keys: Iterable[str]) -> int:
         selected = sorted(set(keys))
         if any(not self._KEY.fullmatch(key) for key in selected):
             raise ControllerInvariantError("refusing to delete a non-mailbox object")
+        selected = sorted(
+            set(selected) | {latest_mailbox_object_key(key.split("/")[2]) for key in selected}
+        )
         for offset in range(0, len(selected), 1000):
             batch = selected[offset : offset + 1000]
             response = self.s3.delete_objects(
@@ -283,11 +294,17 @@ class AccessControllerJobRunner:
         registration = str(job["registration_id"])
         context = self.repository.registration_context(registration)
         if context["state"] != "active" or context["token_state"] != "active":
-            raise ControllerInvariantError("registration cannot receive credentials")
+            # Ready or deregistration can arrive while a renewal is queued.
+            # Finish obsolete work without publishing or retrying revoked access.
+            return {"skipped": "upload_authority_inactive"}
         payload = dict(job["payload"])
         generation = int(payload["generation"])
         issued_at = self._timestamp(payload["issued_at"])
         expires_at = self._timestamp(payload["expires_at"])
+        if expires_at <= now:
+            # A long outage may leave a stale publication job. Complete it so the
+            # renewal scan can allocate a fresh generation, never reuse its payload.
+            return {"expired": True, "generation": generation}
         ttl = int((expires_at - issued_at).total_seconds())
         parent_secret = self.secret_cipher.decrypt(bytes(context["encrypted_secret"]))
         credentials = create_local_temporary_credentials(
@@ -346,9 +363,8 @@ class AccessControllerJobRunner:
         )
         key = mailbox_object_key(registration, generation)
         self.mailbox_store.publish(key, ciphertext)
-        self.repository.record_credential_published(
-            registration, generation=generation, now=now
-        )
+        self.mailbox_store.publish_latest(registration, ciphertext)
+        self.repository.record_credential_published(registration, generation=generation, now=now)
         return {"ciphertext_sha256": digest, "mailbox_object_key": key}
 
     def _revoke_parent(self, job: dict[str, Any], *, now: datetime) -> dict[str, Any]:
