@@ -46,7 +46,7 @@
   }
   function historyShardRow(item, index, detailKey) {
     var view = TeutonicDashboardV1.shardPresentation(item), uploadFailure = TeutonicDashboardV1.uploadFailurePresentation(item), run = TeutonicDashboardV1.evaluationHistoryMetricsPresentation(item), decision = TeutonicDashboardV1.decisionPresentation(item), row = document.createElement("tr"), td = cell(row, "", "history-shards-cell"), panel = document.createElement("div"), reason = document.createElement("div"), reasonLabel = document.createElement("strong"), reasonCopy = document.createElement("div"), reasonSummary = document.createElement("p"), reasonDetail = document.createElement("span"), heading = document.createElement("strong"), detailType = uploadFailure ? "Upload failure" : "Evaluation";
-    row.className = "history-shards-row"; row.id = "history-shards-" + detailKey.replace(/[^a-zA-Z0-9_-]/g, "") + "-" + index; row.hidden = !historyExpandedDetails.has(detailKey); row.setAttribute("role", "region"); row.setAttribute("aria-label", detailType + " details for " + (item.challenge_id || item.upload_id || index + 1)); td.colSpan = 10; panel.className = "history-shards-panel";
+    row.className = "history-shards-row"; row.id = "history-shards-" + detailKey.replace(/[^a-zA-Z0-9_-]/g, "") + "-" + index; row.hidden = !historyExpandedDetails.has(detailKey); row.setAttribute("role", "region"); row.setAttribute("aria-label", detailType + " details for " + (item.challenge_id || item.upload_id || index + 1)); td.colSpan = 11; panel.className = "history-shards-panel";
     reason.className = "history-decision " + decision.kind; reasonLabel.textContent = decision.label; reasonSummary.textContent = decision.summary; reasonDetail.textContent = decision.detail; reasonCopy.appendChild(reasonSummary); if (decision.detail) reasonCopy.appendChild(reasonDetail); reason.appendChild(reasonLabel); reason.appendChild(reasonCopy); panel.appendChild(reason);
     if (uploadFailure) {
       var metadata = document.createElement("dl"); metadata.className = "history-error-metadata";
@@ -271,20 +271,65 @@
       body.appendChild(row);
     });
   }
-  function renderHistory(d) {
-    var body = el("history-body"), view = TeutonicDashboardV1.historyPresentation(d.history || [], historyShowErrors), rows = view.rows.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
+  function renderCompetitionStatus(id) {
+    var notes = [], missing = [], stale = [];
+    competitionSources().forEach(function (source) {
+      if (!source.dashboard) missing.push(source.key.toUpperCase());
+      else if (source.failed) stale.push(source.key.toUpperCase());
+    });
+    if (missing.length) notes.push("WAITING FOR DATA: " + missing.join(", "));
+    if (stale.length) notes.push("SHOWING LAST PUBLICATION: " + stale.join(", "));
+    text(id, notes.join(" · ")); el(id).hidden = !notes.length;
+  }
+  function renderHistory() {
+    var history = [];
+    competitionSources().forEach(function (source) {
+      if (source.dashboard) (source.dashboard.history || []).forEach(function (item) {
+        history.push(Object.assign({}, item, { competition: source.key }));
+      });
+    });
+    renderCompetitionStatus("history-status");
+    var body = el("history-body"), view = TeutonicDashboardV1.historyPresentation(history, historyShowErrors), rows = view.rows.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
     var countLabel = rows.length + (rows.length === 1 ? " RESULT" : " RESULTS");
     if (!historyShowErrors && view.errorCount) countLabel += " · " + view.errorCount + (view.errorCount === 1 ? " ERROR HIDDEN" : " ERRORS HIDDEN");
     text("history-count", countLabel);
     var toggle = el("history-errors-toggle"); toggle.textContent = historyShowErrors ? "HIDE ERRORS" : "SHOW ERRORS"; toggle.setAttribute("aria-pressed", historyShowErrors ? "true" : "false");
-    if (!rows.length) return emptyRow(body, 10, view.errorCount && !historyShowErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET"); clear(body);
-    rows.forEach(function (item, index) { var detailKey = historyDetailKey(item, index), tr = document.createElement("tr"), details = historyShardRow(item, index, detailKey); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); cell(tr, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); makeHistoryRowExpandable(tr, details, item, detailKey); body.appendChild(tr); body.appendChild(details); });
+    if (!rows.length) return emptyRow(body, 11, view.errorCount && !historyShowErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET"); clear(body);
+    rows.forEach(function (item, index) { var detailKey = item.competition + "-" + historyDetailKey(item, index), tr = document.createElement("tr"), details = historyShardRow(item, index, detailKey); cell(tr, item.competition.toUpperCase()); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); cell(tr, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); makeHistoryRowExpandable(tr, details, item, detailKey); body.appendChild(tr); body.appendChild(details); });
   }
-  function renderReigns(d) {
-    var body = el("reigns-body"), allRows = (d.king_chain || []).slice().sort(function (a, b) { return (b.reign_number || 0) - (a.reign_number || 0); }), seenHotkeys = {}, rows = [];
-    allRows.forEach(function (item) { var key = item.hotkey || "reign:" + item.reign_number; if (rows.length < 5 && !seenHotkeys[key]) { seenHotkeys[key] = true; rows.push(item); } });
-    text("reign-count", rows.length + " / 5 KINGS · " + allRows.length + " TOTAL REIGNS"); if (!rows.length) return emptyRow(body, 10, "NO REIGNS YET"); clear(body);
-    rows.forEach(function (item, index) { var tr = document.createElement("tr"); cell(tr, index + 1); cell(tr, "#" + number(item.reign_number)); cell(tr, item.uid); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); var modelCell = cell(tr, identity(item), "", item.model_digest); if (item.model_reference) { var link = document.createElement("a"); link.href = new URL(item.model_reference + "manifest.json", MODEL_STORAGE_BASE).href; link.target = "_blank"; link.rel = "noopener"; link.textContent = identity(item); link.title = "Open model manifest"; modelCell.textContent = ""; modelCell.appendChild(link); } cell(tr, percent(item.weight)); cell(tr, metric(item.alpha_per_hour, 3)); cell(tr, usd(item.usd_per_hour)); cell(tr, date(item.crowned_at)); body.appendChild(tr); });
+  function renderReigns() {
+    var body = el("reigns-body"), rows = [];
+    competitionSources().forEach(function (source) {
+      var d = source.dashboard;
+      if (!d) return;
+      if (source.key === "main") {
+        var seenHotkeys = new Set(), count = 0;
+        (d.king_chain || []).slice().sort(function (a, b) { return (b.reign_number || 0) - (a.reign_number || 0); }).forEach(function (item) {
+          var key = item.hotkey || "reign:" + item.reign_number;
+          if (count < 2 && !seenHotkeys.has(key)) {
+            seenHotkeys.add(key); count++;
+            rows.push(Object.assign({}, item, { competition: source.key }));
+          }
+        });
+      } else if (d.king) {
+        rows.push(Object.assign({}, d.king, d.king_payout || {}, { competition: source.key }));
+      } else {
+        rows.push({ competition: source.key, awaitingWinner: true });
+      }
+    });
+    renderCompetitionStatus("reigns-status");
+    var kingCount = rows.filter(function (item) { return !item.awaitingWinner; }).length;
+    text("reign-count", kingCount + (kingCount === 1 ? " KING" : " KINGS"));
+    if (!rows.length) return emptyRow(body, 11, "NO REIGNS YET"); clear(body);
+    rows.forEach(function (item, index) {
+      var tr = document.createElement("tr"); cell(tr, index + 1); cell(tr, item.competition.toUpperCase());
+      if (item.awaitingWinner) {
+        tr.className = "muted";
+        ["--", "--", "--", "--", "AWAITING FIRST WINNER", "--", "--", "--", "--"].forEach(function (value) { cell(tr, value); });
+        body.appendChild(tr); return;
+      }
+      cell(tr, "#" + number(item.reign_number)); cell(tr, item.uid); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); var modelCell = cell(tr, identity(item), "", item.model_digest); if (item.model_reference) { var link = document.createElement("a"); link.href = new URL(item.model_reference + "manifest.json", MODEL_STORAGE_BASE).href; link.target = "_blank"; link.rel = "noopener"; link.textContent = identity(item); link.title = "Open model manifest"; modelCell.textContent = ""; modelCell.appendChild(link); } cell(tr, percent(item.weight)); cell(tr, metric(item.alpha_per_hour, 3)); cell(tr, usd(item.usd_per_hour)); cell(tr, date(item.crowned_at)); body.appendChild(tr);
+    });
   }
   function renderWeightStatus(d) {
     var weight = d.weight_status || {}; text("weight-state", String(weight.state || weight.latest_attempt_state || "NOT SCHEDULED").toUpperCase()); text("weight-block", number(weight.latest_finalized_block || weight.last_attempted_block)); text("weight-next", number(weight.next_due_block)); text("weight-finalized", date(weight.finalized_at));
@@ -361,8 +406,8 @@
       marker.addEventListener("blur", hideTooltip);
     });
   }
-  function render(d) { TeutonicDashboardV1.validate(d); lastPayload = d; mainQueueFailed = false; renderHeader(d); renderReigns(d); renderChart(d); renderSharedEvaluation(); renderHistory(d); renderWeightStatus(d); text("last-refresh", "LAST REFRESH " + new Date().toLocaleTimeString()); el("error-banner").hidden = true; }
-  async function poll() { try { var response = await fetch(ENDPOINT + "?t=" + Date.now(), { cache: "no-store" }); if (!response.ok) throw new Error("dashboard request returned HTTP " + response.status); render(await response.json()); } catch (error) { mainQueueFailed = true; renderSharedEvaluation(); var banner = el("error-banner"); banner.textContent = "DATA REFRESH FAILED — " + error.message + (lastPayload ? " — SHOWING LAST GOOD PUBLICATION" : ""); banner.hidden = false; } }
+  function render(d) { TeutonicDashboardV1.validate(d); lastPayload = d; mainQueueFailed = false; renderHeader(d); renderReigns(); renderChart(d); renderSharedEvaluation(); renderHistory(); renderWeightStatus(d); text("last-refresh", "LAST REFRESH " + new Date().toLocaleTimeString()); el("error-banner").hidden = true; }
+  async function poll() { try { var response = await fetch(ENDPOINT + "?t=" + Date.now(), { cache: "no-store" }); if (!response.ok) throw new Error("dashboard request returned HTTP " + response.status); render(await response.json()); } catch (error) { mainQueueFailed = true; renderSharedEvaluation(); renderReigns(); renderHistory(); var banner = el("error-banner"); banner.textContent = "DATA REFRESH FAILED — " + error.message + (lastPayload ? " — SHOWING LAST GOOD PUBLICATION" : ""); banner.hidden = false; } }
   function setTheme(theme) { document.documentElement.dataset.theme = theme; el("theme-toggle").textContent = theme === "dark" ? "LIGHT" : "DARK"; if (lastPayload) renderChart(lastPayload); }
   var savedTheme = localStorage.getItem("dashboard-theme"); setTheme(savedTheme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")); el("theme-toggle").addEventListener("click", function () { var next = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; localStorage.setItem("dashboard-theme", next); setTheme(next); });
   var smoothSlider = el("smooth-slider"), savedSmoothing = localStorage.getItem("smoothing");
@@ -371,101 +416,60 @@
   updateSmoothControls();
   smoothSlider.addEventListener("input", function () { localStorage.setItem("smoothing", smoothSlider.value); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("smooth-mode-toggle").addEventListener("click", function () { smoothMode = smoothMode === "lowess" ? "normal" : "lowess"; localStorage.setItem("smoothMode", smoothMode); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
-  el("history-errors-toggle").addEventListener("click", function () { historyShowErrors = !historyShowErrors; if (lastPayload) renderHistory(lastPayload); });
+  el("history-errors-toggle").addEventListener("click", function () { historyShowErrors = !historyShowErrors; renderHistory(); });
   el("benchmark-history-toggle").addEventListener("click", function () { benchmarkHistoryVisible = !benchmarkHistoryVisible; if (benchmarkPayload) renderBenchmarks(benchmarkPayload); });
+  var datasetHelp = el("competition-dataset-help"), datasetHelpButton = datasetHelp.querySelector("button"), datasetHelpTooltip = el("competition-dataset-tooltip");
+  function showDatasetHelp() { datasetHelpTooltip.hidden = false; }
+  datasetHelp.addEventListener("pointerenter", showDatasetHelp);
+  datasetHelp.addEventListener("pointerleave", function () { if (document.activeElement !== datasetHelpButton) datasetHelpTooltip.hidden = true; });
+  datasetHelpButton.addEventListener("focus", showDatasetHelp);
+  datasetHelpButton.addEventListener("click", showDatasetHelp);
+  datasetHelpButton.addEventListener("blur", function () { if (!datasetHelp.matches(":hover")) datasetHelpTooltip.hidden = true; });
+  document.addEventListener("keydown", function (event) { if (event.key === "Escape") datasetHelpTooltip.hidden = true; });
   var chartResizeFrame = null;
   window.addEventListener("resize", function () { if (chartResizeFrame != null) cancelAnimationFrame(chartResizeFrame); chartResizeFrame = requestAnimationFrame(function () { chartResizeFrame = null; if (lastPayload) renderChart(lastPayload); }); });
-  var specialists = ["math", "code", "text"].map(function (key) {
-    var card = el("specialist-template").content.firstElementChild.cloneNode(true);
-    card.id = "specialist-" + key;
-    card.querySelector("h3").id = key + "-heading";
-    card.setAttribute("aria-labelledby", key + "-heading");
-    card.querySelector('[data-field="name"]').textContent = key.toUpperCase();
-    var prefix = "/competitions/" + key + "/";
-    card.querySelector('[data-field="manifest"]').href = prefix + "datasets/manifest.json";
-    el("specialist-grid").appendChild(card);
-    var state = { key: key, card: card, prefix: prefix, dashboard: null, failed: false, polling: false, loadingDataset: false, showErrors: false };
-    var toggle = specialistNode(state, "history-errors-toggle");
-    toggle.addEventListener("click", function () {
-      state.showErrors = !state.showErrors;
-      renderSpecialistHistory(state);
-    });
+  var specialists = ["math", "text", "code"].map(function (key) {
+    var state = { key: key, prefix: "/competitions/" + key + "/", dashboard: null, failed: false, polling: false, loadingDataset: false, dataset: null, datasetFailed: false, datasetRow: document.createElement("tr") };
+    state.datasetRow.id = "dataset-" + key;
+    el("competition-datasets").appendChild(state.datasetRow);
+    renderCompetitionDataset(state);
     return state;
   });
-  function specialistNode(state, field) { return state.card.querySelector('[data-field="' + field + '"]'); }
-  function specialistText(state, field, value) { specialistNode(state, field).textContent = value; }
-  function renderSpecialist(state, d) {
-    TeutonicDashboardV1.validate(d);
-    state.dashboard = d;
-    state.failed = false;
-    var king = d.king, payout = d.king_payout || {};
-    specialistText(state, "status", king ? "REIGN #" + number(king.reign_number) : "AWAITING FIRST WINNER");
-    specialistNode(state, "error").hidden = true;
-    var kingNode = specialistNode(state, "king");
-    kingNode.textContent = king ? king.model_repo || "PUBLIC MODEL" : "Awaiting first winner";
-    kingNode.removeAttribute("href");
-    if (king && king.model_reference) kingNode.href = new URL(king.model_reference + "manifest.json", MODEL_STORAGE_BASE).href;
-    var identityNode = specialistNode(state, "identity"); clear(identityNode);
-    if (king) {
-      identityNode.appendChild(document.createTextNode("UID " + king.uid + " · "));
-      identityNode.appendChild(hotkeyLink(king.hotkey, 9, 5));
-    } else identityNode.textContent = "First challengers face the MAIN king.";
-    specialistText(state, "weight", king ? percent(payout.weight) : "--");
-    specialistText(state, "alpha", king ? metric(payout.alpha_per_hour, 3) : "--");
-    specialistText(state, "usd", king ? usd(payout.usd_per_hour) : "--");
-    renderSpecialistHistory(state);
-    specialistText(state, "updated", "PUBLICATION " + age(d.updated_at || d.generated_at));
-  }
-  function renderSpecialistHistory(state) {
-    var toggle = specialistNode(state, "history-errors-toggle");
-    toggle.textContent = state.showErrors ? "HIDE ERRORS" : "SHOW ERRORS";
-    toggle.setAttribute("aria-pressed", state.showErrors ? "true" : "false");
-    if (!state.dashboard) return;
-    var view = TeutonicDashboardV1.historyPresentation(state.dashboard.history || [], state.showErrors);
-    var history = view.rows.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
-    var countLabel = history.length + (history.length === 1 ? " RESULT" : " RESULTS");
-    if (!state.showErrors && view.errorCount) countLabel += " · " + view.errorCount + (view.errorCount === 1 ? " ERROR HIDDEN" : " ERRORS HIDDEN");
-    specialistText(state, "history-count", countLabel);
-    var historyBody = specialistNode(state, "history"); clear(historyBody);
-    if (!history.length) emptyRow(historyBody, 6, view.errorCount && !state.showErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET");
-    history.forEach(function (item, index) {
-      var row = document.createElement("tr"), detailKey = state.key + "-" + historyDetailKey(item, index);
-      var details = historyShardRow(item, index, detailKey); details.firstElementChild.colSpan = 6;
-      cell(row, item.uid); cell(row, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message);
-      cell(row, metric(item.lcb)); cell(row, metric(item.avg_king_loss, 4)); cell(row, metric(item.avg_challenger_loss, 4)); cell(row, age(item.timestamp), "", date(item.timestamp));
-      makeHistoryRowExpandable(row, details, item, detailKey); historyBody.appendChild(row); historyBody.appendChild(details);
-    });
-  }
   async function pollSpecialist(state) {
     if (state.polling) return;
     state.polling = true;
-    try { renderSpecialist(state, await fetchJson(state.prefix + "dashboard.json")); }
-    catch (error) {
-      state.failed = true;
-      var message = specialistNode(state, "error");
-      message.textContent = state.dashboard ? "Refresh failed · showing last publication" : "Competition data unavailable";
-      message.hidden = false;
-      if (!state.dashboard) {
-        specialistText(state, "status", "UNAVAILABLE"); specialistText(state, "king", "Awaiting publication");
-        specialistText(state, "identity", "");
-        emptyRow(specialistNode(state, "history"), 6, "RESULTS UNAVAILABLE");
-      }
-    } finally { state.polling = false; renderSharedEvaluation(); }
+    try {
+      var d = await fetchJson(state.prefix + "dashboard.json");
+      TeutonicDashboardV1.validate(d); state.dashboard = d; state.failed = false;
+    } catch (error) { state.failed = true; }
+    finally { state.polling = false; renderSharedEvaluation(); renderReigns(); renderHistory(); }
+  }
+  function renderCompetitionDataset(state) {
+    var row = state.datasetRow, manifest = state.dataset, view = manifest ? TeutonicDashboardV1.datasetPresentation(manifest) : null;
+    clear(row);
+    var heading = document.createElement("th"); heading.scope = "row"; heading.textContent = state.key.toUpperCase(); row.appendChild(heading);
+    if (!view || state.datasetFailed) {
+      var status = document.createElement("span"); status.className = "dataset-sub";
+      status.textContent = state.datasetFailed ? (view ? "REFRESH FAILED · SHOWING LAST MIX" : "CONFIGURATION UNAVAILABLE · USE THE MANIFEST LINK") : "LOADING DATASET MIX…";
+      heading.appendChild(status);
+    }
+    ["math", "text", "code"].forEach(function (key) {
+      var source = view && view.rows.find(function (item) { return item.name.toLowerCase() === key; });
+      datasetCell(row, source ? datasetWeight(source.normalizedWeight) : "--", source ? number(source.evalSequences) + " SEQ" : "");
+    });
+    cell(row, view ? number(view.evalN) : "--");
+    cell(row, manifest ? "> " + metric(manifest.delta_threshold, 3) : "--");
+    datasetCell(row, "MANIFEST", "", state.prefix + "datasets/manifest.json");
   }
   async function loadSpecialistDataset(state) {
     if (state.loadingDataset) return;
     state.loadingDataset = true;
     try {
-      var manifest = await fetchJson(state.prefix + "datasets/manifest.json"), view = TeutonicDashboardV1.datasetPresentation(manifest);
-      specialistText(state, "policy", number(view.evalN) + " SAMPLES · REQUIRED LCB > " + metric(manifest.delta_threshold, 3));
-      var mix = specialistNode(state, "mix"); clear(mix);
-      view.rows.forEach(function (source) {
-        var row = document.createElement("li"), name = document.createElement("span"), share = document.createElement("strong");
-        name.textContent = source.name.toUpperCase(); share.textContent = percent(source.normalizedWeight) + " · " + number(source.evalSequences);
-        row.appendChild(name); row.appendChild(share); mix.appendChild(row);
-      });
-    } catch (error) { specialistText(state, "policy", "CONFIGURATION UNAVAILABLE · USE THE MANIFEST LINK"); }
-    finally { state.loadingDataset = false; }
+      var manifest = await fetchJson(state.prefix + "datasets/manifest.json");
+      TeutonicDashboardV1.datasetPresentation(manifest);
+      state.dataset = manifest; state.datasetFailed = false;
+    } catch (error) { state.datasetFailed = true; }
+    finally { state.loadingDataset = false; renderCompetitionDataset(state); }
   }
   function pollSpecialists() { specialists.forEach(pollSpecialist); }
   function loadSpecialistDatasets() { specialists.forEach(loadSpecialistDataset); }

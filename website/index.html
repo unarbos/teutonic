@@ -42,6 +42,21 @@
           </table>
         </div>
       </div>
+      <div class="dataset-panel" aria-labelledby="competition-dataset-heading">
+        <div class="dataset-panel-head competition-dataset-head">
+          <h2 id="competition-dataset-heading">COMPETITION DATASET MIX</h2>
+          <span class="dataset-help" id="competition-dataset-help">
+            <button type="button" aria-label="About the competition dataset mix" aria-describedby="competition-dataset-tooltip">(?)</button>
+            <span id="competition-dataset-tooltip" class="dataset-help-tooltip" role="tooltip" hidden>Each competition evaluates models using its own mix of MATH, TEXT, and CODE samples. The planned mix is 70% from its specialty (21,000 sequences) and 15% from each other group (4,500 each). Cells show each group's weight and evaluation sample count; manifests provide the active settings. Until a competition has its first winner, challengers face the MAIN king using that competition's mix and threshold.</span>
+          </span>
+        </div>
+        <div class="dataset-table-wrap">
+          <table class="dataset-table competition-dataset-table">
+            <thead><tr><th scope="col">COMPETITION</th><th scope="col">MATH</th><th scope="col">TEXT</th><th scope="col">CODE</th><th scope="col">SAMPLES</th><th scope="col">REQUIRED LCB</th><th scope="col">SOURCE</th></tr></thead>
+            <tbody id="competition-datasets"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <div id="error-banner" class="error-banner" role="alert" hidden></div>
@@ -89,17 +104,12 @@
       </div>
     </section>
 
-    <section class="specialists" aria-labelledby="specialists-heading">
-      <div class="section-heading"><h2 id="specialists-heading">SPECIALIST COMPETITIONS</h2><span>MATH · CODE · TEXT</span></div>
-      <p class="specialists-intro">Three focused competitions. One shared evaluation queue.</p>
-      <div id="specialist-grid" class="specialist-grid"></div>
-    </section>
-
     <section aria-labelledby="reigns-heading">
-      <div class="section-heading"><h2 id="reigns-heading">MAIN REIGNS</h2><span id="reign-count">0 / 5 KINGS</span></div>
+      <div class="section-heading"><h2 id="reigns-heading">REIGNS</h2><span id="reign-count">0 KINGS</span></div>
+      <p id="reigns-status" class="queue-status muted" role="status" hidden></p>
       <div class="table-wrap reigns-wrap"><table>
-        <thead><tr><th>#</th><th>REIGN</th><th>UID</th><th>HOTKEY</th><th>COLDKEY</th><th>REPO</th><th>WEIGHT</th><th>α / HR</th><th>$ / HR</th><th>CROWNED</th></tr></thead>
-        <tbody id="reigns-body"><tr><td colspan="10" class="empty-cell">NO REIGNS YET</td></tr></tbody>
+        <thead><tr><th>#</th><th>COMPETITION</th><th>REIGN</th><th>UID</th><th>HOTKEY</th><th>COLDKEY</th><th>REPO</th><th>WEIGHT</th><th>α / HR</th><th>$ / HR</th><th>CROWNED</th></tr></thead>
+        <tbody id="reigns-body"><tr><td colspan="11" class="empty-cell">NO REIGNS YET</td></tr></tbody>
       </table></div>
     </section>
 
@@ -132,12 +142,13 @@
 
     <section aria-labelledby="history-heading">
       <div class="section-heading">
-        <h2 id="history-heading">MAIN EVALUATION HISTORY</h2>
+        <h2 id="history-heading">EVALUATION HISTORY</h2>
         <span class="section-heading-actions"><span id="history-count">0 RESULTS</span><button id="history-errors-toggle" type="button" aria-pressed="false">SHOW ERRORS</button></span>
       </div>
+      <p id="history-status" class="queue-status muted" role="status" hidden></p>
       <div class="table-wrap history-wrap"><table class="history-table">
-        <thead><tr><th>UID</th><th>REPO</th><th>HOTKEY</th><th>COLDKEY</th><th>VERDICT</th><th>MU_HAT</th><th>LCB</th><th>KING LOSS</th><th>CHALL LOSS</th><th>WHEN</th></tr></thead>
-        <tbody id="history-body"><tr><td colspan="10" class="empty-cell">NO EVALUATIONS YET</td></tr></tbody>
+        <thead><tr><th>COMPETITION</th><th>UID</th><th>REPO</th><th>HOTKEY</th><th>COLDKEY</th><th>VERDICT</th><th>MU_HAT</th><th>LCB</th><th>KING LOSS</th><th>CHALL LOSS</th><th>WHEN</th></tr></thead>
+        <tbody id="history-body"><tr><td colspan="11" class="empty-cell">NO EVALUATIONS YET</td></tr></tbody>
       </table></div>
     </section>
 
@@ -154,38 +165,6 @@
 
     <footer><span>TEUTONIC / DASHBOARD V1</span><span id="last-refresh">LAST REFRESH --</span></footer>
   </main>
-  <template id="specialist-template">
-    <article class="specialist-card">
-      <header class="specialist-heading"><h3 data-field="name"></h3><span data-field="status">LOADING</span></header>
-      <p data-field="error" class="specialist-error" role="status" hidden></p>
-      <div class="specialist-king">
-        <span class="specialist-label">CURRENT KING</span>
-        <a data-field="king">Loading king…</a>
-        <p data-field="identity" class="muted">—</p>
-      </div>
-      <dl class="specialist-metrics">
-        <div><dt>WEIGHT</dt><dd data-field="weight">--</dd></div>
-        <div><dt>α / HR</dt><dd data-field="alpha">--</dd></div>
-        <div><dt>$ / HR</dt><dd data-field="usd">--</dd></div>
-      </dl>
-      <div class="specialist-section">
-        <div class="specialist-subheading"><h4>DATASET MIX</h4><a data-field="manifest" target="_blank" rel="noopener">MANIFEST</a></div>
-        <p data-field="policy" class="muted">Loading configuration…</p>
-        <ul data-field="mix" class="specialist-mix"></ul>
-      </div>
-      <div class="specialist-section">
-        <div class="specialist-subheading specialist-history-heading">
-          <h4>RESULTS</h4>
-          <span class="section-heading-actions"><span data-field="history-count">—</span><button data-field="history-errors-toggle" type="button" aria-pressed="false">SHOW ERRORS</button></span>
-        </div>
-        <div class="table-wrap specialist-table-wrap"><table aria-label="Specialist evaluation results">
-          <thead><tr><th>UID</th><th>VERDICT</th><th>LCB</th><th>KING LOSS</th><th>CHALL LOSS</th><th>WHEN</th></tr></thead>
-          <tbody data-field="history"><tr><td colspan="6" class="empty-cell">LOADING RESULTS</td></tr></tbody>
-        </table></div>
-      </div>
-      <p data-field="updated" class="specialist-updated muted"></p>
-    </article>
-  </template>
   <script src="dashboard-v1.js"></script>
   <script src="app.js"></script>
 </body>
