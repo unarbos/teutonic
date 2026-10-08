@@ -67,6 +67,7 @@ from teutonic.evaluation import (
     validate_result_v2,
 )
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE, MAX_BATCH_SIZE
+from teutonic.evaluator.module_cache import transformers_module_cache_lock
 from teutonic.storage.artifacts import R2ArtifactResolver
 
 log = logging.getLogger("teutonic.evaluator.engine")
@@ -802,13 +803,14 @@ def load_model_config(snapshot_dir: str, req: EvalRequest, label: str, on_phase=
     try:
         if not meta["has_config"]:
             raise FileNotFoundError(f"{snapshot_dir}/config.json is missing")
-        try:
-            config = AutoConfig.from_pretrained(snapshot_dir, revision=req.revision, trust_remote_code=True)
-            source = "snapshot"
-        except AttributeError as exc:
-            config = load_local_config_from_snapshot(snapshot_dir)
-            source = "snapshot_local_auto_map_compat"
-            log.warning("%s AutoConfig dynamic load failed; loaded config from local code: %s", label, exc)
+        with transformers_module_cache_lock():
+            try:
+                config = AutoConfig.from_pretrained(snapshot_dir, revision=req.revision, trust_remote_code=True)
+                source = "snapshot"
+            except AttributeError as exc:
+                config = load_local_config_from_snapshot(snapshot_dir)
+                source = "snapshot_local_auto_map_compat"
+                log.warning("%s AutoConfig dynamic load failed; loaded config from local code: %s", label, exc)
     except Exception as exc:
         raise RuntimeError(
             f"{label} snapshot is not self-contained enough to load its config/custom code: {exc}"
@@ -1099,7 +1101,7 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
             on_phase({"phase": f"{label}_init_start", "dtype": str(dtype)})
         # Every parameter is populated by the strict checkpoint load below. Skip
         # random initialization, which is prohibitively expensive for 104B models.
-        with init_empty_weights(), no_init_weights():
+        with transformers_module_cache_lock(), init_empty_weights(), no_init_weights():
             model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
     finally:
         torch.set_default_dtype(old_dtype)
