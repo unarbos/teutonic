@@ -373,6 +373,9 @@ def classify_eval_error(exc: BaseException | str) -> tuple[bool, str]:
         return False, "safetensors_reuse_limit"
     if "model_copy" in text:
         return False, "model_copy"
+    for marker in ("dataset_index_download", "evaluator_interrupted"):
+        if marker in text:
+            return True, marker
     if (
         "failed to download shard" in text
         or "s3 shard download failed" in text

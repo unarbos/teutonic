@@ -3,9 +3,16 @@
 import hashlib
 import io
 import json
+import logging
+import random
 import tempfile
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from functools import lru_cache
+from http.client import IncompleteRead
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import numpy as np
@@ -21,6 +28,11 @@ FRAG_DTYPE = np.dtype(
 )
 PTR_DTYPE = np.dtype([("frag_offset", "<i8"), ("n_fragments", "<u2")])
 PAGE_SIZE = 64 * 1024
+log = logging.getLogger(__name__)
+
+
+class DocumentIndexDownloadError(RuntimeError):
+    pass
 
 
 class PinnedObject:
@@ -58,15 +70,49 @@ class PinnedObject:
                 "Accept-Encoding": "identity",
             },
         )
-        with self.opener(request, timeout=120) as response:
-            if (
-                response.status != 206
-                or response.headers.get("Content-Range") != f"bytes {start}-{end}/{self.size}"
-            ):
-                raise RuntimeError("index server did not honor the exact byte range")
-            if response.headers.get("ETag") != self.descriptor["etag"]:
-                raise RuntimeError("document index changed since configuration was pinned")
-            body = response.read(end - start + 2)
+        for attempt in range(5):
+            try:
+                with self.opener(request, timeout=120) as response:
+                    if (
+                        response.status != 206
+                        or response.headers.get("Content-Range") != f"bytes {start}-{end}/{self.size}"
+                    ):
+                        raise RuntimeError("index server did not honor the exact byte range")
+                    if response.headers.get("ETag") != self.descriptor["etag"]:
+                        raise RuntimeError("document index changed since configuration was pinned")
+                    body = response.read(end - start + 2)
+                break
+            except (URLError, TimeoutError, ConnectionError, IncompleteRead) as exc:
+                retry_after = None
+                if isinstance(exc, HTTPError):
+                    if exc.code not in {408, 429, 500, 502, 503, 504}:
+                        raise
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    exc.close()
+                if attempt == 4:
+                    raise DocumentIndexDownloadError(
+                        "document index download exhausted retries"
+                    ) from exc
+                delay = 5 * 2**attempt + random.uniform(0, 1)
+                if retry_after:
+                    try:
+                        delay = max(delay, float(retry_after))
+                    except ValueError:
+                        try:
+                            deadline = parsedate_to_datetime(retry_after)
+                            delay = max(delay, (deadline - datetime.now(timezone.utc)).total_seconds())
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                # Long server cooldowns are retried by the scheduler, not held in a worker.
+                if delay > 120:
+                    raise DocumentIndexDownloadError(
+                        "document index download requires a longer cooldown"
+                    ) from exc
+                log.warning(
+                    "document index download retry attempt=%d delay=%.1fs error=%s",
+                    attempt + 1, delay, type(exc).__name__,
+                )
+                time.sleep(delay)
         if len(body) != end - start + 1:
             raise RuntimeError("truncated document index range")
         self.cache.mkdir(parents=True, exist_ok=True)

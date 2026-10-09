@@ -4,7 +4,7 @@ import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import numpy as np
 import pytest
@@ -27,6 +27,7 @@ from teutonic.evaluator.document_index import (
     PAGE_SIZE,
     PTR_DTYPE,
     DocumentIndex,
+    DocumentIndexDownloadError,
     NpyVector,
     PinnedObject,
     sample_category,
@@ -179,6 +180,101 @@ def test_range_reader_pins_versions_checks_ranges_and_recovers_corrupt_cache(tmp
     server.objects[d["url"]] = b"new contents"
     with pytest.raises(HTTPError):
         reader.read(2 * PAGE_SIZE, 1)
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504, None])
+def test_range_reader_retries_transient_failures_without_changing_pins(tmp_path, monkeypatch, status):
+    from teutonic.evaluator import document_index
+
+    server = RangeServer({"https://index.example/x": b"abcdef"})
+    calls, delays = [], []
+
+    def open_with_failure(request, timeout):
+        calls.append(request)
+        if len(calls) == 1:
+            if status is None:
+                raise URLError("connection reset")
+            raise HTTPError(request.full_url, status, "temporary", {"Retry-After": "12"}, None)
+        return server.open(request, timeout)
+
+    monkeypatch.setattr(document_index.time, "sleep", delays.append)
+    monkeypatch.setattr(document_index.random, "uniform", lambda *_: 0)
+    reader = PinnedObject(server.describe("https://index.example/x"), tmp_path, open_with_failure)
+    assert reader.read(1, 3) == b"bcd"
+    assert delays == [5 if status is None else 12]
+    assert calls[0] is calls[1]
+    assert reader.read(1, 3) == b"bcd"
+    assert len(calls) == 2
+
+
+def test_range_reader_exhaustion_is_bounded_and_does_not_cache_failure(tmp_path, monkeypatch):
+    from teutonic.evaluator import document_index
+
+    server = RangeServer({"https://index.example/x": b"abcdef"})
+    calls, delays = [], []
+
+    def unavailable(request, timeout):
+        calls.append(request)
+        raise HTTPError(request.full_url, 429, "rate limited", {}, None)
+
+    monkeypatch.setattr(document_index.time, "sleep", delays.append)
+    monkeypatch.setattr(document_index.random, "uniform", lambda *_: 0)
+    reader = PinnedObject(server.describe("https://index.example/x"), tmp_path, unavailable)
+    with pytest.raises(DocumentIndexDownloadError, match="exhausted") as error:
+        reader.read(0, 3)
+    assert isinstance(error.value.__cause__, HTTPError)
+    assert len(calls) == 5
+    assert delays == [5, 10, 20, 40]
+    assert not reader.cache.exists()
+
+
+@pytest.mark.parametrize("status", [403, 404, 412])
+def test_range_reader_does_not_retry_permanent_http_failures(tmp_path, monkeypatch, status):
+    from teutonic.evaluator import document_index
+
+    server = RangeServer({"https://index.example/x": b"abcdef"})
+
+    def unavailable(request, timeout):
+        raise HTTPError(request.full_url, status, "permanent", {}, None)
+
+    monkeypatch.setattr(document_index.time, "sleep", lambda _: pytest.fail("unexpected retry"))
+    reader = PinnedObject(server.describe("https://index.example/x"), tmp_path, unavailable)
+    with pytest.raises(HTTPError) as error:
+        reader.read(0, 3)
+    assert error.value.code == status
+
+
+@pytest.mark.parametrize("retry_after, delay", [
+    ("Fri, 09 Oct 2026 20:00:30 GMT", 30),
+    ("invalid", 5),
+    ("300", None),
+])
+def test_range_reader_retry_after_dates_and_long_cooldowns(tmp_path, monkeypatch, retry_after, delay):
+    from datetime import datetime, timezone
+    from teutonic.evaluator import document_index
+
+    server = RangeServer({"https://index.example/x": b"abcdef"})
+    calls, delays = [], []
+
+    def open_with_failure(request, timeout):
+        calls.append(request)
+        if len(calls) == 1:
+            raise HTTPError(request.full_url, 429, "limited", {"Retry-After": retry_after}, None)
+        return server.open(request, timeout)
+
+    monkeypatch.setattr(document_index, "datetime", SimpleNamespace(
+        now=lambda _: datetime(2026, 10, 9, 20, 0, tzinfo=timezone.utc),
+    ))
+    monkeypatch.setattr(document_index.time, "sleep", delays.append)
+    monkeypatch.setattr(document_index.random, "uniform", lambda *_: 0)
+    reader = PinnedObject(server.describe("https://index.example/x"), tmp_path, open_with_failure)
+    if delay is None:
+        with pytest.raises(DocumentIndexDownloadError, match="cooldown"):
+            reader.read(0, 3)
+        assert delays == []
+    else:
+        assert reader.read(0, 3) == b"abc"
+        assert delays == [delay]
 
 
 def test_npy_index_rejects_wrong_dtype_and_truncation(tmp_path):

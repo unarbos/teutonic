@@ -25,6 +25,7 @@ import math
 import multiprocessing as mp
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -73,6 +74,7 @@ from teutonic.evaluation.masking import (
     token_weights,
 )
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE, MAX_BATCH_SIZE
+from teutonic.evaluator.document_index import DocumentIndexDownloadError
 from teutonic.evaluator.document_masking import masked_model_inputs
 from teutonic.evaluator.module_cache import transformers_module_cache_lock
 from teutonic.evaluator import sequence_parallel
@@ -2709,6 +2711,10 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         error_code = (
             "safetensors_reuse_limit"
             if isinstance(exc, SafetensorsReuseLimitError)
+            else "dataset_index_download"
+            if isinstance(exc, DocumentIndexDownloadError)
+            else "evaluator_interrupted"
+            if isinstance(exc, subprocess.CalledProcessError) and exc.returncode in {-2, -15, 130, 143}
             else "evaluation_failed"
         )
         record.state = "failed"
