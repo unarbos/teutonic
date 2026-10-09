@@ -24,6 +24,7 @@
 @media(max-width:640px){.page{padding:16px 12px;gap:16px}.utility-bar{flex-wrap:wrap;gap:4px 0;font-size:11px}.utility-bar>span,.utility-bar>button{width:50%}.utility-bar>span:nth-child(even),.utility-bar>button{text-align:right}#llms-link{position:static;transform:none;order:9;width:auto;margin:4px auto 0}.logo{width:56px;height:56px}.hero h1{font-size:16px}.dataset-panel{margin-top:10px}.dataset-overview{font-size:10px}.eval-provisional{grid-template-columns:repeat(3,minmax(0,1fr))}.eval-provisional .eval-provisional-meta{grid-column:1/-1;border-top:1px dotted var(--faint);text-align:left}.weight-grid{grid-template-columns:1fr 1fr}.weight-grid div:nth-child(-n+2){border-bottom:1px solid var(--faint)}.chart-heading{align-items:flex-start;flex-direction:column;gap:4px}.chart-tools{width:100%;flex-wrap:wrap;justify-content:flex-end}.chart-legend{width:100%}.chart-legend .legend:first-child{margin-left:0}.chart-tools input{width:60px}.chart-shell{height:220px}.bench-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.bench-head{flex-direction:column;gap:4px}.bench-meta{text-align:left}.table-wrap table{min-width:700px}}@media(prefers-reduced-motion:reduce){*{transition:none!important}}
 
 /* Competition summaries share the main dataset and results layout. */
+.dataset-tokenizer{display:block;margin-top:2px;overflow-wrap:anywhere}
 .competition-dataset-head{justify-content:flex-start;gap:7px;z-index:3}
 .dataset-help{display:inline-flex;align-items:center}
 .dataset-help button{padding:0;border:0;background:transparent;color:var(--muted);font:700 11px/1 var(--font);cursor:help}
@@ -40,3 +41,10 @@
 .reigns-wrap th:first-child,.reigns-wrap td:first-child{padding-left:0}
 .reigns-wrap th:last-child,.reigns-wrap td:last-child{padding-right:0}
 .history-wrap .history-table{min-width:1100px}
+.history-heading-bar{align-items:center;flex-wrap:wrap;gap:8px 16px}
+.history-heading-main{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px}
+.history-heading-bar>.section-heading-actions{margin-left:auto}
+.history-filters{display:flex;flex-wrap:wrap;gap:6px}
+.history-filters button{border:var(--border);background:var(--paper);color:var(--ink);padding:3px 8px;font:600 10px/1 var(--font);letter-spacing:.05em;cursor:pointer}
+.history-filters button:hover,.history-filters button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+.history-filters button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}

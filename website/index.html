@@ -141,9 +141,18 @@
     </section>
 
     <section aria-labelledby="history-heading">
-      <div class="section-heading">
-        <h2 id="history-heading">EVALUATION HISTORY</h2>
-        <span class="section-heading-actions"><span id="history-count">0 RESULTS</span><button id="history-errors-toggle" type="button" aria-pressed="false">SHOW ERRORS</button></span>
+      <div class="section-heading history-heading-bar">
+        <div class="history-heading-main">
+          <h2 id="history-heading">EVALUATION HISTORY</h2>
+          <div id="history-competition-filters" class="history-filters" role="group" aria-label="Filter evaluation history by competition">
+            <button type="button" data-competition="all" aria-pressed="true" aria-controls="history-body">ALL</button>
+            <button type="button" data-competition="main" aria-pressed="false" aria-controls="history-body">MAIN</button>
+            <button type="button" data-competition="math" aria-pressed="false" aria-controls="history-body">MATH</button>
+            <button type="button" data-competition="text" aria-pressed="false" aria-controls="history-body">TEXT</button>
+            <button type="button" data-competition="code" aria-pressed="false" aria-controls="history-body">CODE</button>
+          </div>
+        </div>
+        <span class="section-heading-actions"><span id="history-count" aria-live="polite">0 RESULTS</span><button id="history-errors-toggle" type="button" aria-pressed="false">SHOW ERRORS</button></span>
       </div>
       <p id="history-status" class="queue-status muted" role="status" hidden></p>
       <div class="table-wrap history-wrap"><table class="history-table">

@@ -12,6 +12,7 @@
   var benchmarkPayload = null;
   var benchmarkHistoryVisible = false;
   var historyShowErrors = false;
+  var historyCompetition = "all";
   var historyExpandedDetails = new Set();
   var smoothMode = localStorage.getItem("smoothMode") || "lowess";
   if (smoothMode !== "lowess" && smoothMode !== "normal") smoothMode = "lowess";
@@ -143,12 +144,14 @@
   function renderDatasetManifest(manifest) {
     var view = TeutonicDashboardV1.datasetPresentation(manifest), summary = [view.rows.length + (view.rows.length === 1 ? " DATASET" : " DATASETS")];
     if (view.totalTokens) summary.push(compactNumber(view.totalTokens) + " TOKENS");
-    if (view.totalShards) summary.push(number(view.totalShards) + " SHARDS");
     if (view.sequenceLength) summary.push("SEQ LEN " + number(view.sequenceLength));
-    if (view.totalSequences) summary.push(compactNumber(view.totalSequences) + " POSSIBLE SEQ");
     if (view.evalN) summary.push("EVAL SAMPLE " + number(view.evalN) + " SEQ" + (view.evalTokens ? " / " + compactNumber(view.evalTokens) + " TOKENS" : ""));
-    if (view.tokenizer) summary.push(view.tokenizer);
+    summary.push("PLUS ~6M DOCUMENT TOKENS (" + number(2049) + "–" + number(8192) + " TOKENS/DOC)");
     text("dataset-summary", summary.join(" · "));
+    if (view.tokenizer) {
+      var tokenizer = document.createElement("span"); tokenizer.className = "dataset-tokenizer"; tokenizer.textContent = "TOKENIZER: " + view.tokenizer;
+      el("dataset-summary").appendChild(tokenizer);
+    }
     var body = el("dataset-sources"); clear(body);
     if (!view.rows.length) return emptyRow(body, 6, "NO DATASETS IN MANIFEST");
     view.rows.forEach(function (source) {
@@ -271,9 +274,10 @@
       body.appendChild(row);
     });
   }
-  function renderCompetitionStatus(id) {
+  function renderCompetitionStatus(id, competition) {
     var notes = [], missing = [], stale = [];
     competitionSources().forEach(function (source) {
+      if (competition && competition !== "all" && source.key !== competition) return;
       if (!source.dashboard) missing.push(source.key.toUpperCase());
       else if (source.failed) stale.push(source.key.toUpperCase());
     });
@@ -284,11 +288,12 @@
   function renderHistory() {
     var history = [];
     competitionSources().forEach(function (source) {
+      if (historyCompetition !== "all" && source.key !== historyCompetition) return;
       if (source.dashboard) (source.dashboard.history || []).forEach(function (item) {
         history.push(Object.assign({}, item, { competition: source.key }));
       });
     });
-    renderCompetitionStatus("history-status");
+    renderCompetitionStatus("history-status", historyCompetition);
     var body = el("history-body"), view = TeutonicDashboardV1.historyPresentation(history, historyShowErrors), rows = view.rows.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
     var countLabel = rows.length + (rows.length === 1 ? " RESULT" : " RESULTS");
     if (!historyShowErrors && view.errorCount) countLabel += " · " + view.errorCount + (view.errorCount === 1 ? " ERROR HIDDEN" : " ERRORS HIDDEN");
@@ -417,6 +422,15 @@
   smoothSlider.addEventListener("input", function () { localStorage.setItem("smoothing", smoothSlider.value); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("smooth-mode-toggle").addEventListener("click", function () { smoothMode = smoothMode === "lowess" ? "normal" : "lowess"; localStorage.setItem("smoothMode", smoothMode); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("history-errors-toggle").addEventListener("click", function () { historyShowErrors = !historyShowErrors; renderHistory(); });
+  var historyFilters = el("history-competition-filters").querySelectorAll("button");
+  historyFilters.forEach(function (button) {
+    button.addEventListener("click", function () {
+      historyCompetition = button.dataset.competition;
+      historyFilters.forEach(function (filter) { filter.setAttribute("aria-pressed", String(filter === button)); });
+      renderHistory();
+      el("history-body").closest(".history-wrap").scrollTop = 0;
+    });
+  });
   el("benchmark-history-toggle").addEventListener("click", function () { benchmarkHistoryVisible = !benchmarkHistoryVisible; if (benchmarkPayload) renderBenchmarks(benchmarkPayload); });
   var datasetHelp = el("competition-dataset-help"), datasetHelpButton = datasetHelp.querySelector("button"), datasetHelpTooltip = el("competition-dataset-tooltip");
   function showDatasetHelp() { datasetHelpTooltip.hidden = false; }
