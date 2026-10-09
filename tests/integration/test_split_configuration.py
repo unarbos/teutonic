@@ -139,7 +139,10 @@ def test_initialize_dry_run_targeted_update_and_atomic_all(database):
     rows = policies(database)
     assert len(rows) == 4
     assert next(r for r in rows if r["competition_key"] == "main") == original[0]
-    assert all(r["delta_threshold"] == 0.003 for r in rows if r["competition_key"] != "main")
+    assert all(
+        r["delta_threshold"] == chain_config.SPLIT_DEFAULTS[r["competition_key"]]["delta_threshold"]
+        for r in rows if r["competition_key"] != "main"
+    )
     with patch.object(
         admin, "fetch_dataset_manifest", side_effect=AssertionError("unexpected network request")
     ):

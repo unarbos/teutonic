@@ -31,6 +31,7 @@ class EvaluationPolicyConfig:
     shards_per_dataset: int
     batch_size: int = DEFAULT_EVAL_BATCH_SIZE
     dataset_manifests: tuple[DatasetManifestSnapshot, ...] = ()
+    long_documents: Mapping[str, Any] | None = None
     early_stopping: EarlyStoppingPolicy = field(default_factory=EarlyStoppingPolicy)
     lease: timedelta = timedelta(minutes=2)
     retry_base_delay: timedelta = timedelta(seconds=30)
@@ -86,6 +87,7 @@ class EvaluationPolicyConfig:
             delta_threshold=self.delta_threshold,
             manifests=self.dataset_manifests,
             shards_per_dataset=self.shards_per_dataset,
+            long_documents=self.long_documents,
         )
         return pretokenized_dataset_request(
             settings,

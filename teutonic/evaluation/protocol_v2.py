@@ -5,13 +5,14 @@ import json
 import math
 import re
 import threading
+from copy import deepcopy
 from dataclasses import dataclass, field
 from queue import Queue
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
 from .early_stopping import EarlyStoppingPolicy
-
+from .long_documents import validate_long_documents
 
 PROTOCOL_VERSION = "teutonic-evaluator-v2"
 # Validated for single-GPU BF16 MiMo replicas on B300 with 2048 tokens and FA4.
@@ -266,7 +267,7 @@ class EvaluationRequestV2:
             normalized_early_stopping = early_stopping.request_dict()
 
         dataset = _required_mapping(data.get("dataset"), "dataset")
-        _exact_keys(dataset, {"source", "label", "sources"}, "dataset")
+        _exact_keys(dataset, {"source", "label", "sources", "long_documents"}, "dataset")
         if dataset.get("source") != "pretokenized_npy":
             raise ProtocolValidationError("dataset.source must be 'pretokenized_npy'")
         dataset_label = _required_string(dataset.get("label"), "dataset.label")
@@ -314,11 +315,11 @@ class EvaluationRequestV2:
                     raise ProtocolValidationError(f"{shard_path}.url must be public HTTPS")
                 digest = _normalize_digest(shard.get("sha256"), f"{shard_path}.sha256")
                 numeric: dict[str, int] = {}
-                for field in ("size_bytes", "n_tokens"):
-                    number = shard.get(field)
+                for numeric_field in ("size_bytes", "n_tokens"):
+                    number = shard.get(numeric_field)
                     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
-                        raise ProtocolValidationError(f"{shard_path}.{field} must be positive")
-                    numeric[field] = number
+                        raise ProtocolValidationError(f"{shard_path}.{numeric_field} must be positive")
+                    numeric[numeric_field] = number
                 normalized_shard = {"url": url, "sha256": digest, **numeric}
                 # Optional: a validator that stratifies by dataset category sends
                 # the per-shard sequence count, because category weights cannot be
@@ -364,6 +365,16 @@ class EvaluationRequestV2:
             "label": dataset_label,
             "sources": normalized_sources,
         }
+
+        if "long_documents" in dataset:
+            try:
+                long_documents = validate_long_documents(dataset["long_documents"])
+            except (ValueError, TypeError, KeyError) as exc:
+                raise ProtocolValidationError(str(exc)) from exc
+            if long_documents is not None:
+                if {m["name"] for m in long_documents["manifests"]} != names:
+                    raise ProtocolValidationError("long-document sources differ from window sources")
+                normalized_dataset["long_documents"] = deepcopy(long_documents)
 
         normalized_payload = {
             "protocol_version": PROTOCOL_VERSION,

@@ -7,6 +7,16 @@ submission and sends the challenger and current king to a remote GPU evaluator
 for paired cross-entropy scoring. A successful challenger becomes the new king,
 and the validator updates subnet weights and publishes the resulting state.
 
+Evaluation isolates EOS-delimited document fragments inside the sampled windows,
+resets their positions, and excludes predictions across document boundaries.
+Scores are weighted by scored-token counts; bootstrap resamples paired original
+windows. See [masked evaluation setup and GPU checks](DEPLOY.md#document-masked-evaluation).
+
+Evaluation can additionally sample approximately 6M tokens in complete documents
+between 2049 and 8192 tokens, with category-proportional coverage of 2049–4096
+and 4097–8192. It supports MAIN, MATH, CODE and TEXT, with a combined token-weighted verdict
+and separate long-document metrics. See [configuration and GPU validation](DEPLOY.md#additional-long-document-evaluation).
+
 ## Miner CLI
 
 Each hotkey can submit one model. Teutonic requires an Ed25519 hotkey because

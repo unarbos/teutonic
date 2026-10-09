@@ -197,6 +197,206 @@ The helper creates a custom-format dump, validates it with `pg_restore`, and
 writes a SHA-256 checksum beside it. Copy both files to protected off-host
 storage.
 
+### Document-masked evaluation
+
+The evaluator scores only isolated document fragments (`v1`). Sampling still uses
+the same fixed windows, shard quotas, source proportions, and seeds. EOS 151645
+ends a fragment; window boundaries also end fragments. Positions reset at every
+fragment, with no synthetic BOS/EOS or context restored from outside the window.
+EOS targets are scored, but each fragment's first token is excluded. Windows with
+no scored targets fail explicitly rather than being silently replaced or assigned
+a loss. Full and sliding attention retain their existing attention sinks.
+
+Before deploying this revision, configure **both** validator and evaluator with:
+
+```dotenv
+TEUTONIC_EVALUATION_POLICY_VERSION=document-masked-token-bootstrap-v1
+```
+
+Both services reject the old policy identity; this is not a switch that can enable
+unmasked scoring. Drain outstanding evaluations before a coordinated restart so
+requests created under the old identity are not retried against the new evaluator.
+Update `TEUTONIC_EVALUATOR_CODE_VERSION` consistently on both services as usual.
+Window-only masked evaluation does not require dataset or threshold changes.
+The optional long-document extension below adds a database column and a new
+dataset configuration identity.
+
+FA4 receives explicit cumulative fragment lengths through a scoped attention
+adapter, including for batches with multiple rows. Eager uses explicit causal
+document masks. Checkpoint Python files remain immutable. There is no automatic
+fallback to unmasked attention or another backend.
+
+Model loading and each scoring worker enable strict PyTorch deterministic
+algorithms with `CUBLAS_WORKSPACE_CONFIG=:4096:8`, deterministic cuDNN, and
+cuDNN benchmarking disabled. Unsupported nondeterministic operations fail rather
+than produce a warning and continue. Worker audit metadata records these settings;
+kernel caches include the execution settings in their identity. This controls
+run-to-run numerical variation on the same software and hardware stack; it does
+not promise identical floating-point results across GPU types, library versions,
+or different batch shapes. No random seed replaces these execution settings.
+
+The verdict, per-source scores, progress, and futility projection weight each
+window's mean loss by its number of scored targets. Bootstrap resamples original
+paired windows and recomputes the sum/count ratio in each draw. The futility rule
+retains its observed-window advantage quantile heuristic, applying that advantage
+to the exact remaining token count. Audit output uses `columnar-masked-v1` with
+`scored_tokens` alongside each pair of window losses; verdicts also record the
+scoring policy, EOS ID, total scored tokens, and aggregation/bootstrap units.
+
+### Additional long-document evaluation
+
+The `long-documents-2k-8k-v1` extension adds approximately 6,000,000 **input tokens**
+from complete documents of **2049–8192 tokens** to the existing window sample. MAIN retains its source
+proportions and categories weighted by manifest shard count. MATH, CODE and TEXT
+retain their 70/15/15 source mix and each split manifest's explicit category
+weights. Within each category, document counts follow the index's relative
+populations in 2049–4096 and 4097–8192 (inclusive boundaries), normalized
+over those two eligible buckets. Documents of 8193 tokens or more are excluded.
+Every eligible nonempty bucket gets
+at least one complete document. Quotas are approximate because documents are
+never truncated; this minimum can exceed a small category's token allocation.
+The audit reports both planned and actual allocations.
+
+The index is read from the public datasets bucket's `doc_index/<dataset>/` prefix.
+Configuration fetches `doc_index/manifest.json` once and stores its URL, exact
+UTF-8 contents and SHA-256. The inventory lists all index files with their SHA-256,
+strong ETag and size, binary/token formats, categories and original dataset
+manifest hashes. Requests and audits retain this pin; replay never refetches
+the mutable inventory. Changing it requires an explicit configuration refresh.
+Sparse HTTP range reads
+avoid downloading the entire index. Requests use `If-Match`, reject changed files
+and invalid ranges, and cache verified pages under `TEUTONIC_DOC_INDEX_CACHE_DIR`
+(default: `$TEUTONIC_SHARD_CACHE_DIR/doc_index`). Source manifests are SHA-256
+pinned; selected token shards use the existing full-file SHA-256 verification.
+Uniform document sampling can reference many different 50 MB shards, so the
+first run may need tens of GB of scratch space and downloads. Index range reads
+are validated by ETag and byte range, not by whole-file SHA-256. Retain original
+index objects or cached ranges to replay older manifests after an overwrite.
+
+Build the inventory locally (this command performs no uploads):
+
+```bash
+python scripts/build_document_index_manifest.py \
+  --config artifacts/long-document-eval/main.json \
+  --manifest-url https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest.json \
+  --output artifacts/long-document-eval/manifest.json
+```
+
+The builder accepts the earlier prepared MAIN configuration to enumerate files.
+Use `--index-root /path/to/doc_index` to hash local originals; otherwise it streams
+R2 objects without retaining full copies. Hash receipts make retries resumable.
+Publish the generated bytes unchanged to the manifest URL as a separate action.
+Before publication, `configure_evaluation.py --doc-index-manifest-file PATH`
+and `prepare_long_document_evaluation.py --index-manifest-file PATH` use those
+same local bytes. Their corresponding manifest-URL and manifest-SHA256 options
+select the public location and optionally require an expected hash.
+
+Documents are reconstructed in fragment order across rows/shards. Incomplete
+source documents are skipped deterministically and counted. The selection cap is
+8192 tokens, including terminal EOS; larger source documents are excluded and
+counted, never cropped. The checkpoint must support at least 8192 positions.
+Out-of-vocabulary tokens, missing shards, invalid fragments and missing
+terminal EOS fail evaluation.
+
+FA4 packs unequal-length samples with explicit attention boundaries and reset
+positions. Original window boundaries remain isolated even when a window ends
+without EOS. Scheduling limits batch token count and sum of squared lengths.
+The current 8192-token selection cap uses the normal single-GPU path for every
+sample. Sequence-parallel groups are never initialized under this policy.
+The tested two-GPU path above 128,974 tokens remains implemented for a future
+sampling policy; it is inactive with the current selection range.
+Grouped MoE releases intermediate
+projection buffers before allocating weighted outputs, avoiding overlapping
+large temporary tensors for long documents. GPU memory fit still requires
+validation on the real checkpoints. Every replica preflights the longest sample before
+ordinary scoring (diagnostic losses do not enter the verdict). An OOM in a
+multi-sample single-GPU batch retries the same samples
+in smaller batches. An OOM in a single document's LM-head projection retries
+with a smaller projection chunk, down to 64 positions. An OOM in the single
+document's forward pass, or with the minimum projection chunk, fails evaluation
+explicitly. Nothing is truncated or skipped to fit. Preflight memory peaks and
+OOM retries are recorded in worker metadata. King and challenger score identical samples.
+
+All scored tokens contribute to the combined token-weighted verdict. Bootstrap
+resamples paired original windows or whole documents, never their individual
+fragments. `component_scores` separates windows from long documents, and
+`long_document_scores` reports bucket, category and category/bucket losses.
+`columnar-masked-documents-v2` records aligned document rows, lengths, categories,
+fragment locations and scored-token counts. For this first version, early
+stopping is disabled when long documents are enabled, so the full sample is scored.
+
+Apply the additive migration before deploying the new validator/configuration
+tools, then update the validator/evaluator code identities together:
+
+```bash
+psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/add_evaluation_long_documents.sql
+```
+
+After GPU validation, enable MAIN first using the normal configuration tool:
+
+```bash
+python scripts/configure_evaluation.py --competition main --long-document-tokens 6000000 --dry-run
+python scripts/configure_evaluation.py --competition main --long-document-tokens 6000000
+```
+
+Use `--competition math`, `code`, or `text` next, or `--all` for atomic activation
+across the four competitions. The current policy fixes `--max-document-tokens` at
+8192; zero and larger caps are rejected. Existing configurations remain window-only
+until enabled. `--long-document-tokens 0` disables the additional sample. Budget
+and threshold edits preserve index pins; `--refresh-doc-index` explicitly selects
+new versions. Rebuilding an index requires the corresponding tokenization snapshot.
+The former `long-documents-v1` configuration is rejected rather than silently
+reinterpreted. Applying `--long-document-tokens 6000000` upgrades that configuration
+to the new bounded policy while preserving its pinned index and source manifests.
+
+For an isolated test, prepare a configuration and optional CPU-only sample plan
+without touching PostgreSQL, services or model weights:
+
+```bash
+python scripts/prepare_long_document_evaluation.py --competition main \
+  --output artifacts/long-document-eval/main.json --plan-context-limit 1048576
+```
+
+The standalone preparation tool uses discovery manifests and `chain.toml`
+proportions. For a replay, use a cached evaluation with matching sources and
+proportions. In an isolated checkout with all writable caches redirected to its
+test directory, use real cached checkpoints on all eight GPUs:
+
+```bash
+python scripts/replay_cached_evaluation.py --record /path/to/cached-main-record.json \
+  --model-cache /path/to/read-only/immutable-r2 --batch-size 40 \
+  --long-document-config artifacts/long-document-eval/main.json \
+  --verify-packing --output artifacts/long-document-eval/main-gpu.json
+```
+
+This explicitly adds a new sample and scores it fully; its comparison against
+the saved verdict therefore includes the dataset change. `--verify-packing`
+compares real-model losses in mixed batches against one-sample batches, covering
+both current length buckets and an ordinary window. `--prepare-only` samples and
+downloads data without loading weights or using GPUs. Replay never promotes
+models or publishes evaluation artifacts to R2.
+
+GPU validation is required before rollout. Use real cached checkpoints and
+cached evaluation records through the normal eight-worker topology. The replay
+checks the reconstructed window identities against saved per-sample provenance
+before loading the models. Run it from an isolated checkout with its own caches
+and output paths; do not start the evaluator HTTP service for a replay.
+
+```bash
+python -m scripts.replay_cached_evaluation \
+  --record /path/to/cached/evaluation.json \
+  --model-cache /path/to/model/cache \
+  --batch-size 40 --gpu-ids 0,1,2,3,4,5,6,7 \
+  --attn-implementation flash_attention_4 \
+  --output /tmp/masked-replay.json
+```
+
+Replay always uses masked scoring, even when its input record was produced under
+the old policy; both policy identities are included in the report. Its differences
+from an old record measure the method change, not exact replay error. Compare
+several batch sizes and record throughput, memory, paired advantages, and verdicts.
+The experimental report's slowdown is not an assumed property of this implementation.
+
 ### Configure evaluation early stopping
 
 Existing PostgreSQL volumes need the one-time additive schema setup before a

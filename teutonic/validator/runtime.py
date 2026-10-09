@@ -8,6 +8,7 @@ from typing import Any
 
 from teutonic.evaluation.configuration import EvaluationSettings
 from teutonic.evaluation.early_stopping import EarlyStoppingPolicy
+from teutonic.evaluation.masking import MASKED_POLICY_VERSION
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE
 from teutonic.weights.policy import mapped_weight_plan
 
@@ -43,8 +44,11 @@ def evaluation_policy_from_env(
     env = os.environ if source is None else source
     if settings is None:
         raise RuntimeError("active PostgreSQL evaluation configuration is required")
+    policy_version = _required(env, "TEUTONIC_EVALUATION_POLICY_VERSION")
+    if policy_version != MASKED_POLICY_VERSION:
+        raise RuntimeError(f"this validator requires evaluation policy {MASKED_POLICY_VERSION!r}")
     return EvaluationPolicyConfig(
-        policy_version=_required(env, "TEUTONIC_EVALUATION_POLICY_VERSION"),
+        policy_version=policy_version,
         code_version=_required(env, "TEUTONIC_EVALUATOR_CODE_VERSION"),
         dataset_version=settings.config_version,
         evaluator_version=_required(env, "TEUTONIC_EVALUATOR_VERSION"),
@@ -60,6 +64,7 @@ def evaluation_policy_from_env(
         shards_per_dataset=settings.shards_per_dataset,
         batch_size=int(env.get("TEUTONIC_EVAL_BATCH_SIZE", str(DEFAULT_EVAL_BATCH_SIZE))),
         dataset_manifests=settings.manifests,
+        long_documents=settings.long_documents,
         early_stopping=early_stopping or EarlyStoppingPolicy(),
         lease=timedelta(seconds=int(env.get("TEUTONIC_EVALUATION_LEASE_SECONDS", "120"))),
         retry_base_delay=timedelta(seconds=int(env.get("TEUTONIC_EVALUATION_RETRY_SECONDS", "30"))),

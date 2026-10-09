@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import unittest
 
@@ -54,6 +55,36 @@ class EvaluationConfigurationIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.connection.rollback()
         self.connection.close()
+
+    def test_long_document_config_roundtrips_and_changes_configuration_identity(self):
+        from scripts.configure_evaluation import load_active
+        from teutonic.evaluation.long_documents import build_long_document_config
+        from teutonic.evaluation.index_manifest import INDEX_FORMAT, TOKEN_FORMAT, index_paths, pin_index_manifest
+
+        manifest = {"shards": [{"key": "shards/sft-reasoning__instruction-following--part.npy",
+                               "sha256": "a" * 64, "size_bytes": 4096, "n_tokens": 4096}]}
+        source = DatasetManifestSnapshot("sft-reasoning", "https://datasets.example/sft-reasoning/manifest.json",
+                                         hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest(), 1.0, manifest)
+        inventory = {
+            "format": INDEX_FORMAT, "token_format": TOKEN_FORMAT,
+            "datasets": {source.name: {"categories": ["instruction-following"], "source_manifest": {"url": source.manifest_url, "sha256": source.manifest_sha256}}},
+            "files": {path: {"etag": '"abc123"', "size_bytes": 100, "sha256": "b" * 64} for path in index_paths(source.name, "instruction-following").values()},
+        }
+        config = build_long_document_config((source,), index_manifest=pin_index_manifest(json.dumps(inventory).encode()))
+        args = {"netuid": 999, "chain_generation": "evaluation-config-test", "competition": "fixture",
+                    "dataset_label": "fixture", "n": 2, "delta_threshold": .003, "manifests": (source,), "shards_per_dataset": 4}
+        initial = store_evaluation_configuration(self.connection, **args)
+        added = store_evaluation_configuration(self.connection, **args, long_documents=config)
+        assert added.config_version != initial.config_version
+        repeated = store_evaluation_configuration(self.connection, **args, long_documents=config)
+        assert not repeated.created
+        repository = ValidatorRepository(self.connection, netuid=999, chain_generation="evaluation-config-test", competition="fixture", instance_id="test", public_model_bucket="public-models")
+        assert repository.load_evaluation_settings().long_documents == config
+        row = self.connection.execute("SELECT competition_id FROM control_plane.competitions WHERE netuid=999 AND chain_generation='evaluation-config-test' AND name='fixture'").fetchone()
+        assert load_active(self.connection, row["competition_id"])["long_documents"] == config
+        disabled = store_evaluation_configuration(self.connection, **args, long_documents=None)
+        assert disabled.config_version == initial.config_version
+        assert repository.load_evaluation_settings().long_documents is None
 
     def test_snapshots_are_immutable_and_activation_is_atomic(self) -> None:
         first = store_evaluation_configuration(

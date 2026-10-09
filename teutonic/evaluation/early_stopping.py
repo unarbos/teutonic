@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .masking import token_weights
+
 
 @dataclass(frozen=True, slots=True)
 class EarlyStoppingPolicy:
@@ -69,6 +71,8 @@ def challenger_futility_decision(
     total_sequences: int,
     delta_threshold: float,
     policy: EarlyStoppingPolicy,
+    scored_tokens: list[int] | None = None,
+    total_scored_tokens: int | None = None,
 ) -> dict[str, float] | None:
     """Return the pre-merge-style one-sided futility decision, if triggered.
 
@@ -86,16 +90,28 @@ def challenger_futility_decision(
     advantages = np.asarray(king_losses, dtype=np.float64) - np.asarray(
         challenger_losses, dtype=np.float64
     )
+    weights = (
+        token_weights(scored_tokens, len(advantages))
+        if scored_tokens is not None else np.ones(len(advantages))
+    )
+    if scored_tokens is not None:
+        if total_scored_tokens is None or total_scored_tokens < weights.sum():
+            raise ValueError("early stopping needs the full planned scored-token count")
+        total_weight = total_scored_tokens
+    else:
+        total_weight = total_sequences
+    # Keep the observed-window quantile heuristic; project its per-token
+    # advantage onto the exact number of unscored targets in the sampled corpus.
     assumed_advantage = float(np.quantile(advantages, policy.advantage_quantile))
-    remaining = total_sequences - len(advantages)
+    remaining = total_weight - weights.sum()
     projected_upper_mean = float(
-        (advantages.sum() + remaining * assumed_advantage) / total_sequences
+        (np.dot(advantages, weights) + remaining * assumed_advantage) / total_weight
     )
     stop_threshold = float(delta_threshold) - float(policy.margin)
     if projected_upper_mean >= stop_threshold:
         return None
     return {
-        "mu_hat": float(advantages.mean()),
+        "mu_hat": float(np.average(advantages, weights=weights)),
         "mu_hat_upper_bound": projected_upper_mean,
         "assumed_remaining_advantage": assumed_advantage,
         "stop_threshold": stop_threshold,

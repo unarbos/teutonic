@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,6 +25,16 @@ from teutonic.evaluation.configuration import (
     fetch_dataset_manifest,
     pretokenized_dataset_request,
     store_evaluation_configuration,
+)
+from teutonic.evaluation.index_manifest import (
+    DEFAULT_INDEX_MANIFEST_URL,
+    fetch_index_manifest,
+    pin_index_manifest,
+)
+from teutonic.evaluation.long_documents import (
+    LONG_DOCUMENT_VERSION,
+    MAX_DOCUMENT_TOKENS,
+    build_long_document_config,
 )
 
 COMPETITIONS = ("main", "math", "code", "text")
@@ -57,6 +68,13 @@ def parse_args(argv=None):
         action="store_true",
         help="explicitly re-fetch all configured manifest URLs",
     )
+    parser.add_argument("--long-document-tokens", type=int, help="additional whole-document token budget; 0 disables")
+    parser.add_argument("--doc-index-manifest-url", default=DEFAULT_INDEX_MANIFEST_URL)
+    parser.add_argument("--doc-index-manifest-file", type=Path, help="use exact local manifest bytes before publication")
+    parser.add_argument("--doc-index-manifest-sha256", help="require this exact manifest hash")
+    parser.add_argument("--max-document-tokens", type=int, choices=(MAX_DOCUMENT_TOKENS,), default=None,
+                        help="whole-document selection cap (8192 for the current policy)")
+    parser.add_argument("--refresh-doc-index", action="store_true", help="fetch and pin the current index manifest")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
@@ -77,6 +95,7 @@ def load_active(connection, competition_id):
         "n": config["eval_n"],
         "delta_threshold": config["delta_threshold"],
         "shards_per_dataset": config["shards_per_dataset"],
+        "long_documents": config["long_documents"],
         "manifests": tuple(
             DatasetManifestSnapshot(
                 name=r["name"],
@@ -167,6 +186,31 @@ def prepare_configuration(current, key, args, fetch=None):
         categories = [c for s in snapshots for c in s.manifest["category_weights"]]
         if len(categories) != len(set(categories)):
             raise ValueError("a category occurs in multiple split manifests")
+    previous_long = result.get("long_documents")
+    budget = args.long_document_tokens
+    if budget is not None and budget < 0:
+        raise ValueError("--long-document-tokens cannot be negative")
+    if budget == 0:
+        result["long_documents"] = None
+    elif budget is not None or args.refresh_doc_index or args.max_document_tokens is not None or (previous_long and (args.refresh_manifests or args.manifest)):
+        if budget is None and not previous_long:
+            raise ValueError("enable long documents with --long-document-tokens first")
+        cap = args.max_document_tokens if args.max_document_tokens is not None else MAX_DOCUMENT_TOKENS
+        if previous_long and not (args.refresh_doc_index or args.refresh_manifests or args.manifest):
+            # Changing a budget must not silently select a newer index snapshot.
+            result["long_documents"] = {
+                **deepcopy(previous_long),
+                "version": LONG_DOCUMENT_VERSION,
+                "token_budget": budget or previous_long["token_budget"],
+                "max_document_tokens": cap,
+            }
+        else:
+            result["long_documents"] = build_long_document_config(
+                result["manifests"], token_budget=budget or previous_long["token_budget"],
+                max_document_tokens=cap,
+                index_manifest=(pin_index_manifest(args.doc_index_manifest_file.read_bytes(), args.doc_index_manifest_url, args.doc_index_manifest_sha256)
+                                if args.doc_index_manifest_file else fetch_index_manifest(args.doc_index_manifest_url, args.doc_index_manifest_sha256)),
+            )
     settings = EvaluationSettings(config_version=evaluation_config_version(**result), **result)
     # Validates actual category coverage, rounding and shard capacity before activation.
     pretokenized_dataset_request(
@@ -223,6 +267,7 @@ def main(argv=None) -> int:
                         "delta_threshold": config["delta_threshold"],
                         "previous_delta_threshold": current["delta_threshold"] if current else None,
                         "dry_run": args.dry_run,
+                        "long_documents": config.get("long_documents"),
                         "manifests": [
                             {
                                 "name": s.name,

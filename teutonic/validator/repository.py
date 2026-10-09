@@ -94,7 +94,7 @@ class ValidatorRepository:
             cursor.execute(
                 """
                 SELECT ec.config_version, ec.dataset_label, ec.eval_n,
-                       ec.delta_threshold, ec.shards_per_dataset, dm.position, dm.name,
+                       ec.delta_threshold, ec.shards_per_dataset, ec.long_documents, dm.position, dm.name,
                        dm.manifest_url, dm.manifest_sha256, dm.manifest_json,
                        dm.sample_proportion
                   FROM control_plane.competitions c
@@ -128,6 +128,7 @@ class ValidatorRepository:
             delta_threshold=float(first["delta_threshold"]),
             manifests=manifests,
             shards_per_dataset=int(first["shards_per_dataset"]),
+            long_documents=first["long_documents"],
         )
         self._settings_cache[competition] = settings
         return settings
@@ -281,6 +282,7 @@ class ValidatorRepository:
                     dataset_label=settings.dataset_label,
                     dataset_manifests=settings.manifests,
                     shards_per_dataset=settings.shards_per_dataset,
+                    long_documents=settings.long_documents,
                     early_stopping=self.load_early_stopping_policy(row["competition_name"]),
                 )
             if row["current_reign_id"] is None:

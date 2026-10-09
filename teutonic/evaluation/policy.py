@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from .masking import token_weights
+
 
 GENERIC_CONFIG_LOCK_KEYS = (
     "vocab_size",
@@ -34,17 +36,28 @@ def paired_bootstrap_verdict(
     alpha: float,
     delta_threshold: float,
     now: Callable[[], str] | None = None,
+    scored_tokens: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Compute the evaluator's deterministic paired-bootstrap decision."""
+    """Resample paired windows, recomputing the weighted ratio in every draw.
+
+    Production masked scoring supplies scored_tokens. Omitting counts retains
+    the historical equal-window calculation for existing records and callers.
+    """
+    if not king_losses or len(king_losses) != len(challenger_losses):
+        raise ValueError("bootstrap requires non-empty paired losses")
     diff = np.asarray(king_losses, dtype=np.float64) - np.asarray(
         challenger_losses, dtype=np.float64
     )
+    weights = token_weights(scored_tokens, len(diff)) if scored_tokens is not None else None
     rng = np.random.default_rng(bootstrap_seed)
     boot = np.empty(n_bootstrap, dtype=np.float64)
     for i in range(n_bootstrap):
         idx = rng.integers(0, len(diff), size=len(diff))
-        boot[i] = diff[idx].mean()
-    mu_hat = float(diff.mean())
+        boot[i] = (
+            diff[idx].mean() if weights is None
+            else np.average(diff[idx], weights=weights[idx])
+        )
+    mu_hat = float(np.average(diff, weights=weights))
     lcb = float(np.quantile(boot, alpha))
     accepted = lcb > delta_threshold
     timestamp = now() if now is not None else datetime.now(timezone.utc).isoformat()
@@ -58,8 +71,8 @@ def paired_bootstrap_verdict(
         "alpha": alpha,
         "n_bootstrap": n_bootstrap,
         "n_sequences": len(diff),
-        "avg_king_loss": round(float(np.mean(king_losses)), 6),
-        "avg_challenger_loss": round(float(np.mean(challenger_losses)), 6),
+        "avg_king_loss": round(float(np.average(king_losses, weights=weights)), 6),
+        "avg_challenger_loss": round(float(np.average(challenger_losses, weights=weights)), 6),
         "timestamp": timestamp,
     }
 
@@ -72,6 +85,7 @@ def provisional_paired_bootstrap(
     n_bootstrap: int,
     alpha: float,
     delta_threshold: float,
+    scored_tokens: list[int] | None = None,
 ) -> dict[str, Any]:
     """Compute an explicitly provisional checkpoint from partial paired losses."""
     if not king_losses or len(king_losses) != len(challenger_losses):
@@ -85,6 +99,7 @@ def provisional_paired_bootstrap(
         n_bootstrap=n_bootstrap,
         alpha=alpha,
         delta_threshold=delta_threshold,
+        scored_tokens=scored_tokens,
     )
     return {
         "provisional_mu_hat": verdict["mu_hat"],

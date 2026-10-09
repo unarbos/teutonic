@@ -284,6 +284,7 @@ CREATE TABLE control_plane.evaluation_configs (
     eval_n integer NOT NULL,
     delta_threshold double precision NOT NULL,
     shards_per_dataset integer DEFAULT 4 NOT NULL,
+    long_documents jsonb,
     active boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT evaluation_configs_config_version_check CHECK ((config_version ~ '^[0-9a-f]{64}$'::text)),

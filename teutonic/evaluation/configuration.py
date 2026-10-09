@@ -10,6 +10,7 @@ from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from teutonic.evaluation.categories import DEFAULT_RULES_PATH, load_rules, plan_source_shards
+from teutonic.evaluation.long_documents import validate_long_documents
 
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -132,6 +133,7 @@ class EvaluationSettings:
     delta_threshold: float
     manifests: tuple[DatasetManifestSnapshot, ...]
     shards_per_dataset: int
+    long_documents: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not _DIGEST.fullmatch(self.config_version):
@@ -146,6 +148,7 @@ class EvaluationSettings:
             raise ValueError("evaluation configuration needs dataset manifests")
         if self.shards_per_dataset < 1:
             raise ValueError("evaluation shards_per_dataset must be positive")
+        validate_long_documents(self.long_documents)
         total = sum(item.proportion for item in self.manifests)
         if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
             raise ValueError("dataset sample proportions must sum to 1")
@@ -251,6 +254,7 @@ def pretokenized_dataset_request(
         "source": "pretokenized_npy",
         "label": settings.dataset_label,
         "sources": sources,
+        **({"long_documents": settings.long_documents} if settings.long_documents else {}),
     }
 
 
@@ -291,6 +295,7 @@ def evaluation_config_version(
     delta_threshold: float,
     manifests: Sequence[DatasetManifestSnapshot],
     shards_per_dataset: int,
+    long_documents: Mapping[str, Any] | None = None,
 ) -> str:
     value = {
         "dataset_label": dataset_label,
@@ -312,6 +317,8 @@ def evaluation_config_version(
             name: rule["raw"] for name, rule in sorted(load_rules(DEFAULT_RULES_PATH).items())
         },
     }
+    if long_documents is not None:
+        value["long_documents"] = validate_long_documents(long_documents)
     return hashlib.sha256(canonical_manifest_bytes(value)).hexdigest()
 
 
@@ -333,6 +340,7 @@ def store_evaluation_configuration(
     delta_threshold: float,
     manifests: Sequence[DatasetManifestSnapshot],
     shards_per_dataset: int,
+    long_documents: Mapping[str, Any] | None = None,
 ) -> StoredEvaluationConfiguration:
     snapshots = tuple(manifests)
     config_version = evaluation_config_version(
@@ -341,6 +349,7 @@ def store_evaluation_configuration(
         delta_threshold=delta_threshold,
         manifests=snapshots,
         shards_per_dataset=shards_per_dataset,
+        long_documents=long_documents,
     )
     settings = EvaluationSettings(
         config_version=config_version,
@@ -349,6 +358,7 @@ def store_evaluation_configuration(
         delta_threshold=delta_threshold,
         manifests=snapshots,
         shards_per_dataset=shards_per_dataset,
+        long_documents=long_documents,
     )
     with connection.transaction():
         row = connection.execute(
@@ -377,8 +387,8 @@ def store_evaluation_configuration(
                 """
                 INSERT INTO control_plane.evaluation_configs (
                     competition_id, config_version, dataset_label, eval_n,
-                    delta_threshold, shards_per_dataset, active
-                ) VALUES (%s, %s, %s, %s, %s, %s, false)
+                    delta_threshold, shards_per_dataset, long_documents, active
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, false)
                 RETURNING evaluation_config_id
                 """,
                 (
@@ -388,6 +398,7 @@ def store_evaluation_configuration(
                     settings.n,
                     settings.delta_threshold,
                     settings.shards_per_dataset,
+                    json.dumps(settings.long_documents),
                 ),
             ).fetchone()["evaluation_config_id"]
             for position, snapshot in enumerate(settings.manifests):

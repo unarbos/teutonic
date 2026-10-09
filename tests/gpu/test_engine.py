@@ -56,6 +56,81 @@ class ImmediateScoreQueue:
         })
 
 
+def test_deterministic_execution_overrides_unsafe_settings_and_is_strict(monkeypatch):
+    import os
+
+    previous = (
+        torch.are_deterministic_algorithms_enabled(),
+        torch.is_deterministic_algorithms_warn_only_enabled(),
+        torch.backends.cudnn.benchmark,
+        torch.backends.cudnn.deterministic,
+    )
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":invalid:")
+    try:
+        torch.use_deterministic_algorithms(False, warn_only=True)
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        settings = eval_server.configure_deterministic_execution()
+        assert settings == {
+            "deterministic_algorithms": True,
+            "warn_only": False,
+            "cublas_workspace_config": ":4096:8",
+            "cudnn_benchmark": False,
+            "cudnn_deterministic": True,
+        }
+        assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
+        assert eval_server.configure_deterministic_execution() == settings
+    finally:
+        torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
+        torch.backends.cudnn.benchmark = previous[2]
+        torch.backends.cudnn.deterministic = previous[3]
+
+
+def test_mixed_length_batch_budget_and_complete_scoring():
+    from teutonic.evaluator.engine import scoring_batch_end
+
+    lengths = [2048] * 40 + [8193, 2048, 4097, 90000, 2049]
+    sequences = [[1] * n for n in lengths]
+    assert scoring_batch_end(sequences, 0, 40, 2048) == 40
+    assert scoring_batch_end(sequences, 40, 40, 2048) == 43
+    assert scoring_batch_end(sequences, 43, 40, 2048) == 44
+    pool = object.__new__(PersistentModelWorkerPool)
+    pool.specs = [{"worker_id": "king-0", "role": "king"}, {"worker_id": "challenger-0", "role": "challenger"}]
+    pool.ready = {s["worker_id"]: {"pipeline_depth": 1} for s in pool.specs}
+    pool.result_queue = Queue()
+    pool.command_queues = {s["worker_id"]: ImmediateScoreQueue(pool.result_queue, s["worker_id"], s["role"], 1 if s["role"] == "king" else 2) for s in pool.specs}
+    req = EvalRequest(king_repo="king", challenger_repo="challenger", batch_size=40,
+                      n_bootstrap=20, early_stop_enabled=True, early_stop_min_fraction=.1,
+                      early_stop_check_interval=1, long_documents={"version": "fixture"})
+    king, challenger, meta = pool.score(sequences, "generation-1", req, lambda event: None)
+    assert len(king) == len(challenger) == len(sequences)
+    assert meta["early_stop"] is None
+    assert meta["scored_tokens"] == [n - 1 for n in lengths]
+    assert all(q.batch_sizes == [1, 40, 3, 1, 1] for q in pool.command_queues.values())
+    assert meta["long_document_preflight"]["input_tokens"] == 90000
+    assert {w["worker_id"] for w in meta["long_document_preflight"]["workers"]} == {"king-0", "challenger-0"}
+    pool.command_queues["king-0"].loss = float("nan")
+    with pytest.raises(RuntimeError, match="non-finite.*preflight"):
+        pool.score(sequences, "generation-2", req, lambda event: None)
+
+
+def test_mixed_sample_audit_and_component_scores_preserve_document_identity():
+    provenance = [
+        {"shard_group_index": 0, "shard_index": 0, "shard_sequence_index": 7, "component": "windows"},
+        {"shard_group_index": 0, "shard_index": -1, "shard_sequence_index": -1,
+         "component": "long_documents", "dataset": "math-reasoning", "category": "math-dialogue",
+         "length_bucket": "2049-4096", "document_row": 123, "length": 3001,
+         "fragments": [{"shard_id": 4, "seq_index": 2, "seq_offset": 0, "frag_len": 2048}]},
+    ]
+    result = eval_server._build_sample_results([2, 4], [1, 2], provenance, [2000, 3000])
+    assert result["format"] == "columnar-masked-documents-v2"
+    assert result["document_row"] == [None, 123]
+    assert result["component"] == ["windows", "long_documents"]
+    scores = eval_server.long_document_scores([2, 4], [1, 2], provenance, [2000, 3000])
+    assert scores["by_bucket"]["2049-4096"]["n_scored_tokens"] == 3000
+    assert scores["by_category"]["math-reasoning/math-dialogue"]["mu_hat"] == 2
+
+
 def test_worker_pool_early_stop_drains_dispatched_results():
     pool = object.__new__(PersistentModelWorkerPool)
     pool.specs = [
@@ -85,7 +160,7 @@ def test_worker_pool_early_stop_drains_dispatched_results():
     )
 
     king, challenger, metadata = pool.score(
-        [[index] for index in range(10)], "generation-1", request, lambda _event: None
+        [[index, index] for index in range(10)], "generation-1", request, lambda _event: None
     )
 
     assert len(king) == len(challenger) == 4
@@ -122,7 +197,7 @@ def test_worker_pool_batches_sequences_and_preserves_the_tail():
     )
 
     king, challenger, metadata = pool.score(
-        [[index] for index in range(8)], "generation-1", request, lambda _event: None
+        [[index, index] for index in range(8)], "generation-1", request, lambda _event: None
     )
 
     assert king == [1.0] * 8
@@ -165,7 +240,7 @@ def test_batched_early_stop_uses_the_configured_check_boundary():
     )
 
     king, challenger, metadata = pool.score(
-        [[index] for index in range(10)], "generation-1", request, lambda _event: None
+        [[index, index] for index in range(10)], "generation-1", request, lambda _event: None
     )
 
     assert len(king) == len(challenger) == 4
@@ -336,13 +411,25 @@ def test_eight_workers_score_each_sequence_once_per_side():
 
     pool.command_queues = {spec["worker_id"]: IndexedScoreQueue(spec) for spec in pool.specs}
     request = EvalRequest(king_repo="king", challenger_repo="challenger", batch_size=3)
-    king, challenger, _ = pool.score(
-        [[index] for index in range(35)], "generation", request, lambda event: None
+    events = []
+    king, challenger, metadata = pool.score(
+        [[index, 151645 if index < 10 else index, index, index] for index in range(35)],
+        "generation", request, events.append,
     )
     assert king == [index + 0.25 for index in range(35)]
     assert challenger == [float(index) for index in range(35)]
     assert sorted(seen["king"]) == sorted(seen["challenger"]) == list(range(35))
     assert pool.result_queue.empty()
+    counts = [2] * 10 + [3] * 25
+    assert metadata["scored_tokens"] == counts
+    assert metadata["planned_scored_tokens"] == sum(counts)
+    assert events[-1]["avg_king_loss"] == round(float(np.average(king, weights=counts)), 6)
+    assert events[-1]["avg_challenger_loss"] == round(float(np.average(challenger, weights=counts)), 6)
+    verdict = eval_server.bootstrap_verdict(king, challenger, request, counts)
+    assert verdict["avg_king_loss"] == events[-1]["avg_king_loss"]
+    scores = eval_server._compute_source_scores(king, challenger, ["fixture"] * 35, counts)
+    assert scores["fixture"]["avg_king_loss"] == verdict["avg_king_loss"]
+    assert scores["fixture"]["n_scored_tokens"] == verdict["n_scored_tokens"]
 
 
 def test_checkpoint_key_excludes_randomized_sequences(tmp_path):
@@ -496,6 +583,54 @@ def test_single_gpu_scorer_reports_errors_to_worker_pool(monkeypatch):
     assert result["error"] == "test scoring failure"
 
 
+def test_oom_backoff_keeps_every_sample_and_original_order(monkeypatch):
+    calls, cleared, retries = [], [], []
+
+    def score(_model, rows, chunk, **kwargs):
+        calls.append([row[0] for row in rows])
+        if len(rows) > 2:
+            raise eval_server.ScoringOOM("simulated allocation failure", "forward")
+        return [float(row[0]) for row in rows]
+
+    monkeypatch.setattr(eval_server, "compute_per_sequence_loss", score)
+    monkeypatch.setattr(eval_server, "empty_worker_cuda_cache", lambda ids: cleared.append(ids))
+    rows = [[i, i + 1] for i in range(7)]
+    losses = eval_server.compute_with_oom_backoff(object(), rows, 1024, gpu_ids=[3], enabled=True, retries=retries)
+    assert losses == list(map(float, range(7)))
+    assert calls == [[0, 1, 2, 3, 4, 5, 6], [0, 1, 2], [0], [1, 2], [3, 4, 5, 6], [3, 4], [5, 6]]
+    assert len(cleared) == len(retries) == 3
+    assert all(r["action"] == "split_batch" for r in retries)
+    with pytest.raises(eval_server.ScoringOOM):
+        eval_server.compute_with_oom_backoff(object(), rows, 1024, gpu_ids=[3], enabled=False, retries=[])
+
+
+def test_single_document_oom_reduces_head_workspace_but_never_truncates(monkeypatch):
+    observed = []
+    row = list(range(8193))
+
+    def score(_model, rows, chunk, **kwargs):
+        assert rows == [row]
+        observed.append(chunk)
+        if chunk > 128:
+            raise eval_server.ScoringOOM("simulated projection allocation failure", "lm_head")
+        return [1.25]
+
+    monkeypatch.setattr(eval_server, "compute_per_sequence_loss", score)
+    monkeypatch.setattr(eval_server, "empty_worker_cuda_cache", lambda ids: None)
+    retries = []
+    result = eval_server.compute_with_oom_backoff(object(), [row], 1024, gpu_ids=[0], enabled=True, retries=retries)
+    assert result == [1.25]
+    assert observed == [1024, 512, 256, 128]
+    assert all(r["action"] == "halve_lm_head_chunk" for r in retries)
+
+    def fails_forward(*args, **kwargs):
+        raise eval_server.ScoringOOM("forward exceeds memory", "forward")
+
+    monkeypatch.setattr(eval_server, "compute_per_sequence_loss", fails_forward)
+    with pytest.raises(RuntimeError, match="complete 8193-token sample cannot fit"):
+        eval_server.compute_with_oom_backoff(object(), [row], 1024, gpu_ids=[0], enabled=True, retries=[])
+
+
 def test_indexed_npy_loader_preserves_row_and_window_indices(tmp_path):
     request = SimpleNamespace(seq_len=3)
 
@@ -604,14 +739,16 @@ def test_sample_results_are_compact_and_index_aligned():
                 "shard_sequence_index": 9,
             },
         ],
+        [3, 2],
     )
 
     assert result == {
-        "format": "columnar-v1",
+        "format": "columnar-masked-v1",
         "n_samples": 2,
         "shard_group_index": [0, 1],
         "shard_index": [2, 0],
         "shard_sequence_index": [42, 9],
         "king_loss": [1.2, 1.3],
         "challenger_loss": [1.1, 1.4],
+        "scored_tokens": [3, 2],
     }

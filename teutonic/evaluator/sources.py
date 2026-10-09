@@ -281,7 +281,11 @@ def sample_pretokenized_sequences(
 def sample_eval_sequences(req: base.EvalRequest, on_phase=None):
     if req.dataset_source != "pretokenized_npy":
         raise ValueError("GPU evaluator accepts only validator-provided pre-tokenized NPY shards")
-    return sample_pretokenized_sequences(req, on_phase=on_phase)
+    sequences, metadata = sample_pretokenized_sequences(req, on_phase=on_phase)
+    if req.long_documents is not None:
+        from teutonic.evaluator.long_documents import extend_with_long_documents
+        return extend_with_long_documents(req, sequences, metadata, on_phase=on_phase)
+    return sequences, metadata
 
 
 base.sample_eval_sequences = sample_eval_sequences

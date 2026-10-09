@@ -66,8 +66,16 @@ from teutonic.evaluation import (
     result_provenance,
     validate_result_v2,
 )
+from teutonic.evaluation.masking import (
+    DOCUMENT_EOS_TOKEN_ID,
+    MASKED_POLICY_VERSION,
+    scored_token_counts,
+    token_weights,
+)
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE, MAX_BATCH_SIZE
+from teutonic.evaluator.document_masking import masked_model_inputs
 from teutonic.evaluator.module_cache import transformers_module_cache_lock
+from teutonic.evaluator import sequence_parallel
 from teutonic.storage.artifacts import R2ArtifactResolver
 
 log = logging.getLogger("teutonic.evaluator.engine")
@@ -111,8 +119,10 @@ if DEFAULT_ATTN_IMPLEMENTATION not in SUPPORTED_ATTN_IMPLEMENTATIONS:
     )
 EVALUATOR_VERSION = os.environ.get("TEUTONIC_EVALUATOR_VERSION", "pair-evaluator-v2")
 EVALUATION_POLICY_VERSION = os.environ.get(
-    "TEUTONIC_EVALUATION_POLICY_VERSION", "paired-bootstrap-v1"
+    "TEUTONIC_EVALUATION_POLICY_VERSION", MASKED_POLICY_VERSION
 )
+if EVALUATION_POLICY_VERSION != MASKED_POLICY_VERSION:
+    raise RuntimeError(f"this evaluator requires policy {MASKED_POLICY_VERSION!r}")
 EVALUATOR_CODE_VERSION = os.environ.get("TEUTONIC_EVALUATOR_CODE_VERSION", "")
 
 # Server-side caps. The validator can request a larger eval_n / n_bootstrap
@@ -165,6 +175,8 @@ class EvalRequest(BaseModel):
     dataset_sources: list[dict[str, Any]] = Field(default_factory=list)
     seq_len: int = Field(default=DEFAULT_SEQ_LEN, ge=2)
     vocab_size: int = 0
+    long_documents: dict[str, Any] | None = None
+    max_document_tokens: int = 0
     attn_implementation: Literal["eager", "flash_attention_4"] = DEFAULT_ATTN_IMPLEMENTATION
     n: int = DEFAULT_N
     batch_size: int = Field(default=DEFAULT_BATCH_SIZE, ge=1, le=MAX_BATCH_SIZE)
@@ -191,7 +203,7 @@ def internal_request_from_v2(
     king_snapshot: str,
     challenger_snapshot: str,
 ) -> EvalRequest:
-    """Adapt protocol v2 to the unchanged scoring engine's internal request."""
+    """Adapt protocol v2 to the scoring engine's internal request."""
     return EvalRequest(
         king_repo=king_snapshot,
         challenger_repo=challenger_snapshot,
@@ -199,6 +211,7 @@ def internal_request_from_v2(
         coldkey=str(request.miner["coldkey"]),
         dataset_source=str(request.dataset["source"]),
         dataset_sources=list(request.dataset["sources"]),
+        long_documents=request.dataset.get("long_documents"),
         n=int(request.limits["n"]),
         seq_len=int(request.limits["seq_len"]),
         n_bootstrap=int(request.limits["n_bootstrap"]),
@@ -238,6 +251,21 @@ def setup_logging() -> None:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+def configure_deterministic_execution() -> dict:
+    """Configure before CUDA model loading; unsupported operations must fail."""
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    return {
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
+        "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+    }
 
 
 def parse_gpu_ids(value: str | None = None) -> list[int]:
@@ -655,6 +683,7 @@ def checkpoint_load_key(snapshot_dir: str, req: EvalRequest, gpu_ids: list[int])
             files.append((name, stat.st_size, stat.st_mtime_ns))
     material = {
         "loader": MODEL_LOADER_VERSION,
+        "scoring_policy": MASKED_POLICY_VERSION,
         "snapshot": str(path),
         "metadata": files,
         "gpu_ids": list(gpu_ids),
@@ -691,6 +720,8 @@ def kernel_cache_identity(config, gpu_ids: list[int]) -> str:
         "cuda": torch.version.cuda,
         "capabilities": capabilities,
         "grouped_moe": "torch_foreach_mm_v1",
+        "deterministic_algorithms": True,
+        "cublas_workspace_config": ":4096:8",
     }
     return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()[:24]
 
@@ -880,13 +911,19 @@ def grouped_mimo_moe(
         routed_inputs,
         [expert.up_proj.weight.T for expert in experts],
     )
+    # These buffers scale with tokens * routed experts. Release each stage
+    # before allocating the next, especially the fp32 weighted outputs below.
+    del routed_inputs
     activated = [module.experts[0].act_fn(gate) * up for gate, up in zip(gate_outputs, up_outputs)]
+    del gate_outputs, up_outputs
     down_outputs = torch._foreach_mm(
         activated,
         [expert.down_proj.weight.T for expert in experts],
     )
+    del activated
 
     routed_outputs = torch.cat(list(down_outputs), dim=0)
+    del down_outputs
     routed_outputs = routed_outputs * sorted_weights.unsqueeze(-1)
     final_hidden_states = torch.zeros_like(hidden_states, dtype=topk_weights.dtype)
     final_hidden_states.index_add_(0, sorted_tokens, routed_outputs)
@@ -1078,6 +1115,7 @@ def patch_mimo_masking_compat(model) -> tuple[str, ...]:
 
 
 def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
+    configure_deterministic_execution()
     from accelerate import init_empty_weights, load_checkpoint_and_dispatch
     from accelerate.utils import modeling as accelerate_modeling
     from transformers import AutoModelForCausalLM
@@ -1305,6 +1343,12 @@ def model_cuda_devices(model) -> list[torch.device]:
     return sorted(devices, key=lambda device: device.index or 0)
 
 
+class ScoringOOM(RuntimeError):
+    def __init__(self, message, phase):
+        super().__init__(message)
+        self.phase = phase
+
+
 @torch.no_grad()
 def compute_per_sequence_loss(
     model,
@@ -1315,24 +1359,32 @@ def compute_per_sequence_loss(
 ) -> list[float]:
     if not token_batches:
         return []
+    counts = scored_token_counts(token_batches)
     input_device = model_input_device(model)
     cuda_devices = model_cuda_devices(model)
     if reset_peak_memory:
         for device in cuda_devices:
             torch.cuda.reset_peak_memory_stats(device)
-    input_ids = torch.tensor(token_batches, dtype=torch.long, device=input_device)
+    lengths = [len(row) for row in token_batches]
+    packed = len(set(lengths)) > 1
+    rows = [[token for row in token_batches for token in row]] if packed else token_batches
+    phase = "input"
     try:
+        input_ids = torch.tensor(rows, dtype=torch.long, device=input_device)
+        phase = "forward"
         if hasattr(model, "reset_state"):
             model.reset_state()
-        hidden = model.model(input_ids, use_cache=False).last_hidden_state
+        with masked_model_inputs(model, input_ids, lengths if packed else None) as (layout, masked_inputs):
+            hidden = model.model(input_ids, use_cache=False, **masked_inputs).last_hidden_state
         head_dev = lm_head_device(model)
         if hidden.device != head_dev:
             hidden = hidden.to(head_dev)
         labels_full = input_ids if input_ids.device == head_dev else input_ids.to(head_dev)
 
-        batch = len(token_batches)
+        batch = len(rows)
         n_pos = labels_full.size(1) - 1
         per_token_losses = []
+        phase = "lm_head"
         for start in range(0, n_pos, chunk_size):
             end = min(start + chunk_size, n_pos)
             logits = model.lm_head(hidden[:, start:end, :])
@@ -1346,14 +1398,16 @@ def compute_per_sequence_loss(
             del logits
         # Summing once after concatenation makes the accumulation order independent
         # of lm_head_chunk, so increasing the projection chunk does not alter scores.
-        total = torch.cat(per_token_losses, dim=1).sum(dim=1)
-        result = (total / n_pos).float().cpu().tolist()
+        valid_targets = layout.valid_targets.to(head_dev)
+        losses = torch.cat(per_token_losses, dim=1).masked_fill(~valid_targets, 0)
+        total = sum_sample_losses(losses, lengths if packed else None)
+        result = (total / torch.tensor(counts, device=head_dev)).float().cpu().tolist()
         peaks = {
             str(device): round(torch.cuda.max_memory_allocated(device) / (1024**3), 3)
             for device in cuda_devices
         }
         eval_log.debug(
-            "eager memory | devices=%s seq_len=%d peak_allocated_gib=%s",
+            "masked scoring memory | devices=%s seq_len=%d peak_allocated_gib=%s",
             [str(device) for device in cuda_devices],
             input_ids.shape[1],
             peaks,
@@ -1365,11 +1419,48 @@ def compute_per_sequence_loss(
             f"reserved={torch.cuda.max_memory_reserved(device) / (1024**3):.2f}GiB"
             for device in cuda_devices
         )
-        raise RuntimeError(
-            f"OOM scoring a batch of {input_ids.shape[0]} unmodified "
-            f"{input_ids.shape[1]}-token sequences; "
-            f"evaluation stopped without truncation or backend fallback. {peak_detail}"
+        raise ScoringOOM(
+            f"OOM during {phase}: {len(token_batches)} samples, "
+            f"{sum(lengths)} input tokens, longest={max(lengths)}; {peak_detail}",
+            phase=phase,
         ) from exc
+
+
+def sum_sample_losses(losses, packed_lengths=None):
+    if packed_lengths is None:
+        return losses.sum(dim=1)
+    cuts = np.cumsum(packed_lengths[:-1]).tolist()
+    return torch.stack([part.sum() for part in torch.tensor_split(losses.flatten(), cuts)])
+
+
+def compute_with_oom_backoff(model, token_batches, chunk_size, *, gpu_ids, enabled, retries):
+    """Change batching/projection workspace only; never change sampled content."""
+    try:
+        return compute_per_sequence_loss(model, token_batches, chunk_size, reset_peak_memory=False)
+    except ScoringOOM as exc:
+        if not enabled:
+            raise
+        if len(token_batches) == 1 and (exc.phase != "lm_head" or chunk_size <= 64):
+            raise RuntimeError(
+                f"a complete {len(token_batches[0])}-token sample cannot fit on this worker; "
+                "evaluation stopped without truncation, skipping or backend fallback. "
+                f"{exc}"
+            ) from exc
+        failure = str(exc)
+    # Outside the exception handler: release the traceback's live tensors before
+    # clearing unused allocator blocks and retrying the exact same token sequences.
+    empty_worker_cuda_cache(gpu_ids)
+    retry = {"n_samples": len(token_batches), "input_tokens": sum(map(len, token_batches)),
+             "lm_head_chunk": chunk_size, "action": "split_batch" if len(token_batches) > 1 else "halve_lm_head_chunk"}
+    retries.append(retry)
+    eval_log.warning("scoring OOM retry | %s | %s", retry, failure)
+    if len(token_batches) > 1:
+        midpoint = len(token_batches) // 2
+        return (
+            compute_with_oom_backoff(model, token_batches[:midpoint], chunk_size, gpu_ids=gpu_ids, enabled=True, retries=retries)
+            + compute_with_oom_backoff(model, token_batches[midpoint:], chunk_size, gpu_ids=gpu_ids, enabled=True, retries=retries)
+        )
+    return compute_with_oom_backoff(model, token_batches, max(64, chunk_size // 2), gpu_ids=gpu_ids, enabled=True, retries=retries)
 
 
 class ModelSequenceScorer:
@@ -1399,19 +1490,33 @@ class ModelSequenceScorer:
             raise ValueError("sequence indices and token batches must be non-empty and aligned")
         self._executor.submit(self._score, sequence_indices, token_batches)
 
+    def submit_parallel(self, sequence_index, tokens, rank):
+        self._executor.submit(self._score, [sequence_index], [tokens], rank)
+
     def _score(
         self,
         sequence_indices: list[int],
         token_batches: list[list[int]],
+        parallel_rank: int | None = None,
     ) -> None:
         started = time.time()
         try:
-            losses = compute_per_sequence_loss(
-                self.model,
-                token_batches,
-                self.req.lm_head_chunk,
-                reset_peak_memory=False,
-            )
+            retries = []
+            if parallel_rank is not None:
+                empty_worker_cuda_cache(self.spec["gpu_ids"])
+                reset_worker_peak_memory(self.spec["gpu_ids"])
+                losses = [sequence_parallel.compute_loss(
+                    self.model, token_batches[0], self.req.lm_head_chunk, parallel_rank,
+                )]
+            else:
+                losses = compute_with_oom_backoff(
+                    self.model,
+                    token_batches,
+                    self.req.lm_head_chunk,
+                    gpu_ids=self.spec["gpu_ids"],
+                    enabled=self.req.long_documents is not None,
+                    retries=retries,
+                )
             if len(losses) != len(sequence_indices):
                 raise RuntimeError(
                     f"scorer returned {len(losses)} losses for "
@@ -1425,6 +1530,12 @@ class ModelSequenceScorer:
                 "sequence_indices": sequence_indices,
                 "losses": losses,
                 "wall_time_s": time.time() - started,
+                "oom_retries": retries,
+                "scoring_mode": "sequence_parallel" if parallel_rank is not None else "single_gpu",
+                "peak_allocated_gib": {
+                    str(gpu_id): torch.cuda.max_memory_allocated(gpu_id) / 1024 ** 3
+                    for gpu_id in self.spec["gpu_ids"]
+                } if torch.cuda.is_available() else {},
             }
             if len(sequence_indices) == 1:
                 result.update(
@@ -1471,7 +1582,9 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
     model = None
     pipeline = None
     loaded_key = None
+    parallel_rank = None
     try:
+        execution = configure_deterministic_execution()
         torch.cuda.set_device(gpu_ids[0])
         while True:
             command = command_queue.get()
@@ -1520,6 +1633,8 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
                         "artifacts": artifacts,
                         "attention": attention,
                         "kernel_cache": kernel_cache,
+                        "execution": execution,
+                        "sequence_parallel_rank": parallel_rank,
                         "pipeline_depth": pipeline.depth,
                         "pipeline_boundary_layer": None,
                     })
@@ -1532,13 +1647,25 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
                         "error": str(exc),
                         "traceback": traceback.format_exc(),
                     })
-            elif command["type"] == "score":
+            elif command["type"] == "sequence_parallel_init":
+                if pipeline is None or command["generation"] != pipeline.generation:
+                    raise RuntimeError("sequence-parallel initialization requires a matching loaded model")
+                pipeline.close()
+                empty_worker_cuda_cache(gpu_ids)
+                sequence_parallel.initialize(command["rank"], command["rendezvous"], gpu_ids[0])
+                parallel_rank = command["rank"]
+                pipeline = ModelSequenceScorer(model, req, spec, result_queue, command["generation"])
+                result_queue.put({"type": "sequence_parallel_ready", "generation": command["generation"],
+                                  "worker_id": worker_id, "role": role, "rank": parallel_rank})
+            elif command["type"] in ("score", "score_parallel"):
                 if pipeline is None or command["generation"] != pipeline.generation:
                     raise RuntimeError(f"{worker_id} received score command before matching load")
-                pipeline.submit_batch(
-                    command["sequence_indices"],
-                    command["token_batches"],
-                )
+                if command["type"] == "score_parallel":
+                    if parallel_rank is None or len(command["sequence_indices"]) != 1:
+                        raise RuntimeError("invalid sequence-parallel scoring command")
+                    pipeline.submit_parallel(command["sequence_indices"][0], command["token_batches"][0], parallel_rank)
+                else:
+                    pipeline.submit_batch(command["sequence_indices"], command["token_batches"])
             else:
                 raise RuntimeError(f"unknown worker command: {command['type']}")
     except BaseException as exc:
@@ -1555,6 +1682,27 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
             pipeline.close()
 
 
+def scoring_batch_end(sequences, start, batch_size, window_length):
+    """Keep the usual window batch size, but cap mixed batches by input tokens.
+
+    A single whole document can exceed the token budget; it is scored alone.
+    FA4 work grows quadratically within each document, so also limit the sum of
+    squared lengths to the baseline batch's full-attention work.
+    """
+    token_budget = batch_size * window_length
+    attention_budget = batch_size * window_length ** 2
+    tokens = attention = 0
+    end = start
+    while end < min(start + batch_size, len(sequences)):
+        length = len(sequences[end])
+        if end > start and (tokens + length > token_budget or attention + length ** 2 > attention_budget):
+            break
+        tokens += length
+        attention += length ** 2
+        end += 1
+    return end
+
+
 class PersistentModelWorkerPool:
     """Keep eight model processes alive and reload only when checkpoint identity changes."""
 
@@ -1566,6 +1714,8 @@ class PersistentModelWorkerPool:
         self.command_queues = {}
         self.processes = {}
         self.ready: dict[str, dict] = {}
+        self.parallel_pairs = None
+        self.parallel_directory = None
         for spec in self.specs:
             worker_id = spec["worker_id"]
             queue = context.Queue(maxsize=4)
@@ -1638,6 +1788,43 @@ class PersistentModelWorkerPool:
         self.ready = ready
         return generation
 
+    def preflight_longest_document(self, sequences, generation, on_progress, indices=None):
+        """Check the longest sampled document on every replica before full scoring."""
+        index = max(range(len(sequences)) if indices is None else indices, key=lambda i: len(sequences[i]))
+        length = len(sequences[index])
+        on_progress({"phase": "long_document_preflight_start", "sequence_index": index,
+                     "input_tokens": length, "total_workers": len(self.specs)})
+        pending = {s["worker_id"] for s in self.specs}
+        for worker_id in sorted(pending):
+            self.command_queues[worker_id].put({
+                "type": "score", "generation": generation, "sequence_indices": [index],
+                "token_batches": [sequences[index]],
+            })
+        results = []
+        while pending:
+            try:
+                message = self.result_queue.get(timeout=30)
+            except Empty:
+                dead = self.dead_workers()
+                if dead:
+                    raise RuntimeError(f"workers exited during long-document preflight: {dead}")
+                on_progress({"phase": "long_document_preflight_wait", "pending_workers": sorted(pending)})
+                continue
+            if message.get("generation") != generation or message.get("worker_id") not in pending:
+                raise RuntimeError("unexpected worker message during long-document preflight")
+            if message["type"] == "error":
+                raise RuntimeError(f"long-document preflight failed on {message['worker_id']}: {message['error']}\n{message['traceback']}")
+            if message["type"] != "result" or message.get("sequence_indices") != [index] or len(message.get("losses", [])) != 1:
+                raise RuntimeError("invalid long-document preflight result")
+            if not math.isfinite(message["losses"][0]):
+                raise RuntimeError("non-finite loss during long-document preflight")
+            pending.remove(message["worker_id"])
+            results.append({k: message.get(k) for k in ("worker_id", "role", "wall_time_s", "peak_allocated_gib", "oom_retries")})
+            on_progress({"phase": "long_document_preflight_passed", "worker_id": message["worker_id"],
+                         "input_tokens": length, "remaining_workers": len(pending)})
+        return {"sequence_index": index, "input_tokens": length,
+                "workers": sorted(results, key=lambda r: r["worker_id"])}
+
     def score(
         self,
         sequences: list[list[int]],
@@ -1645,15 +1832,37 @@ class PersistentModelWorkerPool:
         req: EvalRequest,
         on_progress,
     ) -> tuple[list[float], list[float], dict]:
+        counts = scored_token_counts(sequences)
+        parallel_indices = [i for i, row in enumerate(sequences) if len(row) > sequence_parallel.SINGLE_GPU_MAX_TOKENS]
+        parallel_losses = {"king": {}, "challenger": {}}
+        parallel_meta = None
+        if parallel_indices:
+            parallel_losses, parallel_meta = sequence_parallel.score_documents(
+                self, sequences, parallel_indices, generation, on_progress,
+            )
+        single_indices = [i for i, row in enumerate(sequences) if len(row) <= sequence_parallel.SINGLE_GPU_MAX_TOKENS]
+        single_preflight = (
+            self.preflight_longest_document(sequences, generation, on_progress, single_indices)
+            if req.long_documents is not None and single_indices else None
+        )
+        preflight = parallel_meta["preflight"] if parallel_meta is not None else single_preflight
+        oom_retries = []
+        total_scored_tokens = sum(counts)
         king_losses: list[float | None] = [None] * len(sequences)
         challenger_losses: list[float | None] = [None] * len(sequences)
+        for index, loss in parallel_losses["king"].items():
+            king_losses[index] = loss
+        for index, loss in parallel_losses["challenger"].items():
+            challenger_losses[index] = loss
         next_index = {"king": 0, "challenger": 0}
         in_flight = {spec["worker_id"]: 0 for spec in self.specs}
         paired_done = 0
+        while paired_done < len(sequences) and king_losses[paired_done] is not None and challenger_losses[paired_done] is not None:
+            paired_done += 1
         progress_log_interval = max(1, (len(sequences) + 9) // 10)
         provisional: dict[str, Any] = {}
         early_policy = EarlyStoppingPolicy(
-            enabled=req.early_stop_enabled,
+            enabled=req.early_stop_enabled and req.long_documents is None and not parallel_indices,
             min_fraction=req.early_stop_min_fraction,
             advantage_quantile=req.early_stop_advantage_quantile,
             margin=req.early_stop_margin,
@@ -1666,8 +1875,14 @@ class PersistentModelWorkerPool:
         def fill_worker(worker_id: str, role: str) -> None:
             depth = int(self.ready[worker_id].get("pipeline_depth", 1))
             while in_flight[worker_id] < depth and next_index[role] < len(sequences):
+                target = king_losses if role == "king" else challenger_losses
+                while next_index[role] < len(sequences) and target[next_index[role]] is not None:
+                    next_index[role] += 1
+                if next_index[role] == len(sequences):
+                    break
                 start = next_index[role]
-                end = min(start + req.batch_size, len(sequences))
+                end = scoring_batch_end(sequences, start, req.batch_size, req.seq_len)
+                end = next((i for i in range(start, end) if target[i] is not None), end)
                 self.command_queues[worker_id].put({
                     "type": "score",
                     "generation": generation,
@@ -1708,11 +1923,14 @@ class PersistentModelWorkerPool:
 
             worker_id = message["worker_id"]
             role = message["role"]
+            oom_retries.extend({"worker_id": worker_id, **r} for r in message.get("oom_retries", []))
             in_flight[worker_id] -= 1
             indices = [int(value) for value in message["sequence_indices"]]
             losses = [float(value) for value in message["losses"]]
             if not indices or len(indices) != len(losses):
                 raise RuntimeError(f"malformed batched result from {worker_id}")
+            if not all(math.isfinite(loss) for loss in losses):
+                raise RuntimeError(f"non-finite losses from {worker_id}")
             target = king_losses if role == "king" else challenger_losses
             for index, loss in zip(indices, losses, strict=True):
                 if not 0 <= index < len(target):
@@ -1733,9 +1951,10 @@ class PersistentModelWorkerPool:
                 paired_king = np.asarray(king_losses[:paired_done], dtype=np.float64)
                 paired_challenger = np.asarray(challenger_losses[:paired_done], dtype=np.float64)
                 elapsed = max(time.time() - started, 1e-9)
-                avg_king_loss = float(paired_king.mean())
-                avg_challenger_loss = float(paired_challenger.mean())
-                loss_delta = float((paired_king - paired_challenger).mean())
+                weights = counts[:paired_done]
+                avg_king_loss = float(np.average(paired_king, weights=weights))
+                avg_challenger_loss = float(np.average(paired_challenger, weights=weights))
+                loss_delta = float(np.average(paired_king - paired_challenger, weights=weights))
                 seq_per_s = paired_done / elapsed
                 crossed_log_boundary = (
                     paired_done // progress_log_interval
@@ -1749,6 +1968,7 @@ class PersistentModelWorkerPool:
                         n_bootstrap=req.n_bootstrap,
                         alpha=req.alpha,
                         delta_threshold=req.delta_threshold,
+                        scored_tokens=weights,
                     )
                 on_progress({
                     "phase": "eval_progress",
@@ -1786,6 +2006,8 @@ class PersistentModelWorkerPool:
                         total_sequences=len(sequences),
                         delta_threshold=req.delta_threshold,
                         policy=early_policy,
+                        scored_tokens=counts[:check_at],
+                        total_scored_tokens=total_scored_tokens,
                     )
                     if decision is not None:
                         early_stop_decision = decision
@@ -1818,6 +2040,12 @@ class PersistentModelWorkerPool:
             [float(value) for value in challenger_losses[:completed]],
             {
                 "workers": [self.ready[spec["worker_id"]] for spec in self.specs],
+                "scored_tokens": counts[:completed],
+                "planned_scored_tokens": total_scored_tokens,
+                "long_document_preflight": preflight,
+                "single_gpu_preflight": single_preflight,
+                "sequence_parallel": parallel_meta,
+                "oom_retries": oom_retries,
                 "early_stop": (
                     {
                         **early_stop_decision,
@@ -1837,11 +2065,16 @@ class PersistentModelWorkerPool:
                     process.terminate()
             for process in self.processes.values():
                 process.join(timeout=10)
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=10)
             for queue in [*self.command_queues.values(), self.result_queue]:
                 try:
                     queue.close()
                 except Exception:
                     pass
+            if getattr(self, "parallel_directory", None) is not None:
+                self.parallel_directory.cleanup()
             return
         for queue in self.command_queues.values():
             try:
@@ -1858,6 +2091,8 @@ class PersistentModelWorkerPool:
                 queue.close()
             except Exception:
                 pass
+        if getattr(self, "parallel_directory", None) is not None:
+            self.parallel_directory.cleanup()
 
     def status(self) -> dict:
         return {
@@ -1908,28 +2143,41 @@ def score_with_model_workers(
         generation = pool.load_models(req, king_snapshot, challenger_snapshot, on_progress)
         return pool.score(sequences, generation, req, on_progress)
     except Exception:
-        # In particular, an eager-attention OOM must halt every queued sequence
-        # immediately: never keep scoring, truncate, or switch attention backend.
+        # An unrecoverable failure must halt every queued sample. Batching-only
+        # OOM retries happen inside each scorer; content and backend never change.
         pool.close(force=True)
         _model_worker_pool = None
         raise
 
 
-def bootstrap_verdict(king_losses: list[float], challenger_losses: list[float], req: EvalRequest) -> dict:
-    return paired_bootstrap_verdict(
+def bootstrap_verdict(
+    king_losses: list[float], challenger_losses: list[float], req: EvalRequest,
+    scored_tokens: list[int],
+) -> dict:
+    verdict = paired_bootstrap_verdict(
         king_losses,
         challenger_losses,
         bootstrap_seed=req.bootstrap_seed,
         n_bootstrap=req.n_bootstrap,
         alpha=req.alpha,
         delta_threshold=req.delta_threshold,
+        scored_tokens=scored_tokens,
     )
+    verdict.update(
+        scoring_policy=MASKED_POLICY_VERSION,
+        document_eos_token_id=DOCUMENT_EOS_TOKEN_ID,
+        n_scored_tokens=sum(scored_tokens),
+        aggregation="token-weighted",
+        bootstrap_unit="original-window-or-whole-document" if req.long_documents else "original-window",
+    )
+    return verdict
 
 
 def _compute_source_scores(
     king_losses: list[float],
     challenger_losses: list[float],
     source_labels: list[str] | None,
+    scored_tokens: list[int],
 ) -> dict:
     """Per-source avg_king_loss, avg_challenger_loss, mu_hat.
 
@@ -1941,6 +2189,7 @@ def _compute_source_scores(
     king_arr = np.asarray(king_losses, dtype=np.float64)
     chall_arr = np.asarray(challenger_losses, dtype=np.float64)
     diff_arr = king_arr - chall_arr
+    weights = token_weights(scored_tokens, len(king_arr))
     labels_arr = np.asarray(source_labels)
     scores: dict = {}
     for name in sorted(set(source_labels)):
@@ -1950,29 +2199,55 @@ def _compute_source_scores(
             continue
         scores[name] = {
             "n_sequences": n,
-            "avg_king_loss": round(float(king_arr[mask].mean()), 6),
-            "avg_challenger_loss": round(float(chall_arr[mask].mean()), 6),
-            "mu_hat": round(float(diff_arr[mask].mean()), 6),
+            "n_scored_tokens": int(weights[mask].sum()),
+            "avg_king_loss": round(float(np.average(king_arr[mask], weights=weights[mask])), 6),
+            "avg_challenger_loss": round(float(np.average(chall_arr[mask], weights=weights[mask])), 6),
+            "mu_hat": round(float(np.average(diff_arr[mask], weights=weights[mask])), 6),
         }
     return scores
+
+
+def long_document_scores(king_losses, challenger_losses, provenance, counts):
+    indices = [i for i, p in enumerate(provenance) if p.get("component") == "long_documents"]
+    if not indices:
+        return {}
+    king = [king_losses[i] for i in indices]
+    challenger = [challenger_losses[i] for i in indices]
+    weights = [counts[i] for i in indices]
+    return {
+        "by_bucket": _compute_source_scores(king, challenger, [provenance[i]["length_bucket"] for i in indices], weights),
+        "by_category": _compute_source_scores(king, challenger, [f"{provenance[i]['dataset']}/{provenance[i]['category']}" for i in indices], weights),
+        "by_category_bucket": _compute_source_scores(king, challenger, [f"{provenance[i]['dataset']}/{provenance[i]['category']}/{provenance[i]['length_bucket']}" for i in indices], weights),
+    }
 
 
 def _build_sample_results(
     king_losses: list[float],
     challenger_losses: list[float],
-    sample_provenance: list[dict[str, int]] | None,
+    sample_provenance: list[dict[str, Any]] | None,
+    scored_tokens: list[int],
 ) -> dict[str, Any]:
     """Build compact, index-aligned per-sample audit results."""
     if sample_provenance is None:
         raise RuntimeError("evaluation sampler did not provide sample provenance")
     if not (
-        len(king_losses) == len(challenger_losses) == len(sample_provenance)
+        len(king_losses) == len(challenger_losses) == len(sample_provenance) == len(scored_tokens)
     ):
         raise RuntimeError(
             "sample provenance and paired losses must have identical lengths"
         )
+    has_documents = any(p.get("component") == "long_documents" for p in sample_provenance)
     return {
-        "format": "columnar-v1",
+        **({
+            "component": [p.get("component", "windows") for p in sample_provenance],
+            "document_row": [p.get("document_row") for p in sample_provenance],
+            "document_dataset": [p.get("dataset") for p in sample_provenance],
+            "document_category": [p.get("category") for p in sample_provenance],
+            "document_length": [p.get("length") for p in sample_provenance],
+            "length_bucket": [p.get("length_bucket") for p in sample_provenance],
+            "document_fragments": [p.get("fragments") for p in sample_provenance],
+        } if has_documents else {}),
+        "format": "columnar-masked-documents-v2" if has_documents else "columnar-masked-v1",
         "n_samples": len(king_losses),
         "shard_group_index": [
             int(item["shard_group_index"]) for item in sample_provenance
@@ -1983,6 +2258,7 @@ def _build_sample_results(
         ],
         "king_loss": [float(value) for value in king_losses],
         "challenger_loss": [float(value) for value in challenger_losses],
+        "scored_tokens": list(scored_tokens),
     }
 
 
@@ -1997,17 +2273,25 @@ def _shards_used(dataset_meta: dict) -> list[dict]:
         bucket = dataset_meta.get("bucket") or ""
         refs = [f"s3://{bucket}/{key}" if bucket and not str(key).startswith(("s3://", "http://", "https://")) else key for key in used_keys]
         out.append({"source": dataset_meta.get("source") or "dataset", "refs": refs})
+    long_shards = (dataset_meta.get("long_documents") or {}).get("used_shards", [])
+    for dataset in sorted({s["dataset"] for s in long_shards}):
+        out.append({"source": dataset, "component": "long_documents",
+                    "refs": [s["url"] for s in long_shards if s["dataset"] == dataset]})
     return out
 
 
 def _public_dataset_meta(dataset_meta: dict) -> dict:
     meta = {
         "source": dataset_meta.get("source"),
+        "digest": dataset_meta.get("digest"),
+        "window_digest": dataset_meta.get("window_digest"),
+        "digest_format": dataset_meta.get("digest_format"),
         "shards_used": _shards_used(dataset_meta),
         "min_seq_len": dataset_meta.get("min_seq_len"),
         "max_seq_len": dataset_meta.get("max_seq_len"),
         "max_model_len": dataset_meta.get("max_model_len"),
         "length_source": dataset_meta.get("length_source"),
+        "long_documents": dataset_meta.get("long_documents"),
     }
     return {k: v for k, v in meta.items() if v}
 
@@ -2209,6 +2493,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         config_mismatches = compare_model_configs(king_config, challenger_config)
         if config_mismatches:
             raise RuntimeError(f"king/challenger config mismatch: {config_mismatches[:8]}")
+        req.max_document_tokens = min(int(king_config.max_position_embeddings), int(challenger_config.max_position_embeddings))
         req.vocab_size = int(config_value(king_config, "vocab_size") or 0)
         if req.vocab_size <= 0:
             raise RuntimeError("model config must define a positive vocab_size")
@@ -2252,7 +2537,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         })
         # Pop private key so it never reaches the verdict JSON or disk record.
         source_labels: list[str] | None = dataset_meta.pop("_source_labels", None)
-        sample_provenance: list[dict[str, int]] | None = dataset_meta.pop(
+        sample_provenance: list[dict[str, Any]] | None = dataset_meta.pop(
             "_sample_provenance", None
         )
         if sample_provenance is None or len(sample_provenance) != len(sequences):
@@ -2295,7 +2580,8 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             on_phase,
         )
 
-        verdict = bootstrap_verdict(king_losses, challenger_losses, req)
+        counts = worker_meta["scored_tokens"]
+        verdict = bootstrap_verdict(king_losses, challenger_losses, req, counts)
         early_stop = worker_meta.get("early_stop")
         if early_stop is not None:
             verdict.update({
@@ -2334,15 +2620,25 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             float(verdict["delta_threshold"]),
             bool(verdict["accepted"]),
         )
+        if req.long_documents:
+            verdict["component_scores"] = _compute_source_scores(
+                king_losses, challenger_losses,
+                [p.get("component", "windows") for p in sample_provenance[:len(king_losses)]], counts,
+            )
+            verdict["long_document_scores"] = long_document_scores(
+                king_losses, challenger_losses, sample_provenance[:len(king_losses)], counts,
+            )
         verdict["source_scores"] = _compute_source_scores(
             king_losses,
             challenger_losses,
             source_labels[: len(king_losses)] if source_labels else None,
+            counts,
         )
         verdict["sample_results"] = _build_sample_results(
             king_losses,
             challenger_losses,
             sample_provenance[: len(king_losses)],
+            counts,
         )
         completed_at = datetime.now(timezone.utc).isoformat()
         verdict.update({
@@ -2378,7 +2674,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
                 protocol_request,
                 started_at=started_at,
                 completed_at=completed_at,
-                requested_sequences=int(protocol_request.limits["n"]),
+                requested_sequences=len(sequences) if req.long_documents else int(protocol_request.limits["n"]),
                 completed_sequences=int(
                     verdict.get("n_sequences_evaluated", verdict.get("n_sequences", 0))
                 ),
@@ -2475,8 +2771,9 @@ async def health():
             "code": EVALUATOR_CODE_VERSION or None,
         },
         "request_features": {
-            "challenger_futility_early_stopping": "observed-quantile-v1",
+            "challenger_futility_early_stopping": "token-weighted-observed-quantile-v1",
             "flash_attention_4": "native-asymmetric-value-head-dim-v1",
+            "document_masking": MASKED_POLICY_VERSION,
         },
         "active_evals": _attempts.active_count(),
         "cache_dir": str(MODEL_CACHE_DIR),

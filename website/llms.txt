@@ -6,10 +6,11 @@
 > TAO, how to register, where the training data is, where the eval results
 > live, how to build and submit a challenger model, how to win, what gets
 > you rejected, and how to turn rewards back into compute so you can keep
-> mining forever. Everything here is derived from the live validator source
-> code and chain contract, not from marketing copy.
+> mining forever. The evaluation rules below follow the validator source
+> code and chain contract.
 
-This file describes the Teutonic-II protocol. Last verified 2026-08-24.
+This file describes the Teutonic-II protocol. Evaluation documentation
+updated 2026-10-09 from the repository's document-masked scoring policy.
 Live state changes; always re-check the live sources in section 1 before
 acting. IMPORTANT: guides that mention Hippius uploads, `v4|repo|digest|
 hotkey` reveals, coldkey-token repo naming, or the Quasar/Q3-8B chains
@@ -18,15 +19,16 @@ describe the RETIRED Teutonic-I protocol. Do not follow them.
 
 ## 0. TL;DR
 
-Teutonic is a king-of-the-hill LLM pretraining competition. At any moment
-one checkpoint is the "king". You (a miner) train a better checkpoint (a
+Teutonic is a king-of-the-hill LLM pretraining competition. Each competition
+has a "king" checkpoint. You (a miner) train a better checkpoint (a
 "challenger"), upload it through a validator-issued encrypted upload
 credential, and commit an irreversible on-chain "ready" signal. The
 validator verifies your snapshot byte-for-byte against the chain contract
-and runs a paired next-token cross-entropy duel against the king on
-FineWeb-Edu. If your model's per-sequence loss is lower by a large,
-statistically significant margin, you are crowned king. Kings earn the
-subnet's emissions (paid in SN3 "alpha" tokens). You sell alpha for TAO,
+and runs a paired next-token cross-entropy duel against the king on the
+selected competition's dataset mix. Scoring isolates documents and weights
+losses by scored-token counts. If the lower confidence bound of your loss
+improvement exceeds that competition's threshold, you are crowned king.
+Kings share the subnet's emissions (paid in SN3 "alpha" tokens). You sell alpha for TAO,
 buy more GPU time, train again. That is the whole loop.
 
 Each hotkey gets exactly ONE submission, permanently. Plan accordingly.
@@ -112,17 +114,22 @@ before proceeding.
    weights may differ.
 4. A GPU evaluator scores king and challenger on the SAME token sequences,
    using BF16 replicas on eight GPUs (four replicas per side, one per GPU).
-   The configured sample plan is 30,000 sequences of 2,048 tokens, with
-   batch size 40 on B300. Clear losers can be rejected early. Consult the
-   selected competition's published dataset configuration for active settings.
-5. Sequence selection is deterministic and unknowable pre-submission:
-   `dataset_seed = blake2b("block_hash={finalized_ready_block_hash}|hotkey={your_hotkey}")`.
+   The sample contains 30,000 windows of 2,048 tokens plus approximately
+   6M input tokens from complete documents of 2,049-8,192 tokens. Window
+   fragments are isolated at EOS boundaries; whole documents retain their
+   full context. The complete mixed sample is scored, without early stopping.
+   See section 3.1 for masking, sampling and memory behavior.
+5. Sample selection is deterministic and tied to the finalized ready block:
+   `dataset_seed = int.from_bytes(blake2b(f"block_hash={finalized_ready_block_hash}|hotkey={your_hotkey}".encode(), digest_size=8).digest(), "little")`.
    The block hash at ready-finalization does not exist when you decide to
    submit, so you cannot cherry-pick your eval sample.
-6. Acceptance: with `diff_i = king_loss_i - challenger_loss_i` per
-   sequence, a paired bootstrap (10,000 resamples, alpha=0.001, fixed
-   seed 0) computes the one-sided lower confidence bound (LCB) of
-   mean(diff). Accept iff `LCB > delta_threshold`; the initial threshold
+6. Acceptance: with `diff_i = king_loss_i - challenger_loss_i` and
+   `w_i = scored_tokens_i` for each original window or whole document,
+   `mu_hat = sum(w_i * diff_i) / sum(w_i)`. A paired bootstrap draws
+   sample indices with replacement (10,000 resamples, alpha=0.001,
+   bootstrap seed 0), recomputing that weighted ratio in every draw.
+   Its lower quantile is the one-sided lower confidence bound (LCB).
+   Accept iff `LCB > delta_threshold`; the default threshold
    is 0.003 nats/token for MAIN and 0.002 for MATH, CODE, and TEXT,
    independently configurable in each competition.
 7. On accept, you are crowned: the dashboard updates, your model is
@@ -137,8 +144,10 @@ There are four competitions: MAIN, MATH, CODE, TEXT. Select one with
 --competition math`. Omission means MAIN. Selection is fixed at the ready
 commitment; one ready submission per hotkey applies across all four.
 
-Specialists plan 21,000 samples from their own group plus 4,500 from each
-other group. Every group has explicit category weights totaling 100%.
+Specialists plan 21,000 windows from their own group plus 4,500 from each
+other group. The additional ~6M document tokens follow the same 70/15/15
+mix: approximately 4.2M input tokens from their own group and 0.9M from
+each other group. Every group has explicit category weights totaling 100%.
 Until a specialist gets its first winner, challengers face the current
 MAIN king using the specialist mix and threshold. All duels run sequentially.
 
@@ -157,6 +166,61 @@ MAIN: https://teutonic.ai/dashboard.json
 Splits: https://teutonic.ai/competitions/<math|code|text>/dashboard.json
 Dataset policy: corresponding `datasets/manifest.json` under each prefix.
 Raw split inventories: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/<math|code|text>/manifest.json
+
+
+### 3.1 Document-masked evaluation and complete documents
+
+Scoring policy: `document-masked-token-bootstrap-v1`.
+Whole-document sampling policy: `long-documents-2k-8k-v1`.
+
+- MASKING: EOS token 151645 ends a document fragment. Attention cannot
+  cross EOS or original window boundaries, and positions restart at zero
+  in each fragment. No synthetic BOS/EOS is inserted and no context is
+  restored from outside a sampled window. The first token of every
+  fragment is excluded from the loss; terminal EOS targets still count.
+  Full attention, sliding attention and the model's attention sinks retain
+  their semantics within each fragment. FA4 uses explicit fragment
+  boundaries; eager scoring uses explicit causal document masks.
+- COMPLETE DOCUMENTS: the additional sample reconstructs original
+  documents across stored rows and shards. Length includes terminal EOS.
+  Only 2,049-8,192-token documents are eligible: the two buckets are
+  2,049-4,096 and 4,097-8,192, inclusive. Documents of 8,193 tokens or more
+  are excluded; longer documents are never cropped into the eligible range.
+- MIX: MAIN preserves its source proportions and category weights derived
+  from manifest shard counts. MATH, CODE and TEXT preserve their 70/15/15
+  source mix and explicit category weights. Within each category, document
+  COUNTS follow the eligible buckets' relative populations. Every nonempty
+  eligible bucket gets at least one complete document. Token quotas and
+  resulting percentages are approximate because documents are indivisible.
+- WEIGHT IN THE SCORE: with 30,000 x 2,048 window input tokens plus ~6M
+  document input tokens, documents contribute about 8.9% of the combined
+  mean's weight. The exact weight uses scored targets after masking.
+  This is not a fixed 8.9% share of the LCB: bootstrap uncertainty is
+  calculated from the combined sample. Bootstrap units are original
+  windows or whole documents, not tokens or internal window fragments.
+- REPLAY: the request pins the index manifest's exact contents and SHA-256,
+  source manifests, file ETags and sizes. Index reads use validated HTTP
+  ranges and ETags; selected token shards are verified by full SHA-256.
+  Keep the request, model digests, block hash, hotkey and bootstrap seed
+  to reproduce a run. Different block hashes produce different selections,
+  but those selections can overlap. Replay also requires the pinned data
+  objects or their cached contents to remain available.
+- NUMERICS: workers use strict deterministic PyTorch algorithms,
+  deterministic cuDNN and `CUBLAS_WORKSPACE_CONFIG=:4096:8`. Reproducibility
+  assumes the same hardware/software stack and batching; it does not imply
+  bitwise equality across GPU types or library versions.
+- MEMORY: each replica checks the longest sampled document before full
+  scoring. Mixed batches limit token count and attention work. Recoverable
+  OOMs retry the same samples in smaller batches or reduce LM-head projection
+  chunks. A sample that still cannot fit fails evaluation; it is not
+  truncated or silently dropped. All samples in the current length range
+  use complete model replicas on single GPUs.
+
+The 30,000-window count and acceptance thresholds are repository defaults.
+Check the selected competition's published configuration and evaluation
+request when reproducing a specific duel. Window-only masked evaluations
+retain the configured early-stopping rule; the mixed document sample is
+always scored in full.
 
 
 
@@ -222,8 +286,10 @@ Facts that matter for strategy:
 ## 5. Compute
 
 Size the problem honestly: the model is ~110B parameters (~220 GB in
-bf16), though only ~7B are active per token. The official duel runs on 8
-GPUs with each model sharded over 4. For training you need a multi-GPU
+bf16), though only ~7B are active per token. The evaluator uses eight GPUs:
+four complete king replicas and four complete challenger replicas, with
+one model per GPU. The tested setup is 8x B300, with a nominal batch size
+of 40 windows and smaller batches for longer samples. For training you need a multi-GPU
 node (8x H200/B200-class or better) or multi-node setup; LoRA-style or
 expert-subset fine-tuning reduces the footprint but you must merge back to
 a full dense-format checkpoint that byte-matches the contract files.
@@ -244,19 +310,30 @@ All public, no auth needed for reads.
 
 - Eval dataset config (what the duel draws from, updates over time):
   https://teutonic.ai/datasets/manifest.json
-  Currently: single source `finewebedu`, proportion 1.0, n=2000,
-  delta_threshold=0.5, sampling algorithm
-  `blake2b-64-block-hash-hotkey-v1`.
-- FineWeb-Edu pretokenized shard manifest (the raw source inventory):
-  https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/finewebedu/manifest.json
-  Format: `.npy` shards of uint32 token ids, packed sequences of length
-  2048, tokenizer `XiaomiMiMo/MiMo-V2.5-Pro` (same as genesis), ~1.57
-  trillion tokens across ~125,441 shards. Each shard entry has `key`,
-  `n_tokens`, `size_bytes`, `sha256`; fetch shards relative to the same
-  public base URL.
-- The eval distribution IS this data. Train on FineWeb-Edu tokenized with
-  the genesis tokenizer, 2048-token packing, and you are training on the
-  scoreboard distribution.
+  Specialist configs use
+  https://teutonic.ai/competitions/<math|code|text>/datasets/manifest.json.
+- MAIN's default source mix from `chain.toml` is 32% `pretrain-behaviors`,
+  28% `math-reasoning`, 22% `txt360-v2`, 17% `code-reasoning`, and
+  1% `sft-reasoning`. Each raw source manifest is at
+  `https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/<source>/manifest.json`.
+- Specialists use the `splits/math`, `splits/code` and `splits/text`
+  manifests under that same public base, with 70% for their own group and
+  15% for each other group. Split groups contain explicitly weighted
+  categories drawn from the original sources; follow those manifests
+  rather than treating a split as one raw source dataset.
+- Token data is stored in `.npy` shards of uint32 token IDs, in rows of
+  2,048 tokens, using the genesis tokenizer. Shard descriptors identify
+  their location, `n_tokens`, `size_bytes` and `sha256`. Storage row
+  boundaries are not necessarily document boundaries.
+- Whole-document index inventory:
+  https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest.json
+  It lists category length tables, fragment pointers, fragment locations
+  and shard-name inventories with their SHA-256 hashes, ETags and sizes.
+  These indexes locate complete documents in the original token shards;
+  they are not a second copy of the training tokens.
+- Match your selected competition's mix, tokenizer, document boundaries
+  and scored lengths when validating a candidate. FineWeb-only validation
+  does not reproduce this evaluation distribution.
 
 
 ## 7. Submission contract (every gate, in order)
@@ -310,24 +387,30 @@ teutonic-miner ready --hotkey h0
 ## 8. How to win
 
 1. START FROM THE KING. Download the current king from the public model
-   bucket (section 2) at its pinned digest. Your challenger must beat it
-   by LCB > 0.5 nats mean per-sequence CE on FineWeb-Edu. Continued
-   pretraining of the king is the meta; training from scratch is hopeless.
-2. MATCH THE EVAL DISTRIBUTION. Train on the FineWeb-Edu shards from the
-   manifest (section 6), genesis tokenizer, 2048-token sequences.
+   bucket (section 2) at its pinned digest for your selected competition.
+   Your challenger's token-weighted loss improvement must have an LCB
+   above that competition's threshold: defaults are 0.003 for MAIN and
+   0.002 for MATH, CODE and TEXT, in nats per scored token.
+2. MATCH THE EVAL DISTRIBUTION. Use the source and category mix in section
+   6, the genesis tokenizer, masked 2,048-token windows and complete
+   2,049-8,192-token documents. Prevent attention across document boundaries
+   in offline validation and use the same target-counting rules.
 3. VALIDATE OFFLINE FIRST — you get ONE shot per hotkey. Reproduce the
-   exact verdict locally: score king and challenger per-sequence CE on a
-   few thousand held-out FineWeb-Edu sequences and run
-   `teutonic.evaluation.policy.paired_bootstrap_verdict` (the validator's
-   own function) with alpha=0.001, n_bootstrap=10000, delta=0.5. Submit
-   only when your offline LCB clears the bar with margin — your offline
-   sample differs from the validator's secret draw.
+   scoring policy locally with the same samples for both models. Pass
+   per-sample mean losses AND `scored_tokens` to
+   `teutonic.evaluation.policy.paired_bootstrap_verdict`, using alpha=0.001,
+   n_bootstrap=10000, bootstrap_seed=0 and the selected competition's
+   `delta_threshold`. Omitting token counts uses the historical equal-unit
+   calculation and does not reproduce masked scoring. Submit only when
+   your offline LCB clears the bar with margin; your offline sample differs
+   from the validator's finalized-block draw.
 4. BE FAST AFTER A CROWNING. When `king.reign_number` bumps, start
    training from the new king immediately; the first sufficiently-better
    challenger wins the next crown.
-5. EARLY-GENERATION REGIME: kings are far from converged right now, so
-   large gains are available to whoever spends real compute on FineWeb-Edu
-   next-token loss. Reign 1 was won by 4.6 nats.
+5. CHECK MORE THAN ONE SAMPLE. Repeat offline validation with several
+   saved block hashes while keeping the hotkey, models and other settings
+   fixed. Compare the combined LCB and the separate window/document mean
+   advantages; improvement on the added documents alone may not win overall.
 6. DON'T BURN HOTKEYS ON HYGIENE. Most failures are mechanical: modified
    contract files, missing shards, an accidental `manifest.json`,
    symlinks, wrong hotkey type, oversize upload. Check everything twice —
@@ -347,15 +430,15 @@ teutonic-miner ready --hotkey h0
   manifest binds every file's SHA-256 and your Ed25519 signature. Nothing
   can change after `ready`.
 - EVAL-SAMPLE CHERRY-PICKING: the sample seed depends on the finalized
-  ready block hash — unknowable pre-submission. Genuinely lowering
-  FineWeb-Edu loss is the same thing as winning honestly.
+  ready block hash — unknowable pre-submission. Validate improvement
+  across independent samples from the selected competition's distribution.
 - CODE/TOKENIZER INJECTION: impossible — architecture files, config, and
   tokenizer are byte-locked to genesis hashes.
 - SPECULATIVE-DECODING HEADS: MTP weights banned (they would corrupt
   paired CE comparison).
 - SPAM: one permanent submission per hotkey; each extra attempt costs a
-  fresh registration burn. Noise perturbations of the king cannot clear
-  a 0.5-nat LCB; they only waste the hotkey.
+  fresh registration burn. A challenger must clear the configured positive
+  LCB threshold; merely changing checkpoint bytes does not establish a win.
 - Old attack surfaces from Teutonic-I (HF repo impersonation, coldkey
   tokens, Hippius digests) no longer exist — that whole flow was removed.
 
@@ -379,7 +462,19 @@ teutonic-miner ready --hotkey h0
   heartbeats).
 - Dataset config evolution: re-fetch
   https://teutonic.ai/datasets/manifest.json — `config_version` changes
-  when operators alter the eval mix, n, or delta.
+  when operators alter the eval mix, n, delta or long-document configuration.
+- Detailed evaluator/replay reports include `component_scores` for windows
+  and whole documents, plus `long_document_scores` by bucket, category and
+  category/bucket. These full reports contain more detail than the public
+  dashboard summary.
+- In `verdict.sample_results`, arrays are index-aligned: `king_loss[i]`,
+  `challenger_loss[i]` and `scored_tokens[i]` describe the same sample.
+  `component[i]` identifies a window or whole document. Whole documents
+  also have their index row, dataset, category, length, bucket and fragment
+  locations. Those document-only fields are null for ordinary windows,
+  whose identities use shard and row indices. Window losses aggregate
+  their masked fragments; separate losses for those internal fragments
+  are not saved. Whole documents each have their own saved loss pair.
 
 
 ## 11. Rewards → compute → more mining (the self-sustaining loop)
@@ -462,14 +557,20 @@ the coldkey.
 - netuid 3, network finney; hotkey MUST be Ed25519
 - dashboard: https://teutonic.ai/dashboard.json
 - dataset config: https://teutonic.ai/datasets/manifest.json
-- shards: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/finewebedu/manifest.json
+- source shards: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/<source>/manifest.json
+- document indexes: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest.json
 - king download: https://pub-0821d4e196224864af220294345fd141.r2.dev/models/sha256/<king_digest>/
-- accept rule: bootstrap LCB of mean per-sequence CE gap > 0.5 nats
-  (n=2000 seqs x 2048 tokens, alpha=0.001, B=10000, FineWeb-Edu)
+- accept rule: paired-bootstrap LCB of token-weighted CE advantage > the
+  competition's delta_threshold (defaults: MAIN 0.003; MATH/CODE/TEXT 0.002)
+- sample: 30,000 masked 2,048-token windows + ~6M input tokens from
+  complete 2,049-8,192-token documents; alpha=0.001, B=10000, bootstrap seed 0
+- specialist mix: 70% own group / 15% each other group, including the
+  additional document token budget
 - submission: `teutonic-miner register` -> `auth` -> `upload` -> `ready`
   (one shot per hotkey, forever)
 - contract: six genesis files byte-locked; weights only; <=250 GB
-- rewards: equal split over last <=5 kings, republished every 101 blocks
+- rewards: MAIN lineage and specialist allocations from section 3,
+  republished every 101 blocks
 - code: https://github.com/unarbos/teutonic
 
 ## Reference links
@@ -479,6 +580,9 @@ the coldkey.
 - [Active chain contract](https://github.com/unarbos/teutonic/blob/main/chain.toml): genesis revision, locked files, eval config.
 - [Acceptance math](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluation/policy.py): `paired_bootstrap_verdict`.
 - [Evaluator engine](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/engine.py): model loading and scoring.
+- [Document masking](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/document_masking.py): attention boundaries and reset positions.
+- [Whole-document sampler](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/long_documents.py): reconstruction, competition mix and sample provenance.
+- [Document-index manifest](https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest.json): versioned index inventory for complete documents.
 - [Ready-signal schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/ready-signal-v1.schema.json): `r2ready:v1` contract.
 - [Mailbox envelope schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/mailbox-envelope-v1.schema.json): encrypted credential contract.
 - [Dashboard schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/dashboard-v1.schema.json): dashboard JSON contract.
