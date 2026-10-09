@@ -70,7 +70,7 @@ class ValidatorScheduler:
                 health.get("request_features", {}).get(
                     "challenger_futility_early_stopping"
                 )
-                != "observed-quantile-v1"
+                != "token-weighted-observed-quantile-v1"
             ):
                 raise RuntimeError("evaluator does not advertise early-stopping support")
         except Exception as exc:
