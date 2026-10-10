@@ -6,6 +6,7 @@ Removes:
   - Shard files (.npy) older than --max-age-hours
 
 Safety:
+  - Cleanup skips the cache while an evaluation holds its shared cache lock
   - Files newer than --min-age-hours are never touched (grace window)
   - Open file descriptors (/proc/*/fd) and memory-mapped files (/proc/*/maps) are
     detected, so any shard currently being downloaded or read (np.load mmap_mode="r")
@@ -23,8 +24,14 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import time
 from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from teutonic.evaluator.cache_lock import cache_lock
 
 log = logging.getLogger("cleanup_shard_cache")
 
@@ -121,6 +128,19 @@ def fmt_age(age_s: float) -> str:
 # ---------------------------------------------------------------------------
 
 def run_cleanup(
+    cache_dir: Path,
+    min_age_s: float,
+    max_age_s: float,
+    dry_run: bool,
+) -> dict:
+    with cache_lock(cache_dir, cleanup=True) as acquired:
+        if not acquired:
+            log.info("cleanup skipped: cache is in use by an evaluation or another cleanup")
+            return {"deleted": 0, "freed_bytes": 0}
+        return _run_cleanup(cache_dir, min_age_s, max_age_s, dry_run)
+
+
+def _run_cleanup(
     cache_dir: Path,
     min_age_s: float,
     max_age_s: float,

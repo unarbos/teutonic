@@ -33,7 +33,7 @@ import traceback
 import types
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -74,6 +74,7 @@ from teutonic.evaluation.masking import (
     token_weights,
 )
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE, MAX_BATCH_SIZE
+from teutonic.evaluator.cache_lock import cache_lock
 from teutonic.evaluator.document_index import DocumentIndexDownloadError
 from teutonic.evaluator.document_masking import masked_model_inputs
 from teutonic.evaluator.module_cache import transformers_module_cache_lock
@@ -2357,8 +2358,12 @@ def promote_challenger_to_king(
 
 
 def cleanup_model_cache() -> None:
+    locks = ExitStack()
     try:
         if not MODEL_CACHE_DIR.exists():
+            return
+        if not locks.enter_context(cache_lock(MODEL_CACHE_DIR, cleanup=True)):
+            log.info("cache cleanup skipped: evaluation is using the model cache")
             return
         snapshots = [p for p in MODEL_CACHE_DIR.glob("*/*") if p.is_dir()]
         total = sum(sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) for d in snapshots)
@@ -2393,6 +2398,8 @@ def cleanup_model_cache() -> None:
             log.info("cache cleanup: deleted %s (%.1f GB)", d, size / 1e9)
     except Exception:
         log.warning("cache cleanup failed", exc_info=True)
+    finally:
+        locks.close()
 
 
 def write_record(eval_id: str, payload: dict) -> tuple[str, str]:
@@ -2453,8 +2460,11 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
 
     threading.Thread(target=heartbeat_loop, daemon=True, name=f"heartbeat-{eval_id}").start()
 
+    cache_locks = ExitStack()
     try:
         on_phase({"phase": "setup_start"})
+        cache_locks.enter_context(cache_lock(MODEL_CACHE_DIR))
+        cache_locks.enter_context(cache_lock(SHARD_CACHE_DIR))
         resolver = R2ArtifactResolver(MODEL_CACHE_DIR / "immutable-r2")
         on_phase({"phase": "artifact_materialization_start", "role": "king"})
         king_snapshot = resolver.resolve(protocol_request.king)
@@ -2728,6 +2738,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         )
     finally:
         heartbeat_stop.set()
+        cache_locks.close()
         cleanup_model_cache()
         try:
             _eval_lock.release()

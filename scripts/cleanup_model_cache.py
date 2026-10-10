@@ -7,6 +7,7 @@ Removes:
   - Excess snapshots beyond --keep-recent per model when total cache exceeds --watermark-gb
 
 Safety:
+  - Cleanup skips the cache while an evaluation holds its shared cache lock
   - Directories newer than --min-age-hours are never touched (grace window)
   - Open file descriptors (/proc/*/fd) and memory-mapped files (/proc/*/maps) are
     detected, so any snapshot currently loaded by the eval server is skipped
@@ -30,6 +31,11 @@ import shutil
 import sys
 import time
 from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from teutonic.evaluator.cache_lock import cache_lock
 
 log = logging.getLogger("cleanup_model_cache")
 
@@ -178,6 +184,23 @@ def fmt_age(age_s: float) -> str:
 # ---------------------------------------------------------------------------
 
 def run_cleanup(
+    cache_dir: Path,
+    min_age_s: float,
+    max_age_s: float,
+    keep_recent: int,
+    watermark_bytes: float,
+    dry_run: bool,
+) -> dict:
+    with cache_lock(cache_dir, cleanup=True) as acquired:
+        if not acquired:
+            log.info("cleanup skipped: cache is in use by an evaluation or another cleanup")
+            return {"deleted": 0, "freed_bytes": 0}
+        return _run_cleanup(
+            cache_dir, min_age_s, max_age_s, keep_recent, watermark_bytes, dry_run,
+        )
+
+
+def _run_cleanup(
     cache_dir: Path,
     min_age_s: float,
     max_age_s: float,
