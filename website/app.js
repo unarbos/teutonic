@@ -58,9 +58,21 @@
     [["SAMPLES", run.samples, run.samplesTitle], ["EARLY STOP", run.earlyStopLabel, "Whether evaluation stopped before all planned samples"]].forEach(function(entry) { var group = document.createElement("div"), label = document.createElement("dt"), value = document.createElement("dd"); label.textContent = entry[0]; value.textContent = entry[1]; value.title = entry[2]; group.appendChild(label); group.appendChild(value); evaluationMetadata.appendChild(group); });
     panel.appendChild(evaluationMetadata);
     panel.appendChild(historySourceScores(item));
-    heading.className = "history-shards-heading"; heading.textContent = "SHARDS USED · " + view.count; panel.appendChild(heading);
+    var shardSummary = document.createElement("div"); shardSummary.className = "history-shards-summary";
+    heading.className = "history-shards-heading"; heading.textContent = "SHARDS USED · " + number(view.count); shardSummary.appendChild(heading); panel.appendChild(shardSummary);
     if (!view.count) { var empty = document.createElement("p"); empty.className = "history-shards-empty"; empty.textContent = "SHARD DATA UNAVAILABLE FOR THIS EVALUATION"; panel.appendChild(empty); }
-    view.groups.forEach(function (group) { var section = document.createElement("section"), label = document.createElement("h3"), list = document.createElement("ul"); section.className = "history-shard-group"; label.textContent = group.source + " · " + group.names.length; group.names.forEach(function (name) { var entry = document.createElement("li"), code = document.createElement("code"); code.textContent = name; entry.appendChild(code); list.appendChild(entry); }); section.appendChild(label); section.appendChild(list); panel.appendChild(section); });
+    if (view.count) {
+      var download = document.createElement("button"); download.type = "button"; download.className = "history-shards-download"; download.textContent = "DOWNLOAD SHARD LIST (.TXT)";
+      download.addEventListener("click", function () {
+        var evaluationId = String(item.challenge_id || item.timestamp || "evaluation-" + (index + 1));
+        var lines = ["TEUTONIC — SHARDS USED", "Evaluation: " + evaluationId, "Total shards: " + view.count, ""];
+        view.groups.forEach(function (group) { lines.push(group.source + " · " + group.names.length); group.names.forEach(function (name) { lines.push(name); }); lines.push(""); });
+        var url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" })), link = document.createElement("a");
+        link.href = url; link.download = "shards-" + evaluationId.replace(/[^a-zA-Z0-9_-]/g, "-") + ".txt";
+        document.body.appendChild(link); link.click(); link.remove(); setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      });
+      shardSummary.appendChild(download);
+    }
     td.appendChild(panel); return row;
   }
   function makeHistoryRowExpandable(row, details, item, detailKey) {
