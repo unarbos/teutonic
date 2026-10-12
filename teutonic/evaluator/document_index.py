@@ -1,13 +1,15 @@
 """Read pinned document indexes by HTTP range, without downloading 150+ GB."""
 
+import base64
 import hashlib
 import io
 import json
 import logging
 import random
 import tempfile
+import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from http.client import IncompleteRead
@@ -31,19 +33,50 @@ PAGE_SIZE = 64 * 1024
 log = logging.getLogger(__name__)
 
 
-class DocumentIndexDownloadError(RuntimeError):
+class RangeDownloadError(RuntimeError):
     pass
 
 
-class PinnedObject:
-    def __init__(self, descriptor, cache_dir, opener=urlopen):
-        validate_index_file(descriptor)
+class DocumentIndexDownloadError(RangeDownloadError):
+    pass
+
+
+class RangeObject:
+    """Bounded HTTP reads with optional disk caching and object identity checks."""
+
+    kind = "dataset shard"
+    download_error = RangeDownloadError
+    cache_suffix = ".range"
+
+    def __init__(self, descriptor, cache_dir=None, opener=urlopen):
         self.descriptor = descriptor
         self.size = descriptor["size_bytes"]
         self.opener = opener
-        identity = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
-        self.cache = Path(cache_dir) / identity
+        self.cache = None
+        if cache_dir is not None:
+            identity = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
+            self.cache = Path(cache_dir) / identity
         self.page = lru_cache(maxsize=64)(self._page)
+        self.downloaded_bytes = 0
+        self.metadata_sha256_checked = False
+        self._metrics_lock = threading.Lock()
+
+    def _check_metadata(self, headers):
+        """Compare uploader metadata, not a locally computed whole-object hash."""
+        expected = self.descriptor.get("sha256")
+        if not expected:
+            return
+        reported = headers.get("x-amz-meta-sha256")
+        if reported is not None:
+            if reported.lower() != expected:
+                raise RuntimeError(f"{self.kind} SHA-256 metadata differs from validator descriptor")
+            self.metadata_sha256_checked = True
+        # Multipart composite checksums are not whole-file SHA-256 values.
+        checksum = headers.get("x-amz-checksum-sha256")
+        if checksum and headers.get("x-amz-checksum-type") == "FULL_OBJECT":
+            if checksum != base64.b64encode(bytes.fromhex(expected)).decode():
+                raise RuntimeError(f"{self.kind} SHA-256 metadata differs from validator descriptor")
+            self.metadata_sha256_checked = True
 
     def _page(self, number):
         start = number * PAGE_SIZE
@@ -53,8 +86,8 @@ class PinnedObject:
         return self._range(start, end, str(number))
 
     def _range(self, start, end, cache_key):
-        target = self.cache / cache_key
-        if target.exists():
+        target = self.cache / (cache_key + self.cache_suffix) if self.cache is not None else None
+        if target is not None and target.exists():
             blob = target.read_bytes()
             if (
                 len(blob) == end - start + 1 + 32
@@ -66,7 +99,7 @@ class PinnedObject:
             headers={
                 "User-Agent": "teutonic-eval/1.0",
                 "Range": f"bytes={start}-{end}",
-                "If-Match": self.descriptor["etag"],
+                **({"If-Match": self.descriptor["etag"]} if "etag" in self.descriptor else {}),
                 "Accept-Encoding": "identity",
             },
         )
@@ -77,10 +110,16 @@ class PinnedObject:
                         response.status != 206
                         or response.headers.get("Content-Range") != f"bytes {start}-{end}/{self.size}"
                     ):
-                        raise RuntimeError("index server did not honor the exact byte range")
-                    if response.headers.get("ETag") != self.descriptor["etag"]:
-                        raise RuntimeError("document index changed since configuration was pinned")
+                        raise RuntimeError(f"{self.kind} server did not honor the exact byte range")
+                    if (
+                        "etag" in self.descriptor
+                        and response.headers.get("ETag") != self.descriptor["etag"]
+                    ):
+                        raise RuntimeError(f"{self.kind} changed since configuration was pinned")
+                    self._check_metadata(response.headers)
                     body = response.read(end - start + 2)
+                    if len(body) != end - start + 1:
+                        raise IncompleteRead(body, end - start + 1 - len(body))
                 break
             except (URLError, TimeoutError, ConnectionError, IncompleteRead) as exc:
                 retry_after = None
@@ -90,8 +129,8 @@ class PinnedObject:
                     retry_after = exc.headers.get("Retry-After") if exc.headers else None
                     exc.close()
                 if attempt == 4:
-                    raise DocumentIndexDownloadError(
-                        "document index download exhausted retries"
+                    raise self.download_error(
+                        f"{self.kind} download exhausted retries"
                     ) from exc
                 delay = 5 * 2**attempt + random.uniform(0, 1)
                 if retry_after:
@@ -100,23 +139,27 @@ class PinnedObject:
                     except ValueError:
                         try:
                             deadline = parsedate_to_datetime(retry_after)
-                            delay = max(delay, (deadline - datetime.now(timezone.utc)).total_seconds())
+                            delay = max(delay, (deadline - datetime.now(UTC)).total_seconds())
                         except (TypeError, ValueError, OverflowError):
                             pass
                 # Long server cooldowns are retried by the scheduler, not held in a worker.
                 if delay > 120:
-                    raise DocumentIndexDownloadError(
-                        "document index download requires a longer cooldown"
+                    raise self.download_error(
+                        f"{self.kind} download requires a longer cooldown"
                     ) from exc
                 log.warning(
-                    "document index download retry attempt=%d delay=%.1fs error=%s",
-                    attempt + 1, delay, type(exc).__name__,
+                    "%s download retry attempt=%d delay=%.1fs error=%s",
+                    self.kind, attempt + 1, delay, type(exc).__name__,
                 )
                 time.sleep(delay)
-        if len(body) != end - start + 1:
-            raise RuntimeError("truncated document index range")
+        with self._metrics_lock:
+            self.downloaded_bytes += len(body)
+        if target is None:
+            return body
         self.cache.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=self.cache, delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(
+            dir=self.cache, suffix=self.cache_suffix + ".tmp", delete=False
+        ) as tmp:
             path = Path(tmp.name)
             tmp.write(hashlib.sha256(body).digest() + body)
         try:
@@ -137,6 +180,20 @@ class PinnedObject:
         first, last = offset // PAGE_SIZE, (offset + size - 1) // PAGE_SIZE
         data = b"".join(self.page(n) for n in range(first, last + 1))
         return data[offset % PAGE_SIZE : offset % PAGE_SIZE + size]
+
+
+class PinnedObject(RangeObject):
+    kind = "document index"
+    download_error = DocumentIndexDownloadError
+    cache_suffix = ""
+
+    def __init__(self, descriptor, cache_dir, opener=urlopen):
+        validate_index_file(descriptor)
+        super().__init__(descriptor, cache_dir, opener)
+
+    def _check_metadata(self, headers):
+        # Index identity continues to use its configured ETag pin.
+        pass
 
 
 class NpyVector:

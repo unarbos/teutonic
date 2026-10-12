@@ -127,7 +127,7 @@ def legacy_bootstrap_verdict(policy_input, now):
 
 class EvaluationPolicyRegressionTests(unittest.TestCase):
     def test_evaluator_infrastructure_codes_remain_retryable_through_protocol(self):
-        for code in ("dataset_index_download", "evaluator_interrupted"):
+        for code in ("dataset_index_download", "dataset_shard_download", "evaluator_interrupted"):
             with self.subTest(code=code):
                 public_code = _evaluator_error_code({"code": code, "error": "private detail"})
                 self.assertEqual(

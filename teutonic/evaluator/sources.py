@@ -2,24 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import random
 from dataclasses import dataclass
-from pathlib import Path
-from urllib.request import Request, urlopen
 
 import numpy as np
 
 from teutonic.evaluator import engine as base
-
+from teutonic.evaluator.token_shards import NpyShard
 
 log = logging.getLogger("teutonic.evaluator.sources")
-URL_CACHE_DIR = Path(
-    os.environ.get(
-        "TEUTONIC_PRETOKENIZED_CACHE_DIR",
-        str(base.SHARD_CACHE_DIR / "pretokenized"),
-    )
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,58 +22,8 @@ class ShardRef:
     n_tokens: int
 
 
-def _cache_path(shard: ShardRef) -> Path:
-    filename = Path(shard.url.split("?", 1)[0]).name or "shard.npy"
-    return URL_CACHE_DIR / f"{shard.sha256[:24]}-{filename}"
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(8 * 1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _verified(path: Path, shard: ShardRef) -> bool:
-    return (
-        path.is_file()
-        and path.stat().st_size == shard.size_bytes
-        and _sha256_file(path) == shard.sha256
-    )
-
-
-def materialize_shard(shard: ShardRef, on_phase=None) -> Path:
-    target = _cache_path(shard)
-    if _verified(target, shard):
-        return target
-    target.unlink(missing_ok=True)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    partial = target.with_suffix(target.suffix + ".partial")
-    partial.unlink(missing_ok=True)
-    if on_phase:
-        on_phase({"phase": "pretokenized_shard_download_start", "url": shard.url})
-    request = Request(shard.url, headers={"User-Agent": "teutonic-eval/1.0"})
-    try:
-        with urlopen(request, timeout=600) as response, partial.open("xb") as output:
-            while chunk := response.read(8 * 1024 * 1024):
-                output.write(chunk)
-        if not _verified(partial, shard):
-            raise RuntimeError("downloaded shard differs from validator descriptor")
-        partial.replace(target)
-    except Exception:
-        partial.unlink(missing_ok=True)
-        raise
-    if on_phase:
-        on_phase(
-            {
-                "phase": "pretokenized_shard_download_done",
-                "url": shard.url,
-                "sha256": shard.sha256,
-                "size_bytes": shard.size_bytes,
-            }
-        )
-    return target
+def open_shard(shard: ShardRef) -> NpyShard:
+    return NpyShard(shard)
 
 
 def _load_with_retry(
@@ -91,20 +32,25 @@ def _load_with_retry(
     rng: np.random.Generator,
     limit: int,
     on_phase=None,
-) -> tuple[Path, list[tuple[int, list[int]]]]:
-    path = materialize_shard(shard, on_phase=on_phase)
-    try:
-        return path, base.load_indexed_sequences_from_npy_shard(
-            str(path), req, rng, limit
-        )
-    except Exception as exc:
-        if not base.is_truncated_npy_error(exc):
-            raise
-        path.unlink(missing_ok=True)
-        path = materialize_shard(shard, on_phase=on_phase)
-        return path, base.load_indexed_sequences_from_npy_shard(
-            str(path), req, rng, limit
-        )
+) -> list[tuple[int, list[int]]]:
+    # Each range has bounded retries; no full-file fallback is permitted.
+    if on_phase:
+        on_phase({"phase": "pretokenized_shard_download_start", "url": shard.url})
+    reader = open_shard(shard)
+    indices = base.shuffled_indices(rng, reader.sequence_count(req.seq_len), limit)
+    rows = reader.read_sequences(indices, req.seq_len)
+    loaded = [(int(i), row.astype(np.int64, copy=False).tolist()) for i, row in zip(indices, rows)]
+    if on_phase:
+        on_phase({
+            "phase": "pretokenized_shard_download_done",
+            "url": shard.url,
+            "sha256": shard.sha256,
+            "size_bytes": reader.reader.downloaded_bytes,
+            "shard_size_bytes": shard.size_bytes,
+            "download_mode": "http_range",
+            "metadata_sha256_checked": reader.reader.metadata_sha256_checked,
+        })
+    return loaded
 
 
 def _source_seed(dataset_seed: int, source: str) -> int:
@@ -169,7 +115,7 @@ def sample_pretokenized_sequences(
         used_shards: list[dict] = []
         for shard, quota in zip(refs, quotas, strict=True):
             load_limit = int(quota * 1.5) + 8 if req.vocab_size > 0 else quota
-            _local_path, loaded = _load_with_retry(
+            loaded = _load_with_retry(
                 shard, req, rng, load_limit, on_phase=on_phase
             )
             if req.vocab_size > 0:

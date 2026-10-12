@@ -71,7 +71,7 @@ def test_sampler_keeps_shard_provenance_aligned_through_shuffle(tmp_path) -> Non
 
     def fake_load(shard, _request, _rng, _limit, on_phase=None):
         del on_phase
-        return tmp_path, loaded[Path(shard.url).name]
+        return loaded[Path(shard.url).name]
 
     sources._load_with_retry = fake_load
     sequences, metadata = sources.sample_pretokenized_sequences(request)

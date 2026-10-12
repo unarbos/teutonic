@@ -3,7 +3,7 @@
 
 Removes:
   - Orphaned .tmp partial-download files left by crashed/interrupted downloads
-  - Shard files (.npy) older than --max-age-hours
+  - Shard files (.npy) and cached byte ranges (.range) older than --max-age-hours
 
 Safety:
   - Cleanup skips the cache while an evaluation holds its shared cache lock
@@ -58,11 +58,14 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 def find_cache_files(cache_dir: Path) -> list[Path]:
-    """Return all shard files (.npy and orphaned .tmp) under cache_dir, any depth."""
+    """Return whole shards, cached ranges and their partial downloads, at any depth."""
     files: list[Path] = []
     try:
         for path in cache_dir.rglob("*"):
-            if path.is_file() and (path.suffix == ".npy" or path.name.endswith(".npy.tmp")):
+            if path.is_file() and (
+                path.suffix in {".npy", ".range"}
+                or path.name.endswith((".npy.tmp", ".npy.partial", ".range.tmp"))
+            ):
                 files.append(path)
     except OSError:
         pass
@@ -206,7 +209,7 @@ def _run_cleanup(
     log.info("─── phase 1: orphaned partial downloads (.tmp) ───")
     n_before = deleted_count
     for f in list(files):
-        if f.suffix != ".tmp":
+        if f.suffix not in {".tmp", ".partial"}:
             continue
         if is_protected(f):
             log.debug("skip (in-use): %s", f)

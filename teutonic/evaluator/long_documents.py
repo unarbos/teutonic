@@ -6,7 +6,6 @@ import os
 import random
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -69,7 +68,7 @@ def extend_with_long_documents(
     *,
     index_factory=DocumentIndex,
     manifest_loader=load_pinned_manifest,
-    shard_materializer=None,
+    shard_reader=None,
 ):
     from teutonic.evaluator import sources
 
@@ -160,22 +159,27 @@ def extend_with_long_documents(
                 "referenced_shard_bytes": sum(refs[k].size_bytes for k in needed),
             }
         )
-    materialize = shard_materializer or sources.materialize_shard
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        paths = dict(zip(needed, pool.map(lambda k: materialize(refs[k]), needed), strict=True))
+    fragments_by_shard = {identity: set() for identity in needed}
+    for document in documents:
+        for fragment in document["fragments"]:
+            row, offset, length = (fragment[k] for k in ("seq_index", "seq_offset", "frag_len"))
+            if row < 0 or offset < 0 or length <= 0 or offset + length > 2048:
+                raise ValueError("document fragment is outside its shard row")
+            fragments_by_shard[(document["dataset"], fragment["shard_key"])].add(
+                (row, offset, length)
+            )
 
-    @lru_cache(maxsize=32)
-    def open_shard(identity):
-        array = np.load(paths[identity], mmap_mode="r", allow_pickle=False)
-        if (
-            array.dtype != np.dtype("<u4")
-            or array.size != refs[identity].n_tokens
-            or array.size % 2048
-        ):
-            raise ValueError("indexed shard has invalid dtype or token count")
-        if array.ndim not in (1, 2) or (array.ndim == 2 and array.shape[1] != 2048):
-            raise ValueError("indexed shard has invalid dimensions")
-        return array.reshape(-1, 2048)
+    def read_shard(identity):
+        reader = (shard_reader or sources.open_shard)(refs[identity])
+        reader.sequence_count(2048)
+        if reader.n_tokens % 2048:
+            raise ValueError("indexed shard has invalid token count")
+        fragments = sorted(fragments_by_shard[identity])
+        arrays = reader.read_tokens([(row * 2048 + offset, length) for row, offset, length in fragments])
+        return dict(zip(fragments, arrays, strict=True)), reader.reader.downloaded_bytes
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        loaded = dict(zip(needed, pool.map(read_shard, needed), strict=True))
 
     labels = list(metadata["_source_labels"])
     provenance = [{**p, "component": "windows"} for p in metadata["_sample_provenance"]]
@@ -184,11 +188,9 @@ def extend_with_long_documents(
     for document in documents:
         pieces = []
         for fragment in document["fragments"]:
-            array = open_shard((document["dataset"], fragment["shard_key"]))
-            row, offset, length = (fragment[k] for k in ("seq_index", "seq_offset", "frag_len"))
-            if row >= array.shape[0]:
-                raise ValueError("document fragment row is outside its shard")
-            pieces.append(array[row, offset : offset + length])
+            fragments, _downloaded_bytes = loaded[(document["dataset"], fragment["shard_key"])]
+            key = tuple(fragment[k] for k in ("seq_index", "seq_offset", "frag_len"))
+            pieces.append(fragments[key])
         tokens = np.concatenate(pieces)
         if len(tokens) != document["length"] or tokens[-1] != DOCUMENT_EOS_TOKEN_ID:
             raise ValueError("indexed document has wrong length or missing terminal EOS")
@@ -237,6 +239,8 @@ def extend_with_long_documents(
                 "phase": "long_documents_sampled",
                 "documents": len(documents),
                 "input_tokens": long_meta["input_tokens"],
+                "downloaded_bytes": sum(size for _fragments, size in loaded.values()),
+                "download_mode": "http_range",
             }
         )
     return all_sequences, {

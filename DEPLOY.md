@@ -263,15 +263,20 @@ UTF-8 contents and SHA-256. The inventory lists all index files with their SHA-2
 strong ETag and size, binary/token formats, categories and original dataset
 manifest hashes. Requests and audits retain this pin; replay never refetches
 the mutable inventory. Changing it requires an explicit configuration refresh.
-Sparse HTTP range reads
-avoid downloading the entire index. Requests use `If-Match`, reject changed files
-and invalid ranges, and cache verified pages under `TEUTONIC_DOC_INDEX_CACHE_DIR`
-(default: `$TEUTONIC_SHARD_CACHE_DIR/doc_index`). Source manifests are SHA-256
-pinned; selected token shards use the existing full-file SHA-256 verification.
-Uniform document sampling can reference many different 50 MB shards, so the
-first run may need tens of GB of scratch space and downloads. Index range reads
-are validated by ETag and byte range, not by whole-file SHA-256. Retain original
-index objects or cached ranges to replay older manifests after an overwrite.
+Index range reads use `If-Match` and cache validated lookup pages (document
+lengths and fragment locations) under `TEUTONIC_DOC_INDEX_CACHE_DIR`
+(default: `$TEUTONIC_SHARD_CACHE_DIR/doc_index`).
+
+Token shards use HTTP range downloads without disk caching;
+`TEUTONIC_PRETOKENIZED_CACHE_DIR` is unused. Document-index caching remains enabled.
+SHA-256 metadata is checked when available; whole-file hashes are not verified.
+Transient download failures are retried automatically.
+
+Deploy this update to both hosts; no migration or new dependencies are required.
+Drain evaluations and persist verdicts before stopping the validator. Restart the
+evaluator, check `/health`, then resume the validator. Keep code versions aligned;
+resolve pending retries before changing the version. PM2's stop timeout does not
+drain running evaluations.
 
 Build the inventory locally (this command performs no uploads):
 

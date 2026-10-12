@@ -15,6 +15,24 @@ from scripts import cleanup_model_cache, cleanup_shard_cache
 from teutonic.evaluator.cache_lock import cache_lock
 
 
+def test_cleanup_removes_expired_ranges_and_orphaned_downloads(tmp_path, monkeypatch):
+    import os
+
+    cache = tmp_path / "pretokenized" / "ranges" / "identity"
+    cache.mkdir(parents=True)
+    expired = [cache / name for name in ("0-1024.range", "orphan.range.tmp", "old.npy.partial")]
+    for path in expired:
+        path.write_bytes(b"cached")
+        os.utime(path, (1, 1))
+    recent = cache / "1024-8192.range"
+    recent.write_bytes(b"recent")
+    monkeypatch.setattr(cleanup_shard_cache, "detect_active_files", lambda _: set())
+    result = cleanup_shard_cache.run_cleanup(tmp_path, 60, 120, False)
+    assert result["deleted"] == 3
+    assert not any(path.exists() for path in expired)
+    assert recent.exists()
+
+
 def hold_cache(cache_dir, acquired, release, cleanup=False):
     with cache_lock(cache_dir, cleanup=cleanup) as locked:
         assert locked
@@ -117,7 +135,7 @@ def test_evaluator_locks_caches_before_resolution_and_releases_on_failure(tmp_pa
                 assert locked
 
     import subprocess
-    from teutonic.evaluator.document_index import DocumentIndexDownloadError
+    from teutonic.evaluator.document_index import DocumentIndexDownloadError, RangeDownloadError
 
     namespace = {
         "EvaluationRequestV2": object, "ExitStack": ExitStack, "cache_lock": cache_lock,
@@ -128,6 +146,7 @@ def test_evaluator_locks_caches_before_resolution_and_releases_on_failure(tmp_pa
         "R2ArtifactResolver": lambda _: SimpleNamespace(resolve=resolve), "log": Mock(),
         "SafetensorsReuseLimitError": type("SafetensorsReuseLimitError", (RuntimeError,), {}),
         "DocumentIndexDownloadError": DocumentIndexDownloadError, "subprocess": subprocess,
+        "RangeDownloadError": RangeDownloadError,
         "cleanup_model_cache": Mock(side_effect=cleanup),
     }
     engine_function("run_eval", namespace)(

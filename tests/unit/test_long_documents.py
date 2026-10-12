@@ -2,7 +2,7 @@ import copy
 import hashlib
 import io
 import json
-from pathlib import Path
+from datetime import UTC
 from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 
@@ -19,8 +19,10 @@ from teutonic.evaluation.configuration import (
 )
 from teutonic.evaluation.long_documents import (
     LONG_DOCUMENT_VERSION,
-    build_long_document_config as build_config,
     validate_long_documents,
+)
+from teutonic.evaluation.long_documents import (
+    build_long_document_config as build_config,
 )
 from teutonic.evaluator.document_index import (
     FRAG_DTYPE,
@@ -51,7 +53,12 @@ def descriptor(url):
 
 
 def build_long_document_config(sources, describe=descriptor, index_base="https://index.example/doc_index", **kwargs):
-    from teutonic.evaluation.index_manifest import INDEX_FORMAT, TOKEN_FORMAT, index_paths, pin_index_manifest
+    from teutonic.evaluation.index_manifest import (
+        INDEX_FORMAT,
+        TOKEN_FORMAT,
+        index_paths,
+        pin_index_manifest,
+    )
     from teutonic.evaluation.long_documents import category_mix
     files, datasets = {}, {}
     originals = {s.name: s for s in all_sources()}
@@ -250,7 +257,8 @@ def test_range_reader_does_not_retry_permanent_http_failures(tmp_path, monkeypat
     ("300", None),
 ])
 def test_range_reader_retry_after_dates_and_long_cooldowns(tmp_path, monkeypatch, retry_after, delay):
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from teutonic.evaluator import document_index
 
     server = RangeServer({"https://index.example/x": b"abcdef"})
@@ -263,7 +271,7 @@ def test_range_reader_retry_after_dates_and_long_cooldowns(tmp_path, monkeypatch
         return server.open(request, timeout)
 
     monkeypatch.setattr(document_index, "datetime", SimpleNamespace(
-        now=lambda _: datetime(2026, 10, 9, 20, 0, tzinfo=timezone.utc),
+        now=lambda _: datetime(2026, 10, 9, 20, 0, tzinfo=UTC),
     ))
     monkeypatch.setattr(document_index.time, "sleep", delays.append)
     monkeypatch.setattr(document_index.random, "uniform", lambda *_: 0)
@@ -427,11 +435,20 @@ def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_pa
     kwargs = {
         "index_factory": factory,
         "manifest_loader": lambda *args: snap,
-        "shard_materializer": lambda ref: paths["shards/" + Path(ref.url).name],
     }
+    from test_token_shards import ShardServer
+
+    from teutonic.evaluator.token_shards import NpyShard
+
+    server = ShardServer({
+        f"https://datasets.example/code-reasoning/{key}": path.read_bytes()
+        for key, path in paths.items()
+    })
+    kwargs["shard_reader"] = lambda ref: NpyShard(ref, opener=server.open)
     result, audit = extend_with_long_documents(req, [[12, 13]], meta, **kwargs)
     second, again = extend_with_long_documents(req, [[12, 13]], meta, **kwargs)
     assert result == second and audit == again
+    assert server.transferred < sum(path.stat().st_size for path in paths.values())
     assert audit["long_documents"]["n_documents"] >= 3
     for tokens, p in zip(result, audit["_sample_provenance"], strict=True):
         if p["component"] == "windows":
