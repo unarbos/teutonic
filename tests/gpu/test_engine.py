@@ -692,7 +692,7 @@ def test_sampler_keeps_shard_provenance_aligned_through_shuffle(monkeypatch, tmp
         "beta.npy": [(20, [220, 1]), (21, [221, 1])],
     }
 
-    def fake_load(shard, _request, _rng, _limit, on_phase=None):
+    def fake_load(shard, _request, _rng, _limit, on_phase=None, *, indices=None):
         del on_phase
         return loaded[Path(shard.url).name]
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import random
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -29,15 +30,18 @@ def open_shard(shard: ShardRef) -> NpyShard:
 def _load_with_retry(
     shard: ShardRef,
     req: base.EvalRequest,
-    rng: np.random.Generator,
+    rng: np.random.Generator | None,
     limit: int,
     on_phase=None,
+    *,
+    indices: np.ndarray | None = None,
 ) -> list[tuple[int, list[int]]]:
     # Each range has bounded retries; no full-file fallback is permitted.
     if on_phase:
         on_phase({"phase": "pretokenized_shard_download_start", "url": shard.url})
     reader = open_shard(shard)
-    indices = base.shuffled_indices(rng, reader.sequence_count(req.seq_len), limit)
+    if indices is None:
+        indices = base.shuffled_indices(rng, reader.sequence_count(req.seq_len), limit)
     rows = reader.read_sequences(indices, req.seq_len)
     loaded = [(int(i), row.astype(np.int64, copy=False).tolist()) for i, row in zip(indices, rows)]
     if on_phase:
@@ -113,29 +117,39 @@ def sample_pretokenized_sequences(
             quotas = _even_quotas(target, len(refs))
         loaded_per_shard: list[list[tuple[int, list[int]]]] = []
         used_shards: list[dict] = []
+        # Consume the source RNG in the original shard order before concurrent
+        # I/O. Worker scheduling must not change samples, provenance or digests.
+        planned = []
         for shard, quota in zip(refs, quotas, strict=True):
-            load_limit = int(quota * 1.5) + 8 if req.vocab_size > 0 else quota
-            loaded = _load_with_retry(
-                shard, req, rng, load_limit, on_phase=on_phase
-            )
-            if req.vocab_size > 0:
-                loaded = [
-                    (sequence_index, sequence)
-                    for sequence_index, sequence in loaded
-                    if max(sequence) < req.vocab_size
-                ]
-            if raw_targets_explicit and len(loaded) < quota:
-                raise RuntimeError(
-                    f"source {name!r} shard {shard.url!r} produced {len(loaded)}/{quota} "
-                    "valid sequences; refusing to change declared category allocation"
+            limit = int(quota * 1.5) + 8 if req.vocab_size > 0 else quota
+            indices = base.shuffled_indices(rng, shard.n_tokens // req.seq_len, limit)
+            planned.append((shard, limit, indices))
+
+        def load(plan):
+            shard, limit, indices = plan
+            return _load_with_retry(shard, req, None, limit, on_phase=on_phase, indices=indices)
+
+        # Each file already uses up to eight concurrent range requests.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for shard, quota, loaded in zip(refs, quotas, pool.map(load, planned), strict=True):
+                if req.vocab_size > 0:
+                    loaded = [
+                        (sequence_index, sequence)
+                        for sequence_index, sequence in loaded
+                        if max(sequence) < req.vocab_size
+                    ]
+                if raw_targets_explicit and len(loaded) < quota:
+                    raise RuntimeError(
+                        f"source {name!r} shard {shard.url!r} produced {len(loaded)}/{quota} "
+                        "valid sequences; refusing to change declared category allocation"
+                    )
+                loaded_per_shard.append(loaded)
+                used_shards.append(
+                    {
+                        "url": shard.url,
+                        "sha256": shard.sha256,
+                    }
                 )
-            loaded_per_shard.append(loaded)
-            used_shards.append(
-                {
-                    "url": shard.url,
-                    "sha256": shard.sha256,
-                }
-            )
         selected: list[tuple[list[int], dict[str, int]]] = []
         for shard_index, (loaded, quota) in enumerate(
             zip(loaded_per_shard, quotas, strict=True)

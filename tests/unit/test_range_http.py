@@ -117,3 +117,104 @@ def test_pooled_transport_rejects_full_response_without_reading(tmp_path, monkey
         with pytest.raises(RuntimeError, match="exact byte range"):
             reader._range(0, 7, "test")
         assert stream.closed and stream.reads == 0
+
+
+@pytest.fixture
+def dataset_auth(monkeypatch):
+    values = {
+        "ENDPOINT": "https://account.r2.cloudflarestorage.com",
+        "ACCESS_KEY_ID": "test-access",
+        "SECRET_ACCESS_KEY": "test-secret",
+        "SESSION_TOKEN": "test-session",
+        "REGION": "auto",
+        "BUCKET": "models-must-not-be-used",
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(f"TEUTONIC_EVALUATOR_R2_{key}", value)
+
+
+def test_authenticated_index_range_keeps_pins_and_cache_identity(
+    tmp_path, monkeypatch, dataset_auth,
+):
+    import hashlib
+    import json
+
+    descriptor = {
+        "url": range_http.DATASET_ORIGIN + "/doc_index/a%20b.npy",
+        "size_bytes": 8, "etag": '"abc123"',
+    }
+    requests = []
+
+    def serve(request):
+        requests.append(request)
+        assert str(request.url) == "https://account.r2.cloudflarestorage.com/datasets/doc_index/a%20b.npy"
+        assert request.headers["Range"] == "bytes=0-7"
+        assert request.headers["If-Match"] == descriptor["etag"]
+        assert request.headers["Accept-Encoding"] == "identity"
+        auth = request.headers["Authorization"]
+        assert "Credential=test-access/" in auth
+        assert "/auto/s3/aws4_request" in auth
+        assert "if-match;range;" in auth
+        assert request.headers["X-Amz-Security-Token"] == "test-session"
+        assert "test-secret" not in str(request.url)
+        return httpx.Response(206, headers={
+            "Content-Range": "bytes 0-7/8", "ETag": descriptor["etag"],
+        }, stream=Stream([b"abcdefgh"]))
+
+    with httpx.Client(transport=httpx.MockTransport(serve)) as client:
+        monkeypatch.setattr(range_http, "_client", client)
+        reader = document_index.PinnedObject(descriptor, tmp_path)
+        expected_cache = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
+        assert reader.cache.name == expected_cache
+        assert reader._range(0, 7, "0") == b"abcdefgh"
+        assert reader._range(0, 7, "0") == b"abcdefgh"
+        assert reader.descriptor == descriptor
+        assert len(requests) == 1
+
+
+@pytest.mark.parametrize("status", [403, 302])
+def test_auth_failure_or_redirect_never_falls_back(monkeypatch, dataset_auth, status):
+    requests = []
+    url = range_http.DATASET_ORIGIN + "/shard.npy"
+
+    def serve(request):
+        requests.append(request)
+        return httpx.Response(status, headers={"Location": "https://other.example/shard.npy"})
+
+    with httpx.Client(transport=httpx.MockTransport(serve), follow_redirects=True) as client:
+        monkeypatch.setattr(range_http, "_client", client)
+        with pytest.raises(HTTPError) as error:
+            with range_http.pooled_urlopen(Request(url), 120):
+                pytest.fail("must fail before yielding response")
+        assert error.value.url == url
+        assert error.value.code == status
+        assert len(requests) == 1
+
+
+@pytest.mark.parametrize("url", [
+    "https://other.example/a.npy",
+    range_http.DATASET_ORIGIN + ".other.example/a.npy",
+    range_http.DATASET_ORIGIN + "/a.npy?version=1",
+    range_http.DATASET_ORIGIN.replace("https:", "http:") + "/a.npy",
+])
+def test_auth_only_applies_to_known_origin(dataset_auth, url):
+    target, headers, authenticated = range_http._request_target(Request(url))
+    assert target == url
+    assert not authenticated
+    assert "Authorization" not in headers
+
+
+def test_auth_environment_is_read_lazily(monkeypatch, dataset_auth):
+    request = Request(range_http.DATASET_ORIGIN + "/a.npy")
+    for key in ("ENDPOINT", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY"):
+        monkeypatch.delenv(f"TEUTONIC_EVALUATOR_R2_{key}")
+    assert range_http._request_target(request) == (request.full_url, {}, False)
+    monkeypatch.setenv("TEUTONIC_EVALUATOR_R2_ENDPOINT", "https://account.example")
+    with pytest.raises(RuntimeError, match="incomplete"):
+        range_http._request_target(request)
+    monkeypatch.setenv("TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID", "new-access")
+    monkeypatch.setenv("TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY", "new-secret")
+    target, headers, authenticated = range_http._request_target(request)
+    assert authenticated
+    assert "Credential=new-access/" in headers["Authorization"]
+    assert target == "https://account.example/datasets/a.npy"

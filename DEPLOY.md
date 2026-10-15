@@ -282,6 +282,22 @@ Token shards use HTTP range downloads without disk caching;
 SHA-256 metadata is checked when available; whole-file hashes are not verified.
 Transient download failures are retried automatically.
 
+Evaluator token and document-index range reads for
+`https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev` use the authenticated
+R2 S3 endpoint when `TEUTONIC_EVALUATOR_R2_ENDPOINT`,
+`TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID` and `TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY`
+are configured. These credentials need read access to the `datasets` bucket;
+`TEUTONIC_EVALUATOR_R2_BUCKET` does not override that dataset bucket. Optional
+`TEUTONIC_EVALUATOR_R2_SESSION_TOKEN` and `TEUTONIC_EVALUATOR_R2_REGION` (default
+`auto`) are supported. With no R2 configuration, reads remain public; incomplete
+configuration or denied access fails rather than silently falling back. Other
+origins remain public. Canonical URLs, cache identities and object pins stay unchanged.
+
+Window sampling downloads four shard files concurrently, with up to eight range
+workers per file. Document fragments use sixteen shard workers; index planning
+remains at two workers. Both share a pool capped at 64 connections. Window indices
+are selected before concurrent I/O, preserving deterministic selection and output order.
+
 Deploy this update to both hosts; no migration or new dependencies are required.
 Drain evaluations and persist verdicts before stopping the validator. Restart the
 evaluator, check `/health`, then resume the validator. Keep code versions aligned;

@@ -178,7 +178,7 @@ def extend_with_long_documents(
         arrays = reader.read_tokens([(row * 2048 + offset, length) for row, offset, length in fragments])
         return dict(zip(fragments, arrays, strict=True)), reader.reader.downloaded_bytes
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=16) as pool:
         loaded = dict(zip(needed, pool.map(read_shard, needed), strict=True))
 
     labels = list(metadata["_source_labels"])

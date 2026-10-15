@@ -24,6 +24,7 @@ from teutonic.evaluation.long_documents import (
     MAX_DOCUMENT_TOKENS,
     validate_index_file,
 )
+from teutonic.evaluator.range_http import pooled_urlopen
 
 FRAG_DTYPE = np.dtype(
     [("shard_id", "<i4"), ("seq_index", "<u2"), ("seq_offset", "<u2"), ("frag_len", "<u2")]
@@ -187,7 +188,7 @@ class PinnedObject(RangeObject):
     download_error = DocumentIndexDownloadError
     cache_suffix = ""
 
-    def __init__(self, descriptor, cache_dir, opener=urlopen):
+    def __init__(self, descriptor, cache_dir, opener=pooled_urlopen):
         validate_index_file(descriptor)
         super().__init__(descriptor, cache_dir, opener)
 
