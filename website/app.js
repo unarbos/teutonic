@@ -494,7 +494,7 @@
       datasetCell(row, source ? datasetWeight(source.normalizedWeight) : "--", source ? number(source.evalSequences) + " SEQ" : "");
     });
     cell(row, view ? number(view.evalN) : "--");
-    cell(row, manifest ? "> " + metric(manifest.delta_threshold, 3) : "--");
+    cell(row, manifest ? "> " + metric(manifest.delta_threshold, 4) : "--");
     datasetCell(row, "MANIFEST", "", state.prefix + "datasets/manifest.json");
   }
   async function loadSpecialistDataset(state) {
