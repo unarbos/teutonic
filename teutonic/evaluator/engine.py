@@ -27,6 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -78,7 +79,7 @@ from teutonic.evaluator.cache_lock import cache_lock
 from teutonic.evaluator.document_index import DocumentIndexDownloadError, RangeDownloadError
 from teutonic.evaluator.document_masking import masked_model_inputs
 from teutonic.evaluator.module_cache import transformers_module_cache_lock
-from teutonic.evaluator import sequence_parallel
+from teutonic.evaluator import replica_loading, sequence_parallel
 from teutonic.storage.artifacts import R2ArtifactResolver
 
 log = logging.getLogger("teutonic.evaluator.engine")
@@ -151,7 +152,7 @@ MODEL_WORKER_PROCESSES = MODEL_INSTANCES_PER_SIDE * 2
 KERNEL_CACHE_DIR = Path(
     os.environ.get("TEUTONIC_KERNEL_CACHE_DIR", "/tmp/teutonic/kernel_cache")
 )
-MODEL_LOADER_VERSION = "direct-gpu-v1"
+MODEL_LOADER_VERSION = "load-once-broadcast-v2"
 CACHE_HIGH_WATERMARK_GB = float(os.environ.get("MODEL_CACHE_HIGH_WATERMARK_GB", "500"))
 
 _eval_lock = threading.Lock()
@@ -1117,33 +1118,25 @@ def patch_mimo_masking_compat(model) -> tuple[str, ...]:
     return tuple(patched)
 
 
-def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
-    configure_deterministic_execution()
-    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-    from accelerate.utils import modeling as accelerate_modeling
+def create_empty_eval_model(config, label: str, on_phase=None):
+    """Construct the same meta model for checkpoint readers and broadcast receivers."""
+    from accelerate import init_empty_weights
     from transformers import AutoModelForCausalLM
     from transformers.initialization import no_init_weights
 
-    if on_phase:
-        on_phase({"phase": f"{label}_load_start", "device": device, "snapshot": snapshot_dir})
-    t0 = time.time()
-    requested_attn_implementation = req.attn_implementation
     config.use_cache = False
-    # The remote MiMo class has a stale FA4 capability flag. Construct the
-    # module under eager, then select the requested backend for every forward.
+    # Remote MiMo advertises a stale FA4 capability flag; select FA4 after construction.
     config._attn_implementation = "eager"
     dtype = torch.bfloat16
-    effective_ids = list(gpu_ids if gpu_ids is not None else _gpu_ids)
-    reject_mtp_checkpoint_weights(snapshot_dir)
     old_dtype = torch.get_default_dtype()
     try:
         torch.set_default_dtype(dtype)
         if on_phase:
             on_phase({"phase": f"{label}_init_start", "dtype": str(dtype)})
-        # Every parameter is populated by the strict checkpoint load below. Skip
+        # Checkpoint loading or broadcast will populate every parameter. Skip
         # random initialization, which is prohibitively expensive for 104B models.
         with transformers_module_cache_lock(), init_empty_weights(), no_init_weights():
-            model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+            model = AutoModelForCausalLM.from_config(config, trust_remote_code=True, dtype=dtype)
     finally:
         torch.set_default_dtype(old_dtype)
     mask_compat = patch_mimo_masking_compat(model)
@@ -1156,8 +1149,41 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
         )
     # Empty-weight construction cannot preserve aliases created by parameter
     # assignment. Re-establish any checkpoint-declared embedding/head ties before
-    # Accelerate resolves tied tensors and streams the shards.
+    # checkpoint loading or broadcast resolves the tensors.
     model.tie_weights()
+    return model
+
+
+def finalize_eval_model(model, req: EvalRequest):
+    if getattr(model.config, "model_type", "") == "mimo_v2":
+        enable_grouped_mimo_moe(model)
+    model.eval()
+    model.config.use_cache = False
+    model.config._attn_implementation = req.attn_implementation
+    return model
+
+
+def allocate_eval_replica(config, device: str, label: str, req: EvalRequest, on_phase=None):
+    """Allocate destinations without reading checkpoint weights or initializing them."""
+    model = create_empty_eval_model(config, label, on_phase)
+    model.to_empty(device=device)
+    # Moving meta parameters can break embedding/head aliases again.
+    model.tie_weights()
+    return finalize_eval_model(model, req)
+
+
+def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
+    configure_deterministic_execution()
+    from accelerate import load_checkpoint_and_dispatch
+    from accelerate.utils import modeling as accelerate_modeling
+
+    if on_phase:
+        on_phase({"phase": f"{label}_load_start", "device": device, "snapshot": snapshot_dir})
+    t0 = time.time()
+    dtype = torch.bfloat16
+    effective_ids = list(gpu_ids if gpu_ids is not None else _gpu_ids)
+    reject_mtp_checkpoint_weights(snapshot_dir)
+    model = create_empty_eval_model(config, label, on_phase)
     if on_phase:
         on_phase({"phase": f"{label}_direct_gpu_load_start", "dtype": str(dtype)})
     if device == "auto":
@@ -1196,11 +1222,7 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
     if torch.cuda.is_available():
         for gpu_id in effective_ids:
             torch.cuda.synchronize(gpu_id)
-    if getattr(config, "model_type", "") == "mimo_v2":
-        enable_grouped_mimo_moe(model)
-    model.eval()
-    model.config.use_cache = False
-    model.config._attn_implementation = requested_attn_implementation
+    finalize_eval_model(model, req)
     params = sum(p.numel() for p in model.parameters()) / 1e9
     if on_phase:
         on_phase({"phase": f"{label}_load_done", "params_b": round(params, 3), "elapsed_s": round(time.time() - t0, 1)})
@@ -1599,6 +1621,17 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
                     if pipeline is not None:
                         pipeline.close()
                         pipeline = None
+                    # Loading uses temporary per-model groups. Retire any persistent
+                    # sequence-parallel pair before joining a different rank topology.
+                    if parallel_rank is not None:
+                        torch.distributed.destroy_process_group()
+                        parallel_rank = None
+                    load_started = time.monotonic()
+
+                    def on_load_phase(event):
+                        result_queue.put({"type": "load_progress", "generation": generation,
+                                          "worker_id": worker_id, "role": role, **event})
+
                     req = EvalRequest(**command["request"])
                     reused = model is not None and loaded_key == command["model_key"]
                     if not reused:
@@ -1609,19 +1642,41 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
                         config, artifacts = load_model_config(command["snapshot"], req, worker_id)
                         attention = validate_and_report_attention_config(config, worker_id)
                         kernel_cache = configure_kernel_cache(config, gpu_ids)
-                        model = load_eval_model(
-                            command["snapshot"],
-                            config,
-                            f"cuda:{gpu_ids[0]}",
-                            worker_id,
-                            req,
-                            gpu_ids=gpu_ids,
-                        )
-                        loaded_key = command["model_key"]
+                        if command["replica_rank"] == 0:
+                            model = load_eval_model(
+                                command["snapshot"], config, f"cuda:{gpu_ids[0]}",
+                                worker_id, req, gpu_ids=gpu_ids, on_phase=on_load_phase,
+                            )
+                        else:
+                            model = allocate_eval_replica(
+                                config, f"cuda:{gpu_ids[0]}", worker_id, req,
+                                on_phase=on_load_phase,
+                            )
                     else:
                         artifacts = command.get("artifacts", {})
                         attention = command.get("attention", {})
                         kernel_cache = command.get("kernel_cache", {})
+                    torch.cuda.synchronize(gpu_ids[0])
+                    prepare_s = time.monotonic() - load_started
+                    result_queue.put({
+                        "type": "load_prepared", "generation": generation,
+                        "worker_id": worker_id, "role": role, "reused_model": reused,
+                        "prepare_s": prepare_s,
+                    })
+                    # Wait on the CPU, not inside a GPU collective during checkpoint I/O.
+                    transfer = command_queue.get()
+                    if (transfer.get("type") != "load_broadcast"
+                            or transfer.get("generation") != generation):
+                        raise RuntimeError("expected matching model broadcast command")
+                    broadcast = None
+                    if transfer["required"]:
+                        broadcast = replica_loading.broadcast_model(
+                            model, rank=command["replica_rank"],
+                            world_size=command["replica_count"],
+                            rendezvous=transfer["rendezvous"], gpu_id=gpu_ids[0],
+                        )
+                    # A receiver is reusable only after its weights arrived successfully.
+                    loaded_key = command["model_key"]
                     reset_worker_peak_memory(gpu_ids)
                     pipeline = ModelSequenceScorer(model, req, spec, result_queue, generation)
                     result_queue.put({
@@ -1633,6 +1688,9 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
                         "pid": os.getpid(),
                         "snapshot": command["snapshot"],
                         "reused_model": reused,
+                        "model_key": loaded_key,
+                        "load_timing": {"prepare_s": prepare_s, "broadcast": broadcast,
+                                        "ready_s": time.monotonic() - load_started},
                         "artifacts": artifacts,
                         "attention": attention,
                         "kernel_cache": kernel_cache,
@@ -1642,6 +1700,7 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
                         "pipeline_boundary_layer": None,
                     })
                 except BaseException as exc:
+                    loaded_key = None
                     result_queue.put({
                         "type": "error",
                         "generation": generation,
@@ -1741,8 +1800,27 @@ class PersistentModelWorkerPool:
         challenger_snapshot: str,
         on_progress,
     ) -> str:
+        # Pair groups are retired by each worker before preparation. Loading groups
+        # exist only for this generation, leaving sequence-parallel scoring independent.
+        self.parallel_pairs = None
+        if self.parallel_directory is not None:
+            self.parallel_directory.cleanup()
+            self.parallel_directory = None
+        with tempfile.TemporaryDirectory(prefix="teutonic-model-broadcast-") as directory:
+            try:
+                return self._load_models(req, king_snapshot, challenger_snapshot,
+                                         on_progress, directory)
+            except BaseException:
+                self.ready = {}
+                self.close(force=True)
+                raise
+
+    def _load_models(self, req, king_snapshot, challenger_snapshot, on_progress, directory):
         generation = uuid.uuid4().hex
         request_data = req.model_dump()
+        groups = {}
+        for spec in self.specs:
+            groups.setdefault(spec["role"], []).append(spec["worker_id"])
         for spec in self.specs:
             snapshot = king_snapshot if spec["role"] == "king" else challenger_snapshot
             worker_id = spec["worker_id"]
@@ -1750,6 +1828,8 @@ class PersistentModelWorkerPool:
             self.command_queues[worker_id].put({
                 "type": "load",
                 "generation": generation,
+                "replica_rank": groups[spec["role"]].index(worker_id),
+                "replica_count": len(groups[spec["role"]]),
                 "snapshot": snapshot,
                 "request": request_data,
                 "model_key": checkpoint_load_key(snapshot, req, spec["gpu_ids"]),
@@ -1758,6 +1838,8 @@ class PersistentModelWorkerPool:
                 "kernel_cache": previous.get("kernel_cache", {}),
             })
 
+        self.ready = {}
+        prepared = {}
         ready = {}
         while len(ready) < len(self.specs):
             try:
@@ -1774,6 +1856,37 @@ class PersistentModelWorkerPool:
                 raise RuntimeError(
                     f"model worker {message['worker_id']} failed: {message['error']}\n{message['traceback']}"
                 )
+            worker_id = message.get("worker_id")
+            if worker_id not in self.command_queues:
+                raise RuntimeError(f"unknown model worker during load: {message}")
+            if message["type"] == "load_progress":
+                on_progress({k: v for k, v in message.items() if k not in ("type", "generation")})
+                continue
+            if message["type"] == "load_prepared":
+                if worker_id in prepared:
+                    raise RuntimeError(f"duplicate model preparation: {worker_id}")
+                prepared[worker_id] = message
+                role = next(s["role"] for s in self.specs if s["worker_id"] == worker_id)
+                members = groups[role]
+                on_progress({"phase": "model_worker_prepared", "worker_id": worker_id,
+                             "role": role, "reused_model": message["reused_model"],
+                             "prepare_s": message["prepare_s"]})
+                if all(member in prepared for member in members):
+                    required = len(members) > 1 and any(
+                        not prepared[member]["reused_model"] for member in members
+                    )
+                    on_progress({"phase": "model_broadcast_start", "role": role,
+                                 "source_worker": members[0], "replicas": len(members),
+                                 "required": required})
+                    for member in members:
+                        self.command_queues[member].put({
+                            "type": "load_broadcast", "generation": generation,
+                            "required": required,
+                            "rendezvous": (Path(directory) / role).as_uri(),
+                        })
+                continue
+            if worker_id not in prepared or worker_id in ready:
+                raise RuntimeError(f"unexpected model worker readiness: {message}")
             if message["type"] != "ready":
                 raise RuntimeError(f"unexpected model worker load message: {message}")
             ready[message["worker_id"]] = message
@@ -1785,6 +1898,7 @@ class PersistentModelWorkerPool:
                 "pid": message["pid"],
                 "reused_model": message["reused_model"],
                 "pipeline_depth": message["pipeline_depth"],
+                "load_timing": message["load_timing"],
                 "ready": len(ready),
                 "total_workers": len(self.specs),
             })

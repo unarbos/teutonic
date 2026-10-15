@@ -694,7 +694,7 @@ def test_sampler_keeps_shard_provenance_aligned_through_shuffle(monkeypatch, tmp
 
     def fake_load(shard, _request, _rng, _limit, on_phase=None):
         del on_phase
-        return tmp_path, loaded[Path(shard.url).name]
+        return loaded[Path(shard.url).name]
 
     monkeypatch.setattr(sources, "_load_with_retry", fake_load)
     monkeypatch.setattr(sources.base, "dataset_seed", lambda _request: 123)

@@ -226,6 +226,16 @@ adapter, including for batches with multiple rows. Eager uses explicit causal
 document masks. Checkpoint Python files remain immutable. There is no automatic
 fallback to unmasked attention or another backend.
 
+The evaluator loads each checkpoint on the first GPU in its four-replica group,
+then broadcasts all parameters and buffers to the other three GPUs with NCCL.
+The king and challenger groups load independently. Receivers allocate BF16 model
+storage without reading checkpoint shards; transfers use chunks of at most 256 MiB.
+Workers wait on CPU queues until their group is prepared, and loading communicators
+are released before scoring. Unchanged cached models skip loading and broadcast.
+A preparation or broadcast failure closes the entire worker pool rather than
+scoring with incomplete weights. Progress events report per-worker preparation,
+broadcast transfer, and total readiness times in `load_timing`.
+
 Model loading and each scoring worker enable strict PyTorch deterministic
 algorithms with `CUBLAS_WORKSPACE_CONFIG=:4096:8`, deterministic cuDNN, and
 cuDNN benchmarking disabled. Unsupported nondeterministic operations fail rather
