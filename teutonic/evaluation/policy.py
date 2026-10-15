@@ -27,6 +27,57 @@ GENERIC_CONFIG_LOCK_KEYS = (
 )
 
 
+def apply_specialist_source_gate(
+    verdict: dict[str, Any],
+    king_losses: list[float],
+    challenger_losses: list[float],
+    scored_tokens: list[int],
+    source_labels: list[str] | None,
+    dataset_sources: list[dict[str, Any]],
+    delta_threshold: float,
+) -> None:
+    """Require the specialist's own source to improve, in addition to its LCB.
+
+    The pinned math/code/text 70/15/15 mix identifies the specialist, independent
+    of dataset labels. Both windows and complete documents carry these labels.
+    Code-version pinning binds this rule; the request's domain threshold controls
+    both checks. Never compare the rounded public source scores.
+    """
+    names = {source["name"] for source in dataset_sources}
+    if names != {"math", "code", "text"}:
+        return
+    own = [
+        source["name"] for source in dataset_sources
+        if np.isclose(source["proportion"], 0.7, rtol=0, atol=1e-9)
+    ]
+    if len(dataset_sources) != 3 or len(own) != 1 or any(
+        not np.isclose(source["proportion"], 0.15, rtol=0, atol=1e-9)
+        for source in dataset_sources if source["name"] != own[0]
+    ):
+        raise ValueError("specialist source gate requires a 70/15/15 mix")
+    if source_labels is None or len(source_labels) != len(king_losses):
+        raise ValueError("specialist source gate requires aligned source labels")
+    if len(challenger_losses) != len(king_losses) or not set(source_labels) <= names:
+        raise ValueError("specialist source gate requires aligned losses and known sources")
+    weights = token_weights(scored_tokens, len(king_losses))
+    mask = np.asarray(source_labels) == own[0]
+    differences = np.asarray(king_losses) - np.asarray(challenger_losses)
+    if not np.isfinite(differences).all():
+        raise ValueError("specialist source gate requires finite losses")
+    mu_hat = float(np.average(differences[mask], weights=weights[mask])) if mask.any() else None
+    passed = mu_hat is not None and mu_hat >= delta_threshold
+    verdict["specialist_source_gate"] = {
+        "version": "specialist-source-mu-v1",
+        "source": own[0],
+        "min_mu_hat": delta_threshold,
+        "mu_hat": mu_hat,
+        "n_scored_tokens": int(weights[mask].sum()),
+        "passed": passed,
+    }
+    if not passed:
+        verdict.update(accepted=False, verdict="king")
+
+
 def paired_bootstrap_verdict(
     king_losses: list[float],
     challenger_losses: list[float],
@@ -299,6 +350,7 @@ def build_verdict_history_entry(
         "challenger_timestamp_source",
         "king_timestamp_source",
         "source_scores",
+        "specialist_source_gate",
     )
     if verdict.get("rejection_reason"):
         entry["rejection_reason"] = verdict["rejection_reason"]

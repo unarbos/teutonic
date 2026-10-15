@@ -129,9 +129,12 @@ before proceeding.
    sample indices with replacement (10,000 resamples, alpha=0.001,
    bootstrap seed 0), recomputing that weighted ratio in every draw.
    Its lower quantile is the one-sided lower confidence bound (LCB).
-   Accept iff `LCB > delta_threshold`; the default threshold
-   is 0.003 nats/token for MAIN and 0.002 for MATH, CODE, and TEXT,
-   independently configurable in each competition.
+   The combined check requires `LCB > delta_threshold`; the default threshold
+   is 0.003 nats/token for MAIN and 0.0014 for MATH, CODE, and TEXT,
+   independently configurable in each competition. Specialists also require
+   `mu_hat >= delta_threshold` on their own 70% source, token-weighted across windows
+   and whole documents. Both checks use the configured domain threshold,
+   comparing values before rounding.
 7. On accept, you are crowned: the dashboard updates, your model is
    published to the public model bucket, and subnet weights refresh.
 
@@ -390,7 +393,7 @@ teutonic-miner ready --hotkey h0
    bucket (section 2) at its pinned digest for your selected competition.
    Your challenger's token-weighted loss improvement must have an LCB
    above that competition's threshold: defaults are 0.003 for MAIN and
-   0.002 for MATH, CODE and TEXT, in nats per scored token.
+   0.0014 for MATH, CODE and TEXT, in nats per scored token.
 2. MATCH THE EVAL DISTRIBUTION. Use the source and category mix in section
    6, the genesis tokenizer, masked 2,048-token windows and complete
    2,049-8,192-token documents. Prevent attention across document boundaries
@@ -401,7 +404,10 @@ teutonic-miner ready --hotkey h0
    `teutonic.evaluation.policy.paired_bootstrap_verdict`, using alpha=0.001,
    n_bootstrap=10000, bootstrap_seed=0 and the selected competition's
    `delta_threshold`. Omitting token counts uses the historical equal-unit
-   calculation and does not reproduce masked scoring. Submit only when
+   calculation and does not reproduce masked scoring. For specialists, also call
+   `teutonic.evaluation.policy.apply_specialist_source_gate` with the verdict,
+   loss arrays, scored-token counts, aligned source labels, pinned dataset sources
+   and the same `delta_threshold`. Submit only when
    your offline LCB clears the bar with margin; your offline sample differs
    from the validator's finalized-block draw.
 4. BE FAST AFTER A CROWNING. When `king.reign_number` bumps, start
@@ -561,7 +567,8 @@ the coldkey.
 - document indexes: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest.json
 - king download: https://pub-0821d4e196224864af220294345fd141.r2.dev/models/sha256/<king_digest>/
 - accept rule: paired-bootstrap LCB of token-weighted CE advantage > the
-  competition's delta_threshold (defaults: MAIN 0.003; MATH/CODE/TEXT 0.002)
+  competition's delta_threshold (defaults: MAIN 0.003; MATH/CODE/TEXT 0.0014);
+  specialists also require own-source mu_hat >= delta_threshold
 - sample: 30,000 masked 2,048-token windows + ~6M input tokens from
   complete 2,049-8,192-token documents; alpha=0.001, B=10000, bootstrap seed 0
 - specialist mix: 70% own group / 15% each other group, including the

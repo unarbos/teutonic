@@ -75,6 +75,7 @@ from teutonic.evaluation.masking import (
     token_weights,
 )
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE, MAX_BATCH_SIZE
+from teutonic.evaluation.policy import apply_specialist_source_gate
 from teutonic.evaluator.cache_lock import cache_lock
 from teutonic.evaluator.document_index import DocumentIndexDownloadError, RangeDownloadError
 from teutonic.evaluator.document_masking import masked_model_inputs
@@ -2270,6 +2271,7 @@ def score_with_model_workers(
 def bootstrap_verdict(
     king_losses: list[float], challenger_losses: list[float], req: EvalRequest,
     scored_tokens: list[int],
+    source_labels: list[str] | None = None,
 ) -> dict:
     verdict = paired_bootstrap_verdict(
         king_losses,
@@ -2279,6 +2281,10 @@ def bootstrap_verdict(
         alpha=req.alpha,
         delta_threshold=req.delta_threshold,
         scored_tokens=scored_tokens,
+    )
+    apply_specialist_source_gate(
+        verdict, king_losses, challenger_losses, scored_tokens,
+        source_labels, req.dataset_sources, req.delta_threshold,
     )
     verdict.update(
         scoring_policy=MASKED_POLICY_VERSION,
@@ -2707,7 +2713,10 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         )
 
         counts = worker_meta["scored_tokens"]
-        verdict = bootstrap_verdict(king_losses, challenger_losses, req, counts)
+        verdict = bootstrap_verdict(
+            king_losses, challenger_losses, req, counts,
+            source_labels[:len(king_losses)] if source_labels else None,
+        )
         early_stop = worker_meta.get("early_stop")
         if early_stop is not None:
             verdict.update({

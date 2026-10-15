@@ -170,7 +170,7 @@ def main() -> None:
     elapsed = scoring_elapsed
 
     counts = worker_meta["scored_tokens"]
-    verdict = engine.bootstrap_verdict(king_losses, challenger_losses, request, counts)
+    verdict = engine.bootstrap_verdict(king_losses, challenger_losses, request, counts, labels)
     verdict["source_scores"] = engine._compute_source_scores(
         king_losses,
         challenger_losses,

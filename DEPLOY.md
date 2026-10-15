@@ -717,8 +717,21 @@ Each specialist plans 30,000 sequences: 21,000 from its own manifest and 4,500
 from each other manifest. Category percentages apply inside all three allocations.
 Integer quotas use deterministic largest-remainder rounding. The combined sample
 mix produces one paired-bootstrap verdict. Each competition has its own threshold,
-initially 0.002; specialist early stopping is enabled by default. MAIN's existing
+initially 0.0014; specialist early stopping is enabled by default. MAIN's existing
 sampling and early-stopping configuration is retained.
+
+Specialists additionally require their own 70% source's token-weighted mean
+advantage (`mu_hat`) to be at least their configured `delta_threshold`, combining
+windows and whole documents. Acceptance requires both this source floor
+and a combined bootstrap LCB strictly above the configured threshold. The source
+check uses unrounded losses and is recorded as `specialist_source_gate` in the
+verdict and history. MAIN has no source floor. Cached replay applies this rule too.
+Deploy matching new evaluator code identities on validator and evaluator; existing
+attempts remain tied to their recorded code identity. Updating `chain.toml` only
+changes defaults for new configurations. To change existing specialist thresholds,
+run `configure_evaluation.py --competition <math|code|text> --delta-threshold 0.0014`
+for each specialist (preview each with `--dry-run`). Budget and inventory settings
+are preserved.
 
 Administrative updates are explicit, versioned, and atomic (`--all` changes all
 four in one transaction). Unspecified settings retain their active database values:
