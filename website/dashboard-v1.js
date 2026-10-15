@@ -427,6 +427,21 @@
         };
     }
 
+    function restoreLegacyBbh(payload, legacy) {
+        var restored = 0;
+        var kings = payload.kings.map(function(king) {
+            var result = king.result || {};
+            var rows = result.benchmarks || [];
+            var old = legacy.results[king.king_id];
+            if (!old || rows.some(function(row) { return benchmarkKey(row.name) === "bbh" && row.status === "completed" && row.metric && row.metric.value != null; })) return king;
+            restored += 1;
+            return Object.assign({}, king, { result: Object.assign({}, result, {
+                benchmarks: rows.filter(function(row) { return benchmarkKey(row.name) !== "bbh"; }).concat([old])
+            }) });
+        });
+        return Object.assign({}, payload, { kings: kings, benchmark_result_count: (payload.benchmark_result_count || 0) + restored });
+    }
+
     function benchmarkPresentation(payload, selectedKingId) {
         if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
             throw new Error("benchmark results must be an object");
@@ -521,6 +536,7 @@
         graphPointRadius: graphPointRadius,
         lossChartPresentation: lossChartPresentation,
         datasetChangePresentation: datasetChangePresentation,
-        benchmarkPresentation: benchmarkPresentation
+        benchmarkPresentation: benchmarkPresentation,
+        restoreLegacyBbh: restoreLegacyBbh
     };
 });

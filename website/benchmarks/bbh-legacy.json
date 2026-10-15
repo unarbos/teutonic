@@ -1,0 +1,466 @@
+{
+  "source": "king-benchmark-daily/all-kings/index.json",
+  "description": "Original leaderboard_bbh scores, preserved separately from bbh_cot. Matched by immutable king ID.",
+  "results": {
+    "reign-000007-uid-226-sha256-c345e657a37e82f7": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.29734421107446624
+      }
+    },
+    "reign-000006-uid-22-sha256-d30c6ef409470c29": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.28797083839611176
+      }
+    },
+    "reign-000005-uid-123-sha256-15c95fc8ad2533dd": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.301162992536018
+      }
+    },
+    "reign-000003-uid-202-sha256-c827c6330100a010": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.28658219059191115
+      }
+    },
+    "reign-000002-uid-197-sha256-a59e0a37430cd4a6": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.28901232424926226
+      }
+    },
+    "reign-000001-uid-96-sha256-bdf3ed965a130650": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.2886651622982121
+      }
+    },
+    "reign-000000-uid-204-sha256-06bf006e37d7f77f": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.28658219059191115
+      }
+    },
+    "reign-000008-uid-160-sha256-2eb8fe82352f17f9": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.35740322860614476
+      }
+    },
+    "reign-000009-uid-250-sha256-0d27e6e6852c8457": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.38656483249435863
+      }
+    },
+    "reign-000010-uid-152-sha256-4789d68abf328f60": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.42666203784065265
+      }
+    },
+    "reign-000011-uid-92-sha256-1bac46f1afa79f26": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.4749175490366256
+      }
+    },
+    "reign-000012-uid-193-sha256-2650b1a6efe9755d": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.49158132268703353
+      }
+    },
+    "reign-000013-uid-230-sha256-ed39c18e61e2bbc0": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5004339524388127
+      }
+    },
+    "reign-000014-uid-248-sha256-323086242c7b17b1": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5228258982815484
+      }
+    },
+    "reign-000015-uid-227-sha256-b9b0e07dbce8045b": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5224787363304981
+      }
+    },
+    "reign-000016-uid-198-sha256-befd0a96e994c99d": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.4934907134178094
+      }
+    },
+    "reign-000017-uid-177-sha256-534105202b7ed048": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.4816872070821038
+      }
+    },
+    "reign-000018-uid-101-sha256-2bd44ff810858b2f": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.4780420065960771
+      }
+    },
+    "reign-000019-uid-210-sha256-efc688ee020476af": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5035584099982642
+      }
+    },
+    "reign-000020-uid-56-sha256-7efcacedb46d006e": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.4995660475611873
+      }
+    },
+    "reign-000021-uid-170-sha256-29e55211b7e8b450": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.4924492275646589
+      }
+    },
+    "reign-000022-uid-239-sha256-0b34631229023d77": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5233466412081236
+      }
+    },
+    "reign-000023-uid-235-sha256-3c2554ee0adb6ca3": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5165769831626453
+      }
+    },
+    "reign-000024-uid-131-sha256-26df0ff9cadbe913": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5160562402360701
+      }
+    },
+    "reign-000025-uid-22-sha256-c90a409de9d40dfc": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5214372504773477
+      }
+    },
+    "reign-000026-uid-61-sha256-d68be6c03af7a738": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5276861655962507
+      }
+    },
+    "reign-000027-uid-3-sha256-92323462a7748015": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5259503558409998
+      }
+    },
+    "reign-000028-uid-226-sha256-39e6c91d921d140a": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5219579934039229
+      }
+    },
+    "reign-000029-uid-32-sha256-3325dd0dc9e3090c": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.515882659260545
+      }
+    },
+    "reign-000030-uid-65-sha256-1a9d7c9de0188649": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5278597465717757
+      }
+    },
+    "reign-000031-uid-168-sha256-1e8f3b42509355f7": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.538968929005381
+      }
+    },
+    "reign-000032-uid-203-sha256-a0e4113606fafb52": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5334143377885784
+      }
+    },
+    "reign-000033-uid-115-sha256-cd2bef739af7bd0c": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5292483943759764
+      }
+    },
+    "reign-000034-uid-179-sha256-ac1b2e17e4807965": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5379274431522305
+      }
+    },
+    "reign-000035-uid-183-sha256-fa3c2716dad75685": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5434820343690332
+      }
+    },
+    "reign-000036-uid-141-sha256-53bc99dfc92d7a5e": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5412254816872071
+      }
+    },
+    "reign-000037-uid-12-sha256-e9d60451921c1495": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5457385870508592
+      }
+    },
+    "reign-000038-uid-86-sha256-f872c8bf524fc1f3": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5438291963200833
+      }
+    },
+    "reign-000039-uid-211-sha256-b686d7c276019ade": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5486894636347857
+      }
+    },
+    "reign-000040-uid-85-sha256-7deb3bb45ea1bfaf": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5566741885089395
+      }
+    },
+    "reign-000041-uid-126-sha256-1f1efb68b4a03d4b": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5556327026557889
+      }
+    },
+    "reign-000042-uid-182-sha256-67643e860f86edf5": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5570213504599896
+      }
+    },
+    "reign-000043-uid-236-sha256-9b202f1afae9c357": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5610137128970665
+      }
+    },
+    "reign-000044-uid-107-sha256-c7ef5487e633bf97": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5606665509460164
+      }
+    },
+    "reign-000045-uid-65-sha256-414bcb8a1706ff32": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5512931782676619
+      }
+    },
+    "reign-000046-uid-26-sha256-1c4182f79dd110c5": {
+      "name": "BBH",
+      "task": "leaderboard_bbh",
+      "fewshot": 3,
+      "status": "completed",
+      "metric": {
+        "name": "acc_norm,none",
+        "value": 0.5511195972921368
+      }
+    }
+  }
+}

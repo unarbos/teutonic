@@ -10,6 +10,7 @@
   var lastPayload = null;
   var mainQueueFailed = false;
   var benchmarkPayload = null;
+  var legacyBbh = null;
   var benchmarkHistoryVisible = false;
   var historyShowErrors = false;
   var historyCompetition = "all";
@@ -150,7 +151,16 @@
     selected.benchmarks.forEach(function (benchmark) { var card = document.createElement("article"), name = document.createElement("div"), score = document.createElement("div"), status = document.createElement("div"), state = document.createElement("span"), shots = document.createElement("span"); card.className = "bench-card"; card.dataset.status = benchmark.status; name.className = "bench-name"; name.textContent = benchmark.name; score.className = "bench-score"; score.textContent = benchmark.score == null ? "--" : percent(benchmark.score); score.title = [benchmark.metric, finite(benchmark.wallTimeSeconds) == null ? "" : metric(benchmark.wallTimeSeconds, 0) + " seconds"].filter(Boolean).join(" · "); status.className = "bench-status"; state.textContent = benchmark.status.replaceAll("_", " "); shots.textContent = benchmark.fewshot + "-SHOT"; status.appendChild(state); status.appendChild(shots); card.appendChild(name); card.appendChild(score); card.appendChild(status); grid.appendChild(card); });
   }
   async function loadBenchmarks() {
-    try { renderBenchmarks(await fetchFirstJson(["/benchmarks/results.json", BENCHMARK_RESULTS_URL])); }
+    try {
+      var payload = await fetchFirstJson(["/benchmarks/results.json", BENCHMARK_RESULTS_URL]);
+      // Preserve the original BBH runs while the publisher migrates to BBH CoT.
+      // Failure to load the archive must not hide the other live benchmarks.
+      if (!legacyBbh) {
+        try { legacyBbh = await fetchJson("/benchmarks/bbh-legacy.json"); } catch (_) {}
+      }
+      if (legacyBbh) payload = TeutonicDashboardV1.restoreLegacyBbh(payload, legacyBbh);
+      renderBenchmarks(payload);
+    }
     catch (error) { if (!benchmarkPayload) { text("benchmark-meta", "BENCHMARK RESULTS UNAVAILABLE"); clear(el("benchmark-grid")); var empty = document.createElement("p"); empty.className = "bench-empty"; empty.textContent = "LIVE BENCHMARK RESULTS COULD NOT BE LOADED"; el("benchmark-grid").appendChild(empty); } }
   }
   function renderDatasetManifest(manifest) {
