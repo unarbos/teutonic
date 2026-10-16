@@ -114,8 +114,8 @@ before proceeding.
    weights may differ.
 4. A GPU evaluator scores king and challenger on the SAME token sequences,
    using BF16 replicas on eight GPUs (four replicas per side, one per GPU).
-   The sample contains 30,000 windows of 2,048 tokens plus approximately
-   6M input tokens from complete documents of 2,049-8,192 tokens. Window
+   The sample contains 20,000 windows of 2,048 tokens plus approximately
+   30M input tokens from complete documents of 2,049-8,192 tokens. Window
    fragments are isolated at EOS boundaries; whole documents retain their
    full context. The complete mixed sample is scored, without early stopping.
    See section 3.1 for masking, sampling and memory behavior.
@@ -147,9 +147,9 @@ There are four competitions: MAIN, MATH, CODE, TEXT. Select one with
 --competition math`. Omission means MAIN. Selection is fixed at the ready
 commitment; one ready submission per hotkey applies across all four.
 
-Specialists plan 21,000 windows from their own group plus 4,500 from each
-other group. The additional ~6M document tokens follow the same 70/15/15
-mix: approximately 4.2M input tokens from their own group and 0.9M from
+Specialists plan 14,000 windows from their own group plus 3,000 from each
+other group. The additional ~30M document tokens follow the same 70/15/15
+mix: approximately 21M input tokens from their own group and 4.5M from
 each other group. Every group has explicit category weights totaling 100%.
 Until a specialist gets its first winner, challengers face the current
 MAIN king using the specialist mix and threshold. All duels run sequentially.
@@ -195,10 +195,10 @@ Whole-document sampling policy: `long-documents-2k-8k-v1`.
   COUNTS follow the eligible buckets' relative populations. Every nonempty
   eligible bucket gets at least one complete document. Token quotas and
   resulting percentages are approximate because documents are indivisible.
-- WEIGHT IN THE SCORE: with 30,000 x 2,048 window input tokens plus ~6M
-  document input tokens, documents contribute about 8.9% of the combined
+- WEIGHT IN THE SCORE: with 20,000 x 2,048 window input tokens plus ~30M
+  document input tokens, documents contribute about 42.3% of the combined
   mean's weight. The exact weight uses scored targets after masking.
-  This is not a fixed 8.9% share of the LCB: bootstrap uncertainty is
+  This is not a fixed 42.3% share of the LCB: bootstrap uncertainty is
   calculated from the combined sample. Bootstrap units are original
   windows or whole documents, not tokens or internal window fragments.
 - REPLAY: the request pins the index manifest's exact contents and SHA-256,
@@ -219,7 +219,8 @@ Whole-document sampling policy: `long-documents-2k-8k-v1`.
   truncated or silently dropped. All samples in the current length range
   use complete model replicas on single GPUs.
 
-The 30,000-window count and acceptance thresholds are repository defaults.
+The sample described here is configured as 20,000 windows plus approximately
+30M document input tokens; repository bootstrap defaults may differ.
 Check the selected competition's published configuration and evaluation
 request when reproducing a specific duel. Window-only masked evaluations
 retain the configured early-stopping rule; the mixed document sample is
@@ -569,7 +570,7 @@ the coldkey.
 - accept rule: paired-bootstrap LCB of token-weighted CE advantage > the
   competition's delta_threshold (defaults: MAIN 0.003; MATH/CODE/TEXT 0.0014);
   specialists also require own-source mu_hat >= delta_threshold
-- sample: 30,000 masked 2,048-token windows + ~6M input tokens from
+- sample: 20,000 masked 2,048-token windows + ~30M input tokens from
   complete 2,049-8,192-token documents; alpha=0.001, B=10000, bootstrap seed 0
 - specialist mix: 70% own group / 15% each other group, including the
   additional document token budget

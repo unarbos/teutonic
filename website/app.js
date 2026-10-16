@@ -168,7 +168,7 @@
     if (view.totalTokens) summary.push(compactNumber(view.totalTokens) + " TOKENS");
     if (view.sequenceLength) summary.push("SEQ LEN " + number(view.sequenceLength));
     if (view.evalN) summary.push("EVAL SAMPLE " + number(view.evalN) + " SEQ" + (view.evalTokens ? " / " + compactNumber(view.evalTokens) + " TOKENS" : ""));
-    summary.push("PLUS ~6M DOCUMENT TOKENS (" + number(2049) + "–" + number(8192) + " TOKENS/DOC)");
+    summary.push("PLUS ~30M DOCUMENT TOKENS (" + number(2049) + "–" + number(8192) + " TOKENS/DOC)");
     text("dataset-summary", summary.join(" · "));
     if (view.tokenizer) {
       var tokenizer = document.createElement("span"); tokenizer.className = "dataset-tokenizer"; tokenizer.textContent = "TOKENIZER: " + view.tokenizer;
