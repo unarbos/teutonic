@@ -10,7 +10,6 @@
   var lastPayload = null;
   var mainQueueFailed = false;
   var benchmarkPayload = null;
-  var legacyBbh = null;
   var benchmarkHistoryVisible = false;
   var historyShowErrors = false;
   var historyCompetition = "all";
@@ -153,12 +152,6 @@
   async function loadBenchmarks() {
     try {
       var payload = await fetchFirstJson(["/benchmarks/results.json", BENCHMARK_RESULTS_URL]);
-      // Preserve the original BBH runs while the publisher migrates to BBH CoT.
-      // Failure to load the archive must not hide the other live benchmarks.
-      if (!legacyBbh) {
-        try { legacyBbh = await fetchJson("/benchmarks/bbh-legacy.json"); } catch (_) {}
-      }
-      if (legacyBbh) payload = TeutonicDashboardV1.restoreLegacyBbh(payload, legacyBbh);
       renderBenchmarks(payload);
     }
     catch (error) { if (!benchmarkPayload) { text("benchmark-meta", "BENCHMARK RESULTS UNAVAILABLE"); clear(el("benchmark-grid")); var empty = document.createElement("p"); empty.className = "bench-empty"; empty.textContent = "LIVE BENCHMARK RESULTS COULD NOT BE LOADED"; el("benchmark-grid").appendChild(empty); } }

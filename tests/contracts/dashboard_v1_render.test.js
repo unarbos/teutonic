@@ -255,7 +255,7 @@ const benchmarkResults = dashboard.benchmarkPresentation({
             result: {
                 model: { reign_number: 6, uid: 22, hotkey: "prior", model_repo: "owner/prior" },
                 benchmarks: [
-                    { name: "BBH", fewshot: 3, status: "completed", metric: { name: "acc_norm,none", value: 0.25 } },
+                    { name: "bbh_cot", fewshot: 3, status: "completed", metric: { name: "exact_match,get-answer", value: 0.25 } },
                     { name: "MMLU", fewshot: 0, status: "completed", metric: { name: "acc,none", value: 0.2 } }
                 ]
             }
@@ -267,7 +267,7 @@ const benchmarkResults = dashboard.benchmarkPresentation({
             result: {
                 model: { reign_number: 7, uid: 226, hotkey: "current", model_repo: "owner/current", is_current: true },
                 benchmarks: [
-                    { name: "BBH", fewshot: 3, status: "completed", metric: { name: "acc_norm,none", value: 0.297344 } },
+                    { name: "bbh_cot", fewshot: 3, status: "completed", metric: { name: "exact_match,get-answer", value: 0.297344 } },
                     { name: "MMLU_v2", fewshot: 5, status: "completed", metric: { name: "acc,none", value: 0.7395 } },
                     { name: "HellaSwag_v2", fewshot: 10, status: "completed", metric: { name: "acc_norm,none", value: 0.8419 } },
                     { name: "WinoGrande_v2", fewshot: 5, status: "completed", metric: { name: "acc,none", value: 0.7695 } },
@@ -285,7 +285,7 @@ const benchmarkResults = dashboard.benchmarkPresentation({
 assert.deepStrictEqual(benchmarkResults.kings.map((king) => king.kingId), ["reign-7", "reign-6"]);
 assert.strictEqual(benchmarkResults.selected.kingId, "reign-7");
 assert.strictEqual(benchmarkResults.selected.benchmarks.length, 12);
-assert.strictEqual(benchmarkResults.selected.benchmarks[0].name, "BBH");
+assert.strictEqual(benchmarkResults.selected.benchmarks[0].name, "BBH CoT");
 assert.strictEqual(benchmarkResults.selected.benchmarks[0].score, 0.297344);
 assert.deepStrictEqual(
     benchmarkResults.selected.benchmarks.slice(1, 4).map((benchmark) => [benchmark.name, benchmark.score, benchmark.fewshot]),
@@ -325,26 +325,17 @@ assert.throws(
     () => dashboard.benchmarkPresentation({ schema_version: "wrong", kings: [] }),
     /unsupported benchmark results schema/
 );
-const benchmarkNames = ["BBH", "MMLU", "HellaSwag", "WinoGrande", "GSM8K", "PIQA", "ARC-C", "ARC-E", "GPQA Diamond", "MATH-500", "HumanEval-Sanitized", "MBPP-Sanitized"];
-const legacyRow = { name: "BBH", task: "leaderboard_bbh", fewshot: 3, status: "completed", metric: { name: "acc_norm,none", value: 0.55 } };
-const legacyFeed = {
+const benchmarkNames = ["BBH CoT", "MMLU", "HellaSwag", "WinoGrande", "GSM8K", "PIQA", "ARC-C", "ARC-E", "GPQA Diamond", "MATH-500", "HumanEval-Sanitized", "MBPP-Sanitized"];
+// Original BBH scores must never fill the CoT card or history.
+const legacyOnly = dashboard.benchmarkPresentation({
     schema_version: "teutonic-king-benchmark-all-results.v2",
-    benchmark_result_count: 1,
-    kings: [
-        { king_id: "old", result: { benchmarks: [{ name: "bbh_cot", status: "pending" }] } },
-        { king_id: "new", result: { benchmarks: [] } }
-    ]
-};
-const restoredFeed = dashboard.restoreLegacyBbh(legacyFeed, { results: { old: legacyRow } });
-assert.strictEqual(restoredFeed.benchmark_result_count, 2);
-assert.strictEqual(restoredFeed.kings[0].result.benchmarks[0].name, "bbh_cot");
-assert.strictEqual(dashboard.benchmarkPresentation(restoredFeed, "old").selected.benchmarks[0].score, 0.55);
-assert.strictEqual(restoredFeed.kings[1].result.benchmarks.length, 0);
-assert.strictEqual(legacyFeed.kings[0].result.benchmarks.length, 1);
-assert.deepStrictEqual(dashboard.restoreLegacyBbh(restoredFeed, { results: { old: Object.assign({}, legacyRow, { metric: { value: 0.1 } }) } }), restoredFeed);
-const archivedBbh = require("../../website/benchmarks/bbh-legacy.json");
-assert.strictEqual(Object.keys(archivedBbh.results).length, 46);
-assert.ok(Object.values(archivedBbh.results).every((row) => row.name === "BBH" && row.task === "leaderboard_bbh" && row.status === "completed"));
+    kings: [{ king_id: "legacy", result: { benchmarks: [
+        { name: "BBH", status: "completed", metric: { value: 0.55 } }
+    ] } }]
+});
+assert.strictEqual(legacyOnly.selected.benchmarks[0].score, null);
+assert.strictEqual(legacyOnly.selected.benchmarks[0].status, "pending");
+assert.deepStrictEqual(legacyOnly.series[0].points, []);
 assert.deepStrictEqual(
     dashboard.benchmarkPresentation({ schema_version: "teutonic-king-benchmark-all-results.v2", kings: [] }).series.map((series) => series.name),
     benchmarkNames
