@@ -41,11 +41,25 @@ class CategoryCoverageTests(unittest.TestCase):
             self.assertTrue(all(n>0 for n in counts.values()))
             self.assertEqual(sum(counts.values()),200)
             self.assertGreaterEqual(len(shards),7)
+            self.assertEqual(
+                Counter(category_of(rule, shard['url']) for shard in shards),
+                {f'cat{i}': min(5, i + 1) for i in range(7)},
+            )
             allocations.append(counts)
             signatures.add(tuple(s['url'] for s in shards))
             self.assertEqual(request,self.request(seed))
         self.assertTrue(all(c==allocations[0] for c in allocations))
         self.assertGreater(len(signatures),1)
+
+    def test_small_category_quotas_only_select_contributing_shards(self):
+        rule = load_rules(DEFAULT_RULES_PATH)['code-reasoning']
+        request = self.request(1, n=7)
+        shards = request['sources'][0]['shards']
+        self.assertEqual(
+            Counter(category_of(rule, shard['url']) for shard in shards),
+            {f'cat{i}': 1 for i in range(7)},
+        )
+        self.assertTrue(all(shard['target_sequences'] == 1 for shard in shards))
 
     def test_insufficient_sample_count_fails_instead_of_omitting_categories(self):
         with self.assertRaisesRegex(ValueError,'cover all 7 categories'):

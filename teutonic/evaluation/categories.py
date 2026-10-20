@@ -28,6 +28,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 FLAT = "*"
 DEFAULT_RULES_PATH = Path(__file__).with_name("dataset_categories.json")
+MIN_SHARDS_PER_CATEGORY = 5
 
 
 def category_seed(base_seed: int, key: str) -> int:
@@ -158,10 +159,9 @@ def plan_source_shards(
 
     The source target is split by explicit weights (or shard count), every present
     category is guaranteed at least `min_sequences`, and each category's share is
-    then spread across several of its own shards so no single shard carries a
-    category. `shard_budget` is a floor, not a cap: a source with more categories
-    than the budget gets one shard per category, because dropping a category
-    biases the mix in a way that extra shards do not.
+    then spread across at least five of its own shards when its inventory and
+    sequence quota allow it. `shard_budget` is a floor, not a cap: each category
+    gets its minimum allocation even when their total exceeds the budget.
     """
     if target <= 0 or not shards:
         return []
@@ -191,16 +191,16 @@ def plan_source_shards(
     if len(names) > 1:
         sequence_targets = raise_to_min(sequence_targets, min_sequences)
 
-    # Only categories that will actually contribute sequences earn a shard, so a
-    # target too small to cover every category does not download unused shards.
+    # Reserve at least five shard slots per contributing category. The planner
+    # below only uses shards with available inventory and a positive quota.
     active = [index for index, count in enumerate(sequence_targets) if count > 0]
-    shard_total = max(int(shard_budget), len(active))
+    shard_total = max(int(shard_budget), MIN_SHARDS_PER_CATEGORY * len(active))
     shard_counts = [0] * len(names)
     if active:
         allocated = apportion(
             shard_total, len(active), [float(sequence_targets[i]) for i in active]
         )
-        allocated = raise_to_min(allocated, 1)
+        allocated = raise_to_min(allocated, MIN_SHARDS_PER_CATEGORY)
         for position, index in enumerate(active):
             shard_counts[index] = allocated[position]
 
