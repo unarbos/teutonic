@@ -11,7 +11,7 @@ import httpx
 # Shared across shard workers; cap sockets even when reads use nested pools.
 _client = httpx.Client(
     follow_redirects=True,
-    limits=httpx.Limits(max_connections=64, max_keepalive_connections=64, keepalive_expiry=60),
+    limits=httpx.Limits(max_connections=128, max_keepalive_connections=128, keepalive_expiry=60),
 )
 atexit.register(_client.close)
 

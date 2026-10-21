@@ -143,7 +143,7 @@ def extend_with_long_documents(
                 fragment["shard_key"] = key
         return selected, {**declared_mix[config["categories"].index(category)], **summary}
 
-    with ThreadPoolExecutor(max_workers=16) as pool:
+    with ThreadPoolExecutor(max_workers=128) as pool:
         plans = list(pool.map(plan, zip(config["categories"], quotas, strict=True)))
     documents = [d for selected, _summary in plans for d in selected]
     needed = sorted({(d["dataset"], f["shard_key"]) for d in documents for f in d["fragments"]})
