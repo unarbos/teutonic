@@ -468,7 +468,6 @@
         if (!state) {
           state = { key: key, prefix: key === "main" ? "/" : "/competitions/" + key + "/", dashboard: null, failed: false, polling: false, loadingDataset: false, dataset: null, datasetFailed: false, datasetRow: document.createElement("tr") };
           state.datasetRow.id = "dataset-" + key;
-          el("competition-datasets").appendChild(state.datasetRow);
           if (key === "main") mainMixState = state; else specialists.push(state);
           if (!historyFilterContainer.querySelector('[data-competition="' + key + '"]')) {
             var button = document.createElement("button"); button.type = "button";
@@ -494,6 +493,8 @@
     finally { state.polling = false; renderSharedEvaluation(); renderReigns(); renderHistory(); }
   }
   function renderCompetitionDataset(state) {
+    if (state.active === false) { state.datasetRow.remove(); return; }
+    if (!state.datasetRow.parentNode) el("competition-datasets").appendChild(state.datasetRow);
     var row = state.datasetRow, manifest = state.dataset, view = manifest ? TeutonicDashboardV1.datasetPresentation(manifest) : null;
     clear(row);
     var heading = document.createElement("th"); heading.scope = "row"; heading.textContent = state.key.toUpperCase(); row.appendChild(heading);
@@ -511,7 +512,7 @@
     }
     cell(row, view ? number(view.evalN) : "--");
     cell(row, number(state.documentTokens));
-    cell(row, !state.active ? "RETIRED" : state.hasKing ? "OWN KING" : "LATEST MAIN KING");
+    cell(row, state.hasKing ? "OWN KING" : "LATEST MAIN KING");
     cell(row, manifest ? "> " + metric(manifest.delta_threshold, 4) : "--");
     datasetCell(row, "MANIFEST", "", state.prefix + "datasets/manifest.json");
   }

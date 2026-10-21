@@ -49,6 +49,7 @@
       "required": ["name", "proportion", "manifest_url", "manifest_sha256", "source_repo", "tokenizer", "dtype", "tokenization_mode", "sequence_length", "total_tokens", "total_shards", "estimated_sequences"],
       "properties": {
         "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "dataset": { "type": "string", "minLength": 1 },
         "proportion": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
         "manifest_url": { "type": "string", "pattern": "^https://" },
         "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

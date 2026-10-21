@@ -235,6 +235,18 @@ class DashboardContractTests(unittest.TestCase):
         }]
         parsed = json.loads(canonical_dashboard_json(fixture))
         self.assertEqual(parsed["dataset_versions"][0]["sources"][0]["name"], "fixture")
+        source = fixture["dataset_versions"][0]["sources"][0]
+        source["dataset"] = "dclm-baseline-1.0"
+        parsed = json.loads(canonical_dashboard_json(fixture))
+        self.assertEqual(
+            parsed["dataset_versions"][0]["sources"][0]["dataset"],
+            "dclm-baseline-1.0",
+        )
+        for invalid_dataset in ("", None, 123):
+            source["dataset"] = invalid_dataset
+            with self.assertRaises(DashboardContractError):
+                canonical_dashboard_json(fixture)
+        source["dataset"] = "dclm-baseline-1.0"
         fixture["dataset_versions"][0]["private_manifest"] = {"secret": "never"}
         with self.assertRaises(DashboardContractError):
             canonical_dashboard_json(fixture)
