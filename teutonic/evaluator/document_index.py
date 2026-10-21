@@ -1,4 +1,4 @@
-"""Read pinned document indexes by HTTP range, without downloading 150+ GB."""
+"""Read pinned document indexes from a persistent local store or HTTP ranges."""
 
 import base64
 import hashlib
@@ -24,6 +24,7 @@ from teutonic.evaluation.long_documents import (
     MAX_DOCUMENT_TOKENS,
     validate_index_file,
 )
+from teutonic.evaluator.local_index import LocalIndexStore, store_dir
 from teutonic.evaluator.range_http import pooled_urlopen
 
 FRAG_DTYPE = np.dtype(
@@ -191,6 +192,20 @@ class PinnedObject(RangeObject):
     def __init__(self, descriptor, cache_dir, opener=pooled_urlopen):
         validate_index_file(descriptor)
         super().__init__(descriptor, cache_dir, opener)
+        root = store_dir()
+        self.local = LocalIndexStore(root).open(descriptor) if root is not None else None
+
+    def read(self, offset, size):
+        if offset < 0 or size < 0 or offset + size > self.size:
+            raise ValueError("index byte range is out of bounds")
+        if self.local is not None:
+            try:
+                return self.local.read(offset, size)
+            except OSError:
+                log.warning("Local document index changed; using pinned HTTP ranges")
+                self.local.close()
+                self.local = None
+        return super().read(offset, size)
 
     def _check_metadata(self, headers):
         # Index identity continues to use its configured ETag pin.

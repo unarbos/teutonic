@@ -63,7 +63,18 @@ def find_cache_files(cache_dir: Path) -> list[Path]:
     """Return whole shards, cached ranges and their partial downloads, at any depth."""
     files: list[Path] = []
     try:
-        for path in cache_dir.rglob("*"):
+        paths = []
+        persistent = os.environ.get("TEUTONIC_DOC_INDEX_STORE_DIR")
+        persistent = Path(persistent).expanduser().resolve() if persistent else None
+        for directory, subdirs, names in os.walk(cache_dir):
+            root = Path(directory)
+            if ".teutonic-index-store" in names or (
+                persistent is not None and root.resolve().is_relative_to(persistent)
+            ):
+                subdirs[:] = []
+                continue
+            paths.extend(root / name for name in names)
+        for path in paths:
             index_page = re.fullmatch(r"[0-9a-f]{64}", path.parent.name) and (
                 re.fullmatch(r"[0-9]+|range-[0-9]+-[0-9]+", path.name)
                 or (path.name.startswith("tmp") and path.suffix == ".tmp")

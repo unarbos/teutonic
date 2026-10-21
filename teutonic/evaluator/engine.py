@@ -48,7 +48,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-
 _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
@@ -75,11 +74,12 @@ from teutonic.evaluation.masking import (
     token_weights,
 )
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE, MAX_BATCH_SIZE
+from teutonic.evaluator import replica_loading, sequence_parallel
 from teutonic.evaluator.cache_lock import cache_lock, document_index_cache_dir
 from teutonic.evaluator.document_index import DocumentIndexDownloadError, RangeDownloadError
 from teutonic.evaluator.document_masking import masked_model_inputs
+from teutonic.evaluator.local_index import IndexPrefetcher, store_dir
 from teutonic.evaluator.module_cache import transformers_module_cache_lock
-from teutonic.evaluator import replica_loading, sequence_parallel
 from teutonic.storage.artifacts import R2ArtifactResolver
 
 log = logging.getLogger("teutonic.evaluator.engine")
@@ -156,6 +156,7 @@ MODEL_LOADER_VERSION = "load-once-broadcast-v2"
 CACHE_HIGH_WATERMARK_GB = float(os.environ.get("MODEL_CACHE_HIGH_WATERMARK_GB", "500"))
 
 _eval_lock = threading.Lock()
+_index_prefetcher = None
 _attempts = EvaluationAttemptRegistry()
 _gpu_ids: list[int] = []
 _king_model = None
@@ -2869,7 +2870,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _gpu_ids, _model_worker_pool
+    global _gpu_ids, _model_worker_pool, _index_prefetcher
     setup_logging()
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     EVAL_RECORD_DIR.mkdir(parents=True, exist_ok=True)
@@ -2885,11 +2886,19 @@ async def lifespan(app: FastAPI):
         SHARD_CACHE_DIR,
         EVAL_RECORD_DIR,
     )
-    yield
-    if _model_worker_pool is not None:
-        _model_worker_pool.close()
-        _model_worker_pool = None
-    log.info("Pair eval server shutting down")
+    _index_prefetcher = IndexPrefetcher.from_env()
+    if _index_prefetcher is not None:
+        _index_prefetcher.start()
+    try:
+        yield
+    finally:
+        if _index_prefetcher is not None:
+            _index_prefetcher.stop()
+            _index_prefetcher = None
+        if _model_worker_pool is not None:
+            _model_worker_pool.close()
+            _model_worker_pool = None
+        log.info("Pair eval server shutting down")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -2916,6 +2925,10 @@ async def health():
         "active_evals": _attempts.active_count(),
         "cache_dir": str(MODEL_CACHE_DIR),
         "shard_cache_dir": str(SHARD_CACHE_DIR),
+        "document_index_store": (
+            _index_prefetcher.status() if _index_prefetcher is not None
+            else {"enabled": False, "directory": str(store_dir()) if store_dir() else None}
+        ),
         "record_dir": str(EVAL_RECORD_DIR),
         "kernel_cache_dir": str(KERNEL_CACHE_DIR),
         "model_worker_pool": _model_worker_pool.status() if _model_worker_pool is not None else {"running": False, "workers": []},
@@ -2952,6 +2965,23 @@ async def health():
     }
 
 
+def run_eval_with_prefetch(eval_id, request, prefetcher):
+    try:
+        if prefetcher is not None:
+            config = request.dataset.get("long_documents")
+            if config:
+                try:
+                    prefetcher.enqueue_pin(config["index_manifest"])
+                except Exception:
+                    # Prefetch is optional; request validation and range reads
+                    # remain authoritative for the actual evaluation.
+                    log.warning("Could not queue evaluation index for prefetch", exc_info=True)
+        run_eval(eval_id, request)
+    finally:
+        if prefetcher is not None:
+            prefetcher.resume()
+
+
 @app.post("/eval")
 async def start_eval(payload: dict):
     try:
@@ -2980,12 +3010,24 @@ async def start_eval(payload: dict):
         ) from exc
 
     if not duplicate:
-        threading.Thread(
-            target=run_eval,
-            args=(request.eval_id, request),
-            daemon=True,
-            name=f"eval-{request.eval_id}",
-        ).start()
+        prefetcher = _index_prefetcher
+        if prefetcher is not None:
+            prefetcher.pause()
+        try:
+            threading.Thread(
+                target=run_eval_with_prefetch,
+                args=(request.eval_id, request, prefetcher),
+                daemon=True,
+                name=f"eval-{request.eval_id}",
+            ).start()
+        except Exception:
+            record.state = "failed"
+            record.error = record.reason = "evaluation worker could not start"
+            record.error_code = "evaluator_interrupted"
+            if prefetcher is not None:
+                prefetcher.resume()
+            _eval_lock.release()
+            raise
     return record.response(duplicate=duplicate)
 
 

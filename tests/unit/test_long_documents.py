@@ -410,7 +410,8 @@ def make_index_fixture(tmp_path):
 
 
 @pytest.mark.parametrize("flat_mix", [False, True])
-def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_path, monkeypatch, flat_mix):
+@pytest.mark.parametrize("local_files", [0, 2, 4])
+def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_path, monkeypatch, flat_mix, local_files):
     import teutonic.evaluator as evaluator_package
 
     config, snap, factory, documents, paths, _server = make_index_fixture(tmp_path)
@@ -461,6 +462,28 @@ def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_pa
     })
     kwargs["shard_reader"] = lambda ref: NpyShard(ref, opener=server.open)
     result, audit = extend_with_long_documents(req, [[12, 13]], meta, **kwargs)
+    if local_files:
+        from teutonic.evaluator.local_index import LocalIndexStore
+
+        root = tmp_path / "persistent-indexes"
+        store = LocalIndexStore(root)
+        descriptors = list(config["categories"][0]["files"].values())[:local_files]
+
+        def download(request, timeout):
+            response = _server.open(request, timeout)
+            response.iter_chunks = lambda size: iter(lambda: response.read(size), b"")
+            return response
+
+        for descriptor in descriptors:
+            assert store.download(descriptor, lambda: False, download)
+        monkeypatch.setenv("TEUTONIC_DOC_INDEX_STORE_DIR", str(root))
+
+        def local_object(descriptor, cache):
+            reader = PinnedObject(descriptor, cache, _server.open)
+            assert (reader.local is not None) == (descriptor in descriptors)
+            return reader
+
+        kwargs["index_factory"] = lambda category, cache: DocumentIndex(category, cache, local_object)
     second, again = extend_with_long_documents(req, [[12, 13]], meta, **kwargs)
     assert result == second and audit == again
     assert server.transferred < sum(path.stat().st_size for path in paths.values())

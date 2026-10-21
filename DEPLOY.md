@@ -282,6 +282,68 @@ JSON, and partial downloads. A custom `TEUTONIC_DOC_INDEX_CACHE_DIR` is cleaned
 separately with the same age limits. Evaluations lock both cache locations so
 cleanup cannot remove pages or manifests while an evaluation uses them.
 
+For persistent full document indexes on the evaluator, add these settings to
+`.gpu.env` (adjust the storage path for that host):
+
+```dotenv
+TEUTONIC_DOC_INDEX_STORE_DIR=/path/to/persistent/doc_index
+TEUTONIC_DOC_INDEX_PREFETCH=1
+TEUTONIC_DOC_INDEX_PREFETCH_MANIFEST_URL=https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest-bb93856956e924c6139bebf73601c72cd58007ce916e6095b9929dd1b1d450c7.json
+TEUTONIC_DOC_INDEX_PREFETCH_MANIFEST_SHA256=bb93856956e924c6139bebf73601c72cd58007ce916e6095b9929dd1b1d450c7
+TEUTONIC_DOC_INDEX_DOWNLOAD_WORKERS=4
+```
+
+The release inventory contains 81 unique files, about 302.92 GB (282.11 GiB).
+Use a persistent disk with that much free space **in addition to** headroom for
+model downloads, shards and audit records. Keep the store outside disposable
+cache directories; a path inside the model cache is rejected. The evaluator
+creates the directory, which must be writable by its service account.
+
+At process startup, background workers fetch the small SHA-256-pinned inventory
+and download missing indexes. `/health` becomes available without waiting for
+the inventory or files. Existing completed files are checked using their exact
+descriptor, size and recorded filesystem identity/timestamps. No startup scan
+or whole-index hashing occurs. A same-size file copied in manually is not trusted:
+the store requires its own completion receipt, written only after an ETag-pinned
+transfer finishes. This detects truncation and ordinary file changes, but is not
+a cryptographic check against silent disk corruption; use trusted local storage.
+
+An accepted evaluation pauses background downloads. Workers close their HTTP
+responses at the next 256 KiB stream boundary and save a durable resume offset;
+an already-running network read can take time to return (10-second inactivity
+timeout). Evaluation admission does not wait for this. Complete files use local
+reads; missing or partial files use the existing pinned HTTP ranges. The same
+samples and scores are produced. Downloads resume after evaluation completion
+or failure, and partial files resume after a process restart. A crash can discard
+uncheckpointed bytes; transfers without a valid resume record start again.
+Each range is limited to 8 MiB per worker. Newly requested index
+pins are queued for prefetch too. Download failures are retried in the background
+and do not block evaluation; inspect logs and free space if errors persist.
+
+The download pool defaults to four workers (configurable from 1 to 16), separate
+from the 128 index-sampling workers but using the same shared HTTP connection
+pool and dataset R2 credentials. Full indexes and partial downloads are retained
+across restarts and excluded from shard cleanup, including when nested in a
+shard cache. They are not automatically expired. Stop the evaluator before
+manually deleting the store. Set `TEUTONIC_DOC_INDEX_PREFETCH=0` to keep reading
+completed local files without background downloads; unset the store variable to
+use only the existing HTTP range/page-cache path.
+
+After deploying the code and updating `.gpu.env`, drain any active evaluation
+and restart the evaluator and cleanup schedules with their updated environment:
+
+```bash
+pm2 restart ecosystem.eval.config.js --update-env
+curl --fail http://127.0.0.1:9000/health
+pm2 logs teutonic-evaluator --lines 100 --nostream
+```
+
+`/health.document_index_store` reports whether prefetch is enabled/paused,
+inventory readiness, ready/total files, bytes in completed files, active downloads
+and cumulative retry errors. The evaluator can serve evaluations before all files
+are ready. Continue to keep the evaluator code-version identity aligned with the
+validator for the deployed commit.
+
 Token shards use HTTP range downloads without disk caching;
 `TEUTONIC_PRETOKENIZED_CACHE_DIR` is unused. Document-index caching remains enabled.
 SHA-256 metadata is checked when available; whole-file hashes are not verified.

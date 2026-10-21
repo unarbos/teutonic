@@ -232,6 +232,12 @@ Whole-document sampling policy: `long-documents-2k-8k-v1`.
   ETag, size and exact content range. Token shards are read through bounded HTTP
   ranges; available whole-object SHA-256 metadata is compared with pinned values,
   but full shard/index bodies are not downloaded to compute whole-file hashes.
+  Evaluators can optionally prefetch full pinned document indexes to a persistent
+  local store while idle. Downloads pause for evaluations and resume afterward
+  or after restart; incomplete files continue to use HTTP range reads. Completed
+  files require a matching pin, size and filesystem-metadata receipt, without
+  rehashing at startup. This does not provide a full-file disk-corruption check.
+  Local storage changes I/O only, not sampling, scoring or bootstrap behavior.
   Index inventory v2 permits ETag/size pins without per-file SHA-256; v1 requires it.
   Keep the request, model digests, block hash, hotkey and bootstrap seed
   to reproduce a run. Different block hashes produce different selections,

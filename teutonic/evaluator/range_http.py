@@ -72,6 +72,9 @@ class _Response:
         self.status = response.status_code
         self.headers = response.headers
 
+    def iter_chunks(self, size):
+        return self.response.iter_raw(chunk_size=size)
+
     def read(self, size):
         # Do not buffer an unbounded response, even if the server lies about its size.
         body = bytearray()
