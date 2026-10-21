@@ -300,7 +300,7 @@ origins remain public. Canonical URLs, cache identities and object pins stay unc
 
 Window sampling downloads four shard files concurrently, with up to eight range
 workers per file. Document fragments use sixteen shard workers; index planning
-remains at two workers. Both share a pool capped at 64 connections. Window indices
+also uses sixteen workers. Both share a pool capped at 64 connections. Window indices
 are selected before concurrent I/O, preserving deterministic selection and output order.
 
 Deploy this update to both hosts; no migration or new dependencies are required.
