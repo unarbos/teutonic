@@ -80,7 +80,12 @@ def validate_index_manifest_pin(pin):
 
 
 def fetch_index_manifest(url=DEFAULT_INDEX_MANIFEST_URL, expected_sha256=None, opener=urlopen):
-    with opener(Request(url, headers={"User-Agent": "teutonic-eval/1.0"}), timeout=120) as response:
+    # The pooled range transport returns raw bytes, including HTTP compression.
+    # Request the original JSON representation so its exact-byte pin still matches.
+    request = Request(url, headers={
+        "User-Agent": "teutonic-eval/1.0", "Accept-Encoding": "identity",
+    })
+    with opener(request, timeout=120) as response:
         raw = response.read(4 * 1024 * 1024 + 1)
     if len(raw) > 4 * 1024 * 1024:
         raise ValueError("document-index manifest exceeds 4 MiB")

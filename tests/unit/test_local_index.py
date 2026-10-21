@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import fcntl
+import gzip
 import io
 import json
 import threading
@@ -211,6 +212,51 @@ def pin():
         "files": {path: {"etag": DESCRIPTOR["etag"], "size_bytes": len(BODY)}
                   for path in index_paths("d", "a").values()},
     }).encode(), "https://index.example/manifest.json")
+
+
+def test_startup_manifest_uses_original_bytes_when_server_offers_gzip(store, monkeypatch):
+    inventory = pin()
+    requests = []
+
+    class Stream(httpx.SyncByteStream):
+        def __init__(self, body):
+            self.body = body
+
+        def __iter__(self):
+            yield self.body
+
+    def serve(request):
+        requests.append(request)
+        body = inventory["content"].encode()
+        headers = {}
+        if request.headers.get("Accept-Encoding") != "identity":
+            body = gzip.compress(body)
+            headers["Content-Encoding"] = "gzip"
+        return httpx.Response(200, headers=headers, stream=Stream(body))
+
+    manager = IndexPrefetcher(store.root, inventory["url"], inventory["sha256"])
+    # Stop after an unexpected failure rather than waiting through bootstrap retries.
+    monkeypatch.setattr(manager.condition, "wait_for", lambda *a, **kw: setattr(manager, "stopped", manager.errors > 0))
+    with httpx.Client(transport=httpx.MockTransport(serve)) as client:
+        monkeypatch.setattr(range_http, "_client", client)
+        manager._bootstrap()
+    assert len(requests) == 1
+    assert requests[0].headers["Accept-Encoding"] == "identity"
+    assert manager.status()["manifest_ready"]
+    assert manager.status()["files_total"] == 4
+    assert manager.status()["errors"] == 0
+
+
+def test_startup_logs_manifest_validation_reason(store, monkeypatch, caplog):
+    manager = IndexPrefetcher(store.root, "https://index.example/manifest.json", "a" * 64)
+
+    def invalid(*args, **kwargs):
+        manager.stopped = True
+        raise ValueError("document-index manifest SHA-256 mismatch")
+
+    monkeypatch.setattr(local_index, "fetch_index_manifest", invalid)
+    manager._bootstrap()
+    assert "ValueError: document-index manifest SHA-256 mismatch" in caplog.text
 
 
 def wait_for(predicate):

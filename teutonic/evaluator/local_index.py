@@ -284,7 +284,8 @@ class IndexPrefetcher:
                     self.manifest_ready = True
                 return
             except Exception as exc:  # noqa: BLE001 - prefetch must not bring down evaluation
-                log.warning("Document index inventory prefetch failed: %s", type(exc).__name__)
+                detail = f"{type(exc).__name__}: {exc}" if isinstance(exc, ValueError) else type(exc).__name__
+                log.warning("Document index inventory prefetch failed: %s", detail)
                 with self.condition:
                     self.errors += 1
                     self.condition.wait_for(lambda: self.stopped, timeout=60)
