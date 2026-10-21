@@ -232,10 +232,12 @@ ALTER TABLE control_plane.chain_cursors OWNER TO teutonic_schema_owner;
 --
 
 CREATE TABLE control_plane.competitions (
-    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key IN ('main', 'math', 'code', 'text')),
+    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key ~ '^(main|math|code|text|mix(0[1-9]|[1-9][0-9]))$'),
     main_competition_id uuid,
     reward_reign_id uuid,
     reward_main_hotkeys text[],
+    active boolean NOT NULL DEFAULT true,
+    reward_transition jsonb,
     competition_id uuid DEFAULT gen_random_uuid() NOT NULL,
     netuid integer NOT NULL,
     chain_generation text NOT NULL,
@@ -432,7 +434,7 @@ CREATE VIEW control_plane.dashboard_dataset_manifests WITH (security_barrier='tr
     manifest.manifest_sha256,
     manifest.sample_proportion,
     CASE WHEN manifest.manifest_json ? 'total_tokens' AND manifest.manifest_json ? 'total_shards'
-         THEN manifest.manifest_json - 'shards'
+         THEN manifest.manifest_json - 'shards' - '_shards_zlib_base64'
          ELSE manifest.manifest_json END AS manifest_json
    FROM ((control_plane.competitions competition
      JOIN control_plane.evaluation_configs config ON (((config.competition_id = competition.competition_id) AND config.active)))
@@ -460,7 +462,7 @@ CREATE VIEW control_plane.dashboard_dataset_versions WITH (security_barrier='tru
     manifest.manifest_sha256,
     manifest.sample_proportion,
     CASE WHEN manifest.manifest_json ? 'total_tokens' AND manifest.manifest_json ? 'total_shards'
-         THEN manifest.manifest_json - 'shards'
+         THEN manifest.manifest_json - 'shards' - '_shards_zlib_base64'
          ELSE manifest.manifest_json END AS manifest_json
    FROM ((control_plane.competitions competition
      JOIN control_plane.evaluation_configs config ON (config.competition_id = competition.competition_id))
@@ -611,7 +613,7 @@ ALTER TABLE control_plane.registrations OWNER TO teutonic_schema_owner;
 --
 
 CREATE TABLE control_plane.uploads (
-    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key IN ('main', 'math', 'code', 'text')),
+    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key ~ '^(main|math|code|text|mix(0[1-9]|[1-9][0-9]))$'),
     upload_id uuid DEFAULT gen_random_uuid() NOT NULL,
     registration_id character(64) NOT NULL,
     chain_generation text NOT NULL,
@@ -2525,11 +2527,14 @@ ALTER TABLE control_plane.competitions ADD CONSTRAINT competitions_main_fkey
 CREATE OR REPLACE VIEW control_plane.dashboard_competitions WITH (security_barrier=true) AS
 SELECT c.netuid, c.chain_generation, c.name AS competition, c.competition_key,
        main.name AS main_competition, c.current_reign_id IS NOT NULL AS has_king,
-       ec.config_version, ec.eval_n, ec.delta_threshold
+       ec.config_version, ec.eval_n, ec.delta_threshold,
+       c.active, main.reward_transition,
+       COALESCE((ec.long_documents->>'token_budget')::bigint, 0) AS document_tokens
   FROM control_plane.competitions c
   JOIN control_plane.competitions main ON main.competition_id=COALESCE(c.main_competition_id,c.competition_id)
   JOIN control_plane.evaluation_configs ec ON ec.competition_id=c.competition_id AND ec.active;
 ALTER VIEW control_plane.dashboard_competitions OWNER TO teutonic_schema_owner;
 GRANT SELECT ON control_plane.dashboard_competitions TO teutonic_dashboard_view;
+GRANT SELECT ON control_plane.competitions TO teutonic_access_controller;
 
 COMMIT;

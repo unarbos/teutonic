@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-MASKED_POLICY_VERSION = "document-masked-token-bootstrap-v1"
+MASKED_POLICY_VERSION = "category-mix-token-bootstrap-v2"
 DOCUMENT_EOS_TOKEN_ID = 151645
 
 

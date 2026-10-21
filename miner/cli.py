@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import chain_config
-
 from miner import check_hotkey, commit_ready, get_upload_auth, register, upload_model
 from miner.common import (
     AUTH_FILE,
@@ -24,8 +23,8 @@ from miner.common import (
     write_json,
 )
 from teutonic.access.contracts import ReadySignal
+from teutonic.competitions import ACTIVE_COMPETITIONS, normalize_competition
 from teutonic.config import DEFAULT_MAILBOX_PUBLIC_BASE_URL
-
 
 SETTINGS_FILE = "settings.json"
 SETTINGS_VERSION = 1
@@ -271,13 +270,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     ready = subparsers.add_parser("ready", help="commit the uploaded model as ready")
     add_selection_argument(ready)
-    ready.add_argument("--competition", choices=("main", "math", "code", "text"), default="main")
+    ready.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main")
 
     submit = subparsers.add_parser(
         "submit", help="run check, register, auth, upload, and ready for a saved hotkey"
     )
     add_selection_argument(submit)
-    submit.add_argument("--competition", choices=("main", "math", "code", "text"), default="main")
+    submit.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main")
     submit.add_argument("model_dir", type=Path)
     submit.add_argument("--name", required=True, dest="model_name")
     submit.add_argument("--mailbox-base-url")

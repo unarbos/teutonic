@@ -120,7 +120,7 @@ class ValidatorRuntimeTests(unittest.TestCase):
     def test_policy_matches_evaluator_defaults(self):
         policy = evaluation_policy_from_env(
             {
-                "TEUTONIC_EVALUATION_POLICY_VERSION": "document-masked-token-bootstrap-v1",
+                "TEUTONIC_EVALUATION_POLICY_VERSION": "category-mix-token-bootstrap-v2",
                 "TEUTONIC_EVALUATOR_CODE_VERSION": "release-1",
                 "TEUTONIC_EVALUATOR_VERSION": "pair-evaluator-v2",
                 "TEUTONIC_EVAL_BATCH_SIZE": "64",
@@ -146,7 +146,7 @@ class ValidatorRuntimeTests(unittest.TestCase):
     def test_policy_defaults_to_tested_batch_size(self):
         policy = evaluation_policy_from_env(
             {
-                "TEUTONIC_EVALUATION_POLICY_VERSION": "document-masked-token-bootstrap-v1",
+                "TEUTONIC_EVALUATION_POLICY_VERSION": "category-mix-token-bootstrap-v2",
                 "TEUTONIC_EVALUATOR_CODE_VERSION": "release-1",
                 "TEUTONIC_EVALUATOR_VERSION": "pair-evaluator-v2",
             },

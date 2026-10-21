@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from scripts import cleanup_model_cache, cleanup_shard_cache
-from teutonic.evaluator.cache_lock import cache_lock
+from teutonic.evaluator.cache_lock import cache_lock, document_index_cache_dir
 
 
 def test_cleanup_removes_expired_ranges_and_orphaned_downloads(tmp_path, monkeypatch):
@@ -39,6 +39,51 @@ def hold_cache(cache_dir, acquired, release, cleanup=False):
         acquired.set()
         if not release.wait(10):
             raise TimeoutError("test did not release cache lock")
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cleanup_document_index_pages_and_manifests(tmp_path, monkeypatch, dry_run):
+    import os
+
+    index = tmp_path / "doc_index"
+    pages = index / ("a" * 64)
+    manifests = index / "manifests"
+    pages.mkdir(parents=True)
+    manifests.mkdir()
+    expired = [
+        pages / "0", pages / "range-1024-4096", pages / "tmpdownload.tmp",
+        manifests / ("b" * 64 + ".json"), manifests / "tmpinterrupted",
+    ]
+    for path in expired:
+        path.write_bytes(b"cached")
+        os.utime(path, (1, 1))
+    preserved = [pages / "1", pages / ".teutonic-cache.lock", index / "unrelated.json"]
+    for path in preserved:
+        path.write_bytes(b"keep")
+    monkeypatch.setattr(cleanup_shard_cache, "detect_active_files", lambda _: set())
+    result = cleanup_shard_cache.run_cleanup(tmp_path, 60, 120, dry_run)
+    assert result["deleted"] == len(expired)
+    assert all(path.exists() == dry_run for path in expired)
+    assert all(path.exists() for path in preserved)
+
+
+def test_cleanup_cli_includes_custom_document_index_cache(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    shards, indexes = tmp_path / "shards", tmp_path / "external-indexes"
+    page = indexes / ("c" * 64) / "0"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(b"cached")
+    os.utime(page, (1, 1))
+    monkeypatch.setenv("TEUTONIC_DOC_INDEX_CACHE_DIR", str(indexes))
+    monkeypatch.setattr(sys, "argv", ["cleanup_shard_cache.py", "--cache-dir", str(shards)])
+    monkeypatch.setattr(cleanup_shard_cache, "detect_active_files", lambda _: set())
+    with cache_lock(indexes):
+        cleanup_shard_cache.main()
+        assert page.exists()
+    cleanup_shard_cache.main()
+    assert not page.exists()
 
 
 @pytest.mark.parametrize("kind", ["model", "shard"])
@@ -117,20 +162,26 @@ def engine_function(name, namespace):
     return namespace[name]
 
 
-def test_evaluator_locks_caches_before_resolution_and_releases_on_failure(tmp_path):
+@pytest.mark.parametrize("external_index", [False, True])
+def test_evaluator_locks_caches_before_resolution_and_releases_on_failure(tmp_path, monkeypatch, external_index):
     model_cache, shard_cache = tmp_path / "models", tmp_path / "shards"
+    if external_index:
+        monkeypatch.setenv("TEUTONIC_DOC_INDEX_CACHE_DIR", str(tmp_path / "indexes"))
+    else:
+        monkeypatch.delenv("TEUTONIC_DOC_INDEX_CACHE_DIR", raising=False)
+    index_cache = document_index_cache_dir(shard_cache)
     record = SimpleNamespace(
         events=Queue(), progress=None, event=lambda kind, data: {"type": kind, "data": data},
     )
 
     def resolve(_artifact):
-        for root in (model_cache, shard_cache):
+        for root in (model_cache, shard_cache, index_cache):
             with cache_lock(root, cleanup=True) as locked:
                 assert not locked
         raise ValueError("fixture resolution failure")
 
     def cleanup():
-        for root in (model_cache, shard_cache):
+        for root in (model_cache, shard_cache, index_cache):
             with cache_lock(root, cleanup=True) as locked:
                 assert locked
 
@@ -139,6 +190,7 @@ def test_evaluator_locks_caches_before_resolution_and_releases_on_failure(tmp_pa
 
     namespace = {
         "EvaluationRequestV2": object, "ExitStack": ExitStack, "cache_lock": cache_lock,
+        "document_index_cache_dir": document_index_cache_dir,
         "_attempts": SimpleNamespace(get=lambda _: record), "_eval_lock": Mock(),
         "MODEL_CACHE_DIR": model_cache, "SHARD_CACHE_DIR": shard_cache,
         "time": time, "datetime": datetime, "timezone": timezone,

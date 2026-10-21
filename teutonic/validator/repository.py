@@ -91,6 +91,10 @@ class ValidatorRepository:
             cached = self._settings_cache.get(competition)
             if active and cached and cached.config_version == active["config_version"]:
                 return cached
+            # One global duel runs at a time. Avoid retaining seven very large
+            # inventories merely because each competition has been visited.
+            self._settings_cache.clear()
+            cached = None
             cursor.execute(
                 """
                 SELECT ec.config_version, ec.dataset_label, ec.eval_n,
@@ -252,7 +256,7 @@ class ValidatorRepository:
                        ORDER BY s.finalized_block DESC
                        LIMIT 1
                   ) assignment ON true
-                 WHERE c.netuid = %s AND c.chain_generation = %s AND main.name = %s
+                 WHERE c.netuid = %s AND c.chain_generation = %s AND main.name = %s AND c.active AND main.active
                  ORDER BY u.ready_finalized_block, u.ready_extrinsic_index, u.ready_event_index, u.upload_id
                  LIMIT 1
                  FOR UPDATE OF c, main
@@ -937,7 +941,7 @@ class ValidatorRepository:
         with self.connection.cursor(row_factory=dict_row) as cursor:
             row = cursor.execute(
                 """SELECT u.signalling_hotkey, c.competition_key,
-                          main.competition_id AS main_id, main.reward_main_hotkeys,
+                          main.competition_id AS main_id, main.reward_main_hotkeys, main.reward_transition,
                           w.policy_hotkeys
                      FROM control_plane.model_promotions p
                      JOIN control_plane.evaluations e ON e.evaluation_id=p.evaluation_id
@@ -951,6 +955,11 @@ class ValidatorRepository:
             ).fetchone()
             if row is None:
                 raise SchedulerInvariantError("only promoted winners have reward policies")
+            if row["reward_transition"] is not None:
+                from teutonic.weights.policy import replacement_after_win, replacement_rewards
+                return replacement_rewards(replacement_after_win(
+                    row["reward_transition"], row["competition_key"], row["signalling_hotkey"]
+                ))
             history = row["reward_main_hotkeys"] or row["policy_hotkeys"]
             if not history:
                 history = [
@@ -1229,7 +1238,7 @@ class ValidatorRepository:
                        winner_model.model_digest AS evaluated_model_digest, e.competition_id, e.claimed_king_reign_id, e.policy_version, e.verdict, e.attempt_number,
                        u.signalling_hotkey, r.uid, c.current_reign_id, c.next_reign_number,
                        c.competition_key, main.competition_id AS main_id,
-                       main.current_reign_id AS main_reign_id, main.reward_main_hotkeys
+                       main.current_reign_id AS main_reign_id, main.reward_main_hotkeys, main.reward_transition
                   FROM control_plane.model_promotions p
                   JOIN control_plane.evaluations e ON e.evaluation_id = p.evaluation_id
                   JOIN control_plane.uploads u ON u.upload_id = e.upload_id
@@ -1281,6 +1290,18 @@ class ValidatorRepository:
                     (row["winning_upload_id"],),
                 )
                 return None
+            if row["reward_transition"] is not None:
+                from teutonic.weights.policy import replacement_after_win, replacement_rewards
+                transition = replacement_after_win(row["reward_transition"], row["competition_key"], row["signalling_hotkey"])
+                expected_hotkeys, expected_weights = replacement_rewards(transition)
+                if tuple(policy_hotkeys) != expected_hotkeys or policy_weights is None or any(
+                    abs(a - b) > 1e-12 for a, b in zip(policy_weights, expected_weights, strict=True)
+                ):
+                    raise SchedulerInvariantError("promotion reward preview is stale")
+                cursor.execute(
+                    "UPDATE control_plane.competitions SET reward_transition=%s WHERE competition_id=%s",
+                    (Jsonb(transition), row["main_id"]),
+                )
             history = row["reward_main_hotkeys"]
             if not history:
                 old = cursor.execute(

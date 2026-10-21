@@ -95,10 +95,12 @@ def canonical_dataset_manifest_json(payload: Mapping[str, Any]) -> bytes:
         "estimated_sequences",
     }
     for source in sources:
-        if not isinstance(source, Mapping) or set(source) != source_fields:
+        if not isinstance(source, Mapping) or set(source) not in (source_fields, source_fields | {"dataset"}):
             raise DashboardContractError(
                 "global dataset manifest source has invalid fields"
             )
+        if "dataset" in source and (not isinstance(source["dataset"], str) or not source["dataset"]):
+            raise DashboardContractError("global dataset manifest source needs a dataset name")
         if not isinstance(source["name"], str) or not source["name"]:
             raise DashboardContractError("global dataset manifest source needs a name")
         proportion = source["proportion"]

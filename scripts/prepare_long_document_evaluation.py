@@ -10,25 +10,25 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import chain_config
+from teutonic.competitions import ACTIVE_COMPETITIONS, normalize_competition
 from teutonic.evaluation.categories import apportion, category_seed
-from teutonic.evaluation.configuration import fetch_dataset_manifest
 from teutonic.evaluation.index_manifest import (
     DEFAULT_INDEX_MANIFEST_URL,
     fetch_index_manifest,
     pin_index_manifest,
 )
 from teutonic.evaluation.long_documents import (
-    DEFAULT_LONG_DOCUMENT_TOKENS,
     build_long_document_config,
 )
+from teutonic.evaluation.mixes import competition_snapshot
 from teutonic.evaluator.document_index import DocumentIndex, sample_category
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--competition", choices=("main", "math", "code", "text"), default="main")
-    parser.add_argument("--token-budget", type=int, default=DEFAULT_LONG_DOCUMENT_TOKENS)
+    parser.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main")
+    parser.add_argument("--token-budget", type=int, default=30_000_000)
+    parser.add_argument("--bundle-dir", type=Path)
     parser.add_argument("--index-manifest-url", default=DEFAULT_INDEX_MANIFEST_URL)
     parser.add_argument("--index-manifest-file", type=Path)
     parser.add_argument("--index-manifest-sha256")
@@ -41,18 +41,7 @@ def main():
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--index-cache", type=Path, default=Path("/tmp/teutonic-doc-index"))
     args = parser.parse_args()
-    if args.competition == "main":
-        definitions = chain_config.EVALUATION_DATASETS
-    else:
-        definitions = [
-            {
-                "name": k,
-                "manifest_url": v["manifest_url"],
-                "proportion": 0.7 if k == args.competition else 0.15,
-            }
-            for k, v in chain_config.SPLIT_DEFAULTS.items()
-        ]
-    snapshots = tuple(fetch_dataset_manifest(**d) for d in definitions)
+    snapshots = (competition_snapshot(args.competition, bundle_dir=args.bundle_dir),)
     config = build_long_document_config(
         snapshots, token_budget=args.token_budget,
         index_manifest=(pin_index_manifest(args.index_manifest_file.read_bytes(), args.index_manifest_url, args.index_manifest_sha256)

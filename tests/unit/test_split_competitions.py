@@ -1,10 +1,11 @@
 import hashlib
+import tomllib
 from collections import Counter
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-import chain_config
 from scripts.configure_evaluation import parse_args, prepare_configuration
 from scripts.publish_split_manifests import build_manifests
 from teutonic.access.contracts import ReadySignal, ready_signal_payload
@@ -17,6 +18,7 @@ from teutonic.evaluation.configuration import (
 )
 from teutonic.weights.policy import competition_rewards, mapped_weight_plan
 
+LEGACY_CONFIG = tomllib.loads((Path(__file__).parents[1] / "fixtures/legacy_evaluation.toml").read_text())
 
 def snapshot(name, manifest, proportion=1.0):
     return DatasetManifestSnapshot(
@@ -30,7 +32,7 @@ def snapshot(name, manifest, proportion=1.0):
 
 def source_snapshots():
     sources = {}
-    for spec in chain_config.SPLIT_DEFAULTS.values():
+    for spec in LEGACY_CONFIG["splits"].values():
         for category, config in spec["categories"].items():
             dataset = config["dataset"]
             sources.setdefault(dataset, []).append(
@@ -45,12 +47,12 @@ def source_snapshots():
 
 
 def split_snapshots(selected):
-    manifests = build_manifests(source_snapshots(), chain_config.SPLIT_DEFAULTS)
+    manifests = build_manifests(source_snapshots(), LEGACY_CONFIG["splits"])
     return tuple(snapshot(k, v, 0.7 if k == selected else 0.15) for k, v in manifests.items())
 
 
 @pytest.mark.parametrize("selected", ["math", "code", "text"])
-def test_live_definitions_cover_24_categories_and_exact_quotas(selected):
+def test_historical_definitions_cover_24_categories_and_exact_quotas(selected):
     manifests = split_snapshots(selected)
     assert sum(len(s.manifest["category_weights"]) for s in manifests) == 24
     settings = EvaluationSettings("a" * 64, "fixture", 30000, 0.003, manifests, 4)
@@ -109,7 +111,7 @@ def test_threshold_update_never_fetches_or_replaces_manifests():
     changed, version = prepare_configuration(
         current,
         "math",
-        parse_args(["--competition", "math", "--delta-threshold", ".005"]),
+        parse_args(["--delta-threshold", ".005"]),
         forbidden,
     )
     assert changed["delta_threshold"] == 0.005

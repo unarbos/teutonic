@@ -190,6 +190,11 @@ class AccessControllerIntegrationTests(unittest.TestCase):
             RESTART IDENTITY CASCADE
             """
         )
+        self.connection.execute(
+            """INSERT INTO control_plane.competitions(netuid,chain_generation,name)
+               VALUES (3,'phase4-chain','phase4-main')
+               ON CONFLICT (netuid,chain_generation,name) DO UPDATE SET active=true"""
+        )
         self.miner = SigningKey.generate()
         self.hotkey = encode_ss58_public_key(bytes(self.miner.verify_key))
         self.repository = AccessControllerRepository(
@@ -418,16 +423,21 @@ class AccessControllerIntegrationTests(unittest.TestCase):
             registration, now=NOW + timedelta(minutes=2),
             credential_ttl=timedelta(days=7), private_model_bucket="private",
         )
-        upload_id = self.repository.accept_ready_signal(
-            ReadySignal.parse(
+        signal = ReadySignal.parse(
                 f"r2ready:v1|{registration}|{manifest.manifest_sha256}",
                 signalling_hotkey=self.hotkey,
                 block_number=101,
                 extrinsic_index=0,
                 event_index=0,
-            ),
-            now=NOW + timedelta(minutes=2),
         )
+        self.connection.execute("SET ROLE teutonic_access_controller")
+        try:
+            for key in ("mix99", "code"):
+                with self.assertRaisesRegex(ControllerInvariantError, "inactive or unconfigured"):
+                    self.repository.accept_ready_signal(replace(signal, competition=key), now=NOW)
+            upload_id = self.repository.accept_ready_signal(signal, now=NOW + timedelta(minutes=2))
+        finally:
+            self.connection.execute("RESET ROLE")
         with self.assertRaises(Exception):
             self.repository.accept_ready_signal(
                 ReadySignal.parse(

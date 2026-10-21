@@ -181,6 +181,32 @@ def _dataset_source(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _dataset_sources(rows):
+    """Expose flat categories using the existing source presentation contract."""
+    result = []
+    for row in rows:
+        manifest = row["manifest_json"]
+        if manifest.get("format") != "teutonic-category-mix-v1":
+            result.append(_dataset_source(row))
+            continue
+        inventory = manifest.get("category_inventory", {})
+        for category, weight in sorted(manifest["category_weights"].items()):
+            if category not in inventory:
+                raise DashboardProjectionError("category manifest lacks inventory totals")
+            category_manifest = {**manifest, **inventory[category]}
+            category_manifest.pop("shards", None)
+            dataset = manifest["category_sources"][category]
+            original = next(s for s in manifest["source_manifests"] if s["name"] == dataset)
+            category_manifest["source"] = dataset
+            source = _dataset_source({**row, "name": category,
+                "manifest_url": original["url"], "manifest_sha256": original["sha256"],
+                "sample_proportion": row["sample_proportion"] * weight,
+                "manifest_json": category_manifest})
+            source["dataset"] = dataset
+            result.append(source)
+    return result
+
+
 def _dataset_versions(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -202,7 +228,7 @@ def _dataset_versions(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
             "eval_n": int(first["eval_n"]),
             "delta_threshold": float(first["delta_threshold"]),
             "created_at": _iso(first["config_created_at"]),
-            "sources": [_dataset_source(row) for row in config_rows],
+            "sources": _dataset_sources(config_rows),
         })
     return versions
 
@@ -461,10 +487,7 @@ class DashboardProjectionRepository:
                 "algorithm": "blake2b-64-block-hash-hotkey-v1",
                 "inputs": ["block_hash", "hotkey"],
             },
-            "sources": [
-                _dataset_source(row)
-                for row in rows
-            ],
+            "sources": _dataset_sources(rows),
         }
 
     @staticmethod

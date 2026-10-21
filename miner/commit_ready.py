@@ -8,9 +8,6 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from teutonic.access.contracts import Manifest, ReadySignal, ready_signal_payload
-from teutonic.access.crypto import verify_hotkey_signature
-
 from miner.common import (
     AUTH_FILE,
     MANIFEST_FILE,
@@ -22,6 +19,9 @@ from miner.common import (
     subtensor_connection,
     wallet_from_args,
 )
+from teutonic.access.contracts import Manifest, ReadySignal, ready_signal_payload
+from teutonic.access.crypto import verify_hotkey_signature
+from teutonic.competitions import ACTIVE_COMPETITIONS, normalize_competition
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -31,7 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "ready identity on chain."
         )
     )
-    parser.add_argument("--competition", choices=("main", "math", "code", "text"), default="main")
+    parser.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main")
     add_wallet_arguments(parser)
     return parser.parse_args(argv)
 

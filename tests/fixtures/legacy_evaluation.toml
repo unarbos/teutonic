@@ -1,0 +1,145 @@
+# Historical fixtures for compatibility tests; not active chain configuration.
+[evaluation]
+dataset_label = "pretrain-behaviors-math-reasoning-txt360-v2-code-reasoning-sft-reasoning"
+n = 20000
+delta_threshold = 0.003
+shards_per_dataset = 4
+
+[[evaluation.datasets]]
+name = "pretrain-behaviors"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/pretrain-behaviors/manifest.json"
+proportion = 0.32
+
+[[evaluation.datasets]]
+name = "math-reasoning"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/math-reasoning/manifest.json"
+proportion = 0.28
+
+[[evaluation.datasets]]
+name = "txt360-v2"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/txt360-v2/manifest.json"
+proportion = 0.22
+
+[[evaluation.datasets]]
+name = "code-reasoning"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/code-reasoning/manifest.json"
+proportion = 0.17
+
+[[evaluation.datasets]]
+name = "sft-reasoning"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/sft-reasoning/manifest.json"
+proportion = 0.01
+
+# Bootstrap defaults only. Runtime evaluation policy is stored in PostgreSQL.
+
+[splits.math]
+n = 20000
+delta_threshold = 0.0014
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/math/manifest.json"
+
+[splits.math.categories.math-dialogue]
+dataset = "math-reasoning"
+weight = 0.413
+
+[splits.math.categories.math-thinking-qwen]
+dataset = "math-reasoning"
+weight = 0.174
+
+[splits.math.categories.math-rewrite]
+dataset = "math-reasoning"
+weight = 0.140
+
+[splits.math.categories.math-thinking-oss]
+dataset = "math-reasoning"
+weight = 0.104
+
+[splits.math.categories.format-rewrites]
+dataset = "pretrain-behaviors"
+weight = 0.081
+
+[splits.math.categories.games]
+dataset = "pretrain-behaviors"
+weight = 0.036
+
+[splits.math.categories.socratic-math-dialogue]
+dataset = "math-reasoning"
+weight = 0.034
+
+[splits.math.categories.3efforts-pretrain]
+dataset = "sft-reasoning"
+weight = 0.018
+
+[splits.code]
+n = 20000
+delta_threshold = 0.0014
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/code/manifest.json"
+
+[splits.code.categories.reasoning]
+dataset = "pretrain-behaviors"
+weight = 0.314
+
+[splits.code.categories.code-thinking-v0]
+dataset = "code-reasoning"
+weight = 0.105
+
+[splits.code.categories.other]
+dataset = "pretrain-behaviors"
+weight = 0.104
+
+[splits.code.categories.code-thinking-v1]
+dataset = "code-reasoning"
+weight = 0.098
+
+[splits.code.categories.code-no-thinking]
+dataset = "code-reasoning"
+weight = 0.093
+
+[splits.code.categories.data-science]
+dataset = "pretrain-behaviors"
+weight = 0.090
+
+[splits.code.categories.code-no-thinking-hard]
+dataset = "code-reasoning"
+weight = 0.072
+
+[splits.code.categories.code-thinking-hard]
+dataset = "code-reasoning"
+weight = 0.060
+
+[splits.code.categories.code-task-synthesis]
+dataset = "code-reasoning"
+weight = 0.059
+
+[splits.code.categories.codeio]
+dataset = "code-reasoning"
+weight = 0.005
+
+[splits.text]
+n = 20000
+delta_threshold = 0.0014
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/text/manifest.json"
+
+[splits.text.categories.txt360-qa]
+dataset = "txt360-v2"
+weight = 0.265
+
+[splits.text.categories.web-high-nltk-qa]
+dataset = "txt360-v2"
+weight = 0.198
+
+[splits.text.categories.planning]
+dataset = "pretrain-behaviors"
+weight = 0.196
+
+[splits.text.categories.web-high-medium]
+dataset = "txt360-v2"
+weight = 0.188
+
+[splits.text.categories.general]
+dataset = "pretrain-behaviors"
+weight = 0.143
+
+[splits.text.categories.instruction-following]
+dataset = "sft-reasoning"
+weight = 0.010
+

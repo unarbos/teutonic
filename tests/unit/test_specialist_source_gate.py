@@ -15,7 +15,7 @@ def sources(own):
     ]
 
 
-def engine_verdict(own, differences, labels, counts, threshold=0.0014):
+def engine_verdict(own, differences, labels, counts, threshold=0.0014, legacy=True):
     # Exercise the production verdict adapter without importing CUDA dependencies.
     path = Path(__file__).parents[2] / "teutonic/evaluator/engine.py"
     tree = ast.parse(path.read_text())
@@ -34,9 +34,13 @@ def engine_verdict(own, differences, labels, counts, threshold=0.0014):
         delta_threshold=threshold, long_documents={"enabled": True},
         dataset_sources=sources(own) if own else [{"name": "main-data", "proportion": 1}],
     )
-    return namespace["bootstrap_verdict"](
+    result = namespace["bootstrap_verdict"](
         differences, [0.0] * len(differences), request, counts, labels,
     )
+    if legacy:
+        apply_specialist_source_gate(result, differences, [0.0] * len(differences), counts,
+                                     labels, request.dataset_sources, threshold)
+    return result
 
 
 @pytest.mark.parametrize("own", ["math", "code", "text"])
@@ -108,3 +112,17 @@ def test_source_floor_tracks_configured_domain_threshold(threshold, passed):
     assert result["specialist_source_gate"]["min_mu_hat"] == threshold
     assert result["specialist_source_gate"]["passed"] is passed
     assert result["accepted"] is passed
+
+
+def test_category_policy_accepts_whole_mix_without_largest_source_floor():
+    result = engine_verdict("math", [.0013] * 70 + [.1] * 30,
+                            ["math"] * 70 + ["code"] * 15 + ["text"] * 15,
+                            [100] * 100, legacy=False)
+    assert result["accepted"] is True
+    assert "specialist_source_gate" not in result
+
+
+def test_category_policy_requires_strict_whole_mix_lcb():
+    result = engine_verdict(None, [.002] * 10, None, [100] * 10,
+                            threshold=.002, legacy=False)
+    assert result["accepted"] is False

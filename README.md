@@ -163,10 +163,28 @@ teutonic-miner status
 
 ## Competitions
 
-Miners can select `main`, `math`, `code`, or `text` with
-`teutonic-miner ready --competition math` (also supported by `submit`). Omission
+Miners can select `MAIN` or `MIX01`–`MIX06` with
+`teutonic-miner ready --competition MIX02` (also supported by `submit`). Omission
 selects MAIN. One ready submission per hotkey is shared across all competitions.
-Specialists use 30,000 planned samples with a 70/15/15 category-group mix;
-early stopping remains enabled. PostgreSQL controls active manifests and thresholds.
-See [deployment and configuration](DEPLOY.md#main-math-code-and-text-competitions)
-for manifest publication, `scripts/configure_evaluation.py`, and gradual rewards.
+Each competition uses an explicit category list, 20,000 windows, and 30M whole-document
+input tokens. Acceptance uses the whole mix's token-weighted bootstrap LCB.
+A kingless MIX challenges the latest MAIN king using its own mix and threshold.
+
+At cutover, current rewards are preserved. Each first MIX winner receives 12.5%
+and evicts one oldest legacy reward position; after all six MIXes have winners,
+MAIN receives 25%. Historical math/code/text results remain visible.
+PostgreSQL controls the active configuration; editing `chain.toml` does not activate it.
+See [deployment and configuration](DEPLOY.md#main-and-mix01mix06-category-competitions)
+for preparation, local validation, deployment, replacement rewards, and rollback.
+
+## Local website preview
+
+```bash
+.venv/bin/python scripts/serve_website_preview.py --port 8765 --mix-kings 2
+```
+
+Open <http://localhost:8765>. This serves `website/` with the category weights,
+sample counts, and thresholds from `chain.toml`, plus synthetic demo models and
+activity. It does not connect to PostgreSQL or submit transactions.
+Use `--mix-kings 0` for the initial transition or `--mix-kings 6` for the final
+25% MAIN / 12.5% per MIX allocation. Stop the preview with Ctrl+C.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the three split inventories from source manifests; optionally publish to R2."""
+"""Rebuild historical split inventories from an explicitly supplied archived config."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ import hashlib
 import json
 import os
 import sys
+import tomllib
 from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import chain_config
 from teutonic.evaluation.categories import DEFAULT_RULES_PATH, category_of, load_rules
 from teutonic.evaluation.configuration import (
     _shard_url,
@@ -84,14 +84,16 @@ def build_manifests(sources, definitions):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--legacy-config", type=Path, required=True, help="explicit archived TOML with evaluation.datasets and splits; current chain.toml has no legacy definitions")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--publish", action="store_true")
     parser.add_argument("--bucket", default=os.environ.get("TEUTONIC_DATASETS_BUCKET"))
     args = parser.parse_args(argv)
     if args.publish and not args.bucket:
         parser.error("--publish requires --bucket or TEUTONIC_DATASETS_BUCKET")
-    sources = (fetch_dataset_manifest(**item) for item in chain_config.EVALUATION_DATASETS)
-    outputs = build_manifests(sources, chain_config.SPLIT_DEFAULTS)
+    legacy = tomllib.loads(args.legacy_config.read_text())
+    sources = (fetch_dataset_manifest(**item) for item in legacy["evaluation"]["datasets"])
+    outputs = build_manifests(sources, legacy["splits"])
     args.output_dir.mkdir(parents=True, exist_ok=True)
     client = None
     if args.publish:

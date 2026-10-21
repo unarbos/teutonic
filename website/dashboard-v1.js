@@ -427,6 +427,34 @@
         };
     }
 
+    function mainDatasetPresentation(manifest) {
+        if (!manifest || !Array.isArray(manifest.sources)) return datasetPresentation(manifest);
+        var groups = new Map();
+        manifest.sources.forEach(function(source) {
+            if (!source || source.enabled === false) return;
+            var name = source.dataset || source.name;
+            if (!groups.has(name)) {
+                groups.set(name, Object.assign({}, source, {
+                    name: name, proportion: 0, total_tokens: 0, total_shards: 0,
+                    estimated_sequences: 0
+                }));
+            }
+            var group = groups.get(name);
+            group.proportion += finiteNumber(source.proportion == null ? source.weight : source.proportion, 0);
+            group.total_tokens += finiteNumber(source.total_tokens, 0);
+            group.total_shards += finiteNumber(source.total_shards, 0);
+            var length = source.sequence_length || source.seq_len || manifest.sequence_length;
+            group.estimated_sequences += finiteNumber(source.estimated_sequences,
+                length ? Math.floor(finiteNumber(source.total_tokens, 0) / length) : 0);
+        });
+        var order = ["pretrain-behaviors", "math-reasoning", "txt360-v2", "code-reasoning", "sft-reasoning"];
+        var sources = Array.from(groups.values()).sort(function(a, b) {
+            var ai = order.indexOf(a.name), bi = order.indexOf(b.name);
+            return (ai < 0 ? order.length : ai) - (bi < 0 ? order.length : bi);
+        });
+        return datasetPresentation(Object.assign({}, manifest, { sources: sources }));
+    }
+
     function benchmarkPresentation(payload, selectedKingId) {
         if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
             throw new Error("benchmark results must be an object");
@@ -518,6 +546,7 @@
         uploadFailurePresentation: uploadFailurePresentation,
         decisionPresentation: decisionPresentation,
         datasetPresentation: datasetPresentation,
+        mainDatasetPresentation: mainDatasetPresentation,
         graphPointRadius: graphPointRadius,
         lossChartPresentation: lossChartPresentation,
         datasetChangePresentation: datasetChangePresentation,

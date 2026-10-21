@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Standalone cleanup script for the Teutonic fineweb-edu shard cache.
+"""Clean Teutonic token-shard and document-index caches.
 
 Removes:
   - Orphaned .tmp partial-download files left by crashed/interrupted downloads
   - Shard files (.npy) and cached byte ranges (.range) older than --max-age-hours
+  - Document-index pages, pinned manifest JSON and their partial downloads
 
 Safety:
   - Cleanup skips the cache while an evaluation holds its shared cache lock
@@ -24,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -31,7 +33,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from teutonic.evaluator.cache_lock import cache_lock
+from teutonic.evaluator.cache_lock import cache_lock, document_index_cache_dir
 
 log = logging.getLogger("cleanup_shard_cache")
 
@@ -62,9 +64,18 @@ def find_cache_files(cache_dir: Path) -> list[Path]:
     files: list[Path] = []
     try:
         for path in cache_dir.rglob("*"):
+            index_page = re.fullmatch(r"[0-9a-f]{64}", path.parent.name) and (
+                re.fullmatch(r"[0-9]+|range-[0-9]+-[0-9]+", path.name)
+                or (path.name.startswith("tmp") and path.suffix == ".tmp")
+            )
+            manifest = path.parent.name == "manifests" and (
+                re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
+                or path.name.startswith("tmp")
+            )
             if path.is_file() and (
                 path.suffix in {".npy", ".range"}
                 or path.name.endswith((".npy.tmp", ".npy.partial", ".range.tmp"))
+                or index_page or manifest
             ):
                 files.append(path)
     except OSError:
@@ -303,6 +314,16 @@ def main() -> None:
         max_age_s=args.max_age_hours * 3600,
         dry_run=args.dry_run,
     )
+    # The default index cache is nested and was already scanned above. A custom
+    # location needs its own cleanup and the same lock held by the evaluator.
+    index_cache = document_index_cache_dir(args.cache_dir).resolve()
+    if not index_cache.is_relative_to(args.cache_dir.resolve()):
+        run_cleanup(
+            cache_dir=index_cache,
+            min_age_s=args.min_age_hours * 3600,
+            max_age_s=args.max_age_hours * 3600,
+            dry_run=args.dry_run,
+        )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 (function () {
   "use strict";
   var ENDPOINT = "/dashboard.json";
-  var DATASET_MANIFEST_URL = "https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev/datasets/manifest.json";
+  var DATASET_MANIFEST_URL = "/competitions/mix06/datasets/manifest.json";
   var BENCHMARK_RESULTS_URL = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev/king-benchmark-daily/all-kings/results.json";
   var MODEL_STORAGE_BASE = "https://pub-0821d4e196224864af220294345fd141.r2.dev/";
   var POLL_MS = 15000;
@@ -157,37 +157,34 @@
     catch (error) { if (!benchmarkPayload) { text("benchmark-meta", "BENCHMARK RESULTS UNAVAILABLE"); clear(el("benchmark-grid")); var empty = document.createElement("p"); empty.className = "bench-empty"; empty.textContent = "LIVE BENCHMARK RESULTS COULD NOT BE LOADED"; el("benchmark-grid").appendChild(empty); } }
   }
   function renderDatasetManifest(manifest) {
-    var view = TeutonicDashboardV1.datasetPresentation(manifest), summary = [view.rows.length + (view.rows.length === 1 ? " DATASET" : " DATASETS")];
+    var view = TeutonicDashboardV1.mainDatasetPresentation(manifest), summary = [view.rows.length + (view.rows.length === 1 ? " DATASET" : " DATASETS")];
     if (view.totalTokens) summary.push(compactNumber(view.totalTokens) + " TOKENS");
     if (view.sequenceLength) summary.push("SEQ LEN " + number(view.sequenceLength));
-    if (view.evalN) summary.push("EVAL SAMPLE " + number(view.evalN) + " SEQ" + (view.evalTokens ? " / " + compactNumber(view.evalTokens) + " TOKENS" : ""));
-    summary.push("PLUS ~30M DOCUMENT TOKENS (" + number(2049) + "–" + number(8192) + " TOKENS/DOC)");
     text("dataset-summary", summary.join(" · "));
     if (view.tokenizer) {
       var tokenizer = document.createElement("span"); tokenizer.className = "dataset-tokenizer"; tokenizer.textContent = "TOKENIZER: " + view.tokenizer;
       el("dataset-summary").appendChild(tokenizer);
     }
     var body = el("dataset-sources"); clear(body);
-    if (!view.rows.length) return emptyRow(body, 6, "NO DATASETS IN MANIFEST");
+    if (!view.rows.length) return emptyRow(body, 5, "NO DATASETS IN MANIFEST");
     view.rows.forEach(function (source) {
       var tr = document.createElement("tr");
       datasetCell(tr, source.name, source.metadataLoaded ? source.tokenizationMode : "METADATA UNAVAILABLE", source.manifestUrl);
-      datasetCell(tr, datasetWeight(source.weight), "NORMALIZED " + datasetWeight(source.normalizedWeight));
-      datasetCell(tr, source.totalTokens ? compactNumber(source.totalTokens) : "--", source.totalShards ? number(source.totalShards) + " SHARDS" : "");
+      datasetCell(tr, source.totalTokens ? compactNumber(source.totalTokens) : "--", "");
       datasetCell(tr, source.sequences ? compactNumber(source.sequences) : "--", source.sequenceLength ? "LEN " + number(source.sequenceLength) : "");
-      datasetCell(tr, source.evalSequences ? number(source.evalSequences) + " SEQ" : "--", source.evalTokens ? compactNumber(source.evalTokens) + " TOKENS · " + smallPercent(source.sampleRate) + " SAMPLED" : "");
-      datasetCell(tr, source.source || "--", [source.tokenizer, source.dtype].filter(Boolean).join(" · "));
+      datasetCell(tr, source.totalShards ? number(source.totalShards) : "--", "");
+      datasetCell(tr, source.totalShards && source.totalTokens ? compactNumber(source.totalTokens / source.totalShards) : "--", "");
       body.appendChild(tr);
     });
   }
   async function loadDatasetManifest() {
     el("dataset-manifest-link").href = DATASET_MANIFEST_URL;
     try {
-      var manifest = await fetchFirstJson(["/datasets/manifest.json", DATASET_MANIFEST_URL]);
+      var manifest = await fetchJson(DATASET_MANIFEST_URL);
       renderDatasetManifest(manifest);
     } catch (error) {
       text("dataset-summary", "MANIFEST UNAVAILABLE · USE THE MANIFEST LINK");
-      emptyRow(el("dataset-sources"), 6, "DATASET MANIFEST COULD NOT BE LOADED");
+      emptyRow(el("dataset-sources"), 5, "DATASET MANIFEST COULD NOT BE LOADED");
     }
   }
 
@@ -277,7 +274,7 @@
     var status = [];
     if (missing.length) status.push("WAITING FOR QUEUE DATA: " + missing.join(", "));
     if (stale.length) status.push("LAST KNOWN QUEUE DATA: " + stale.join(", "));
-    text("queue-status", status.length ? status.join(" · ") : "MAIN · MATH · CODE · TEXT — GLOBAL READY-COMMIT ORDER");
+    text("queue-status", status.length ? status.join(" · ") : "GLOBAL READY-COMMIT ORDER");
     var body = el("queue-body"); clear(body);
     if (!rows.length) return emptyRow(body, 9, missing.length || stale.length ? "QUEUE DATA INCOMPLETE" : "QUEUE EMPTY");
     rows.forEach(function (entry) {
@@ -320,9 +317,10 @@
   function renderReigns() {
     var body = el("reigns-body"), rows = [];
     competitionSources().forEach(function (source) {
+      if (source.active === false) return;
       var d = source.dashboard;
       if (!d) return;
-      if (source.key === "main") {
+      if (source.key === "main" && !(mainMixState && mainMixState.rewardTransition)) {
         var seenHotkeys = new Set(), count = 0;
         (d.king_chain || []).slice().sort(function (a, b) { return (b.reign_number || 0) - (a.reign_number || 0); }).forEach(function (item) {
           var key = item.hotkey || "reign:" + item.reign_number;
@@ -437,14 +435,15 @@
   smoothSlider.addEventListener("input", function () { localStorage.setItem("smoothing", smoothSlider.value); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("smooth-mode-toggle").addEventListener("click", function () { smoothMode = smoothMode === "lowess" ? "normal" : "lowess"; localStorage.setItem("smoothMode", smoothMode); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("history-errors-toggle").addEventListener("click", function () { historyShowErrors = !historyShowErrors; renderHistory(); });
-  var historyFilters = el("history-competition-filters").querySelectorAll("button");
-  historyFilters.forEach(function (button) {
-    button.addEventListener("click", function () {
-      historyCompetition = button.dataset.competition;
-      historyFilters.forEach(function (filter) { filter.setAttribute("aria-pressed", String(filter === button)); });
-      renderHistory();
-      el("history-body").closest(".history-wrap").scrollTop = 0;
+  var historyFilterContainer = el("history-competition-filters");
+  historyFilterContainer.addEventListener("click", function (event) {
+    var button = event.target.closest("button[data-competition]");
+    if (!button) return;
+    historyCompetition = button.dataset.competition;
+    historyFilterContainer.querySelectorAll("button").forEach(function (filter) {
+      filter.setAttribute("aria-pressed", String(filter === button));
     });
+    renderHistory();
   });
   el("benchmark-history-toggle").addEventListener("click", function () { benchmarkHistoryVisible = !benchmarkHistoryVisible; if (benchmarkPayload) renderBenchmarks(benchmarkPayload); });
   var datasetHelp = el("competition-dataset-help"), datasetHelpButton = datasetHelp.querySelector("button"), datasetHelpTooltip = el("competition-dataset-tooltip");
@@ -457,13 +456,34 @@
   document.addEventListener("keydown", function (event) { if (event.key === "Escape") datasetHelpTooltip.hidden = true; });
   var chartResizeFrame = null;
   window.addEventListener("resize", function () { if (chartResizeFrame != null) cancelAnimationFrame(chartResizeFrame); chartResizeFrame = requestAnimationFrame(function () { chartResizeFrame = null; if (lastPayload) renderChart(lastPayload); }); });
-  var specialists = ["math", "text", "code"].map(function (key) {
-    var state = { key: key, prefix: "/competitions/" + key + "/", dashboard: null, failed: false, polling: false, loadingDataset: false, dataset: null, datasetFailed: false, datasetRow: document.createElement("tr") };
-    state.datasetRow.id = "dataset-" + key;
-    el("competition-datasets").appendChild(state.datasetRow);
-    renderCompetitionDataset(state);
-    return state;
-  });
+  var specialists = [];
+  var mainMixState = null;
+  async function loadCompetitionIndex() {
+    try {
+      var index = await fetchJson("/competitions.json");
+      index.competitions.forEach(function (item) {
+        var key = item.competition;
+        if (!/^(main|math|code|text|mix(0[1-9]|[1-9][0-9]))$/.test(key)) return;
+        var state = key === "main" ? mainMixState : specialists.find(function (s) { return s.key === key; });
+        if (!state) {
+          state = { key: key, prefix: key === "main" ? "/" : "/competitions/" + key + "/", dashboard: null, failed: false, polling: false, loadingDataset: false, dataset: null, datasetFailed: false, datasetRow: document.createElement("tr") };
+          state.datasetRow.id = "dataset-" + key;
+          el("competition-datasets").appendChild(state.datasetRow);
+          if (key === "main") mainMixState = state; else specialists.push(state);
+          if (!historyFilterContainer.querySelector('[data-competition="' + key + '"]')) {
+            var button = document.createElement("button"); button.type = "button";
+            button.dataset.competition = key; button.textContent = key.toUpperCase();
+            button.setAttribute("aria-pressed", "false"); historyFilterContainer.appendChild(button);
+          }
+        }
+        state.active = item.active !== false; state.hasKing = item.has_king;
+        state.rewardTransition = item.reward_transition;
+        state.documentTokens = item.document_tokens;
+        renderCompetitionDataset(state); loadSpecialistDataset(state);
+        if (key !== "main") pollSpecialist(state);
+      });
+    } catch (error) { text("queue-status", "Competition index unavailable; showing last publication."); }
+  }
   async function pollSpecialist(state) {
     if (state.polling) return;
     state.polling = true;
@@ -482,11 +502,16 @@
       status.textContent = state.datasetFailed ? (view ? "REFRESH FAILED · SHOWING LAST MIX" : "CONFIGURATION UNAVAILABLE · USE THE MANIFEST LINK") : "LOADING DATASET MIX…";
       heading.appendChild(status);
     }
-    ["math", "text", "code"].forEach(function (key) {
-      var source = view && view.rows.find(function (item) { return item.name.toLowerCase() === key; });
-      datasetCell(row, source ? datasetWeight(source.normalizedWeight) : "--", source ? number(source.evalSequences) + " SEQ" : "");
-    });
+    var categoryCell = cell(row, "");
+    if (view) {
+      var details = document.createElement("details"), summary = document.createElement("summary"), list = document.createElement("ul");
+      summary.textContent = view.rows.length + " categories"; details.appendChild(summary);
+      view.rows.forEach(function (source) { var li = document.createElement("li"); li.textContent = source.name + ": " + (source.normalizedWeight * 100).toFixed(4) + "%"; list.appendChild(li); });
+      details.appendChild(list); categoryCell.appendChild(details);
+    }
     cell(row, view ? number(view.evalN) : "--");
+    cell(row, number(state.documentTokens));
+    cell(row, !state.active ? "RETIRED" : state.hasKing ? "OWN KING" : "LATEST MAIN KING");
     cell(row, manifest ? "> " + metric(manifest.delta_threshold, 4) : "--");
     datasetCell(row, "MANIFEST", "", state.prefix + "datasets/manifest.json");
   }
@@ -502,6 +527,7 @@
   }
   function pollSpecialists() { specialists.forEach(pollSpecialist); }
   function loadSpecialistDatasets() { specialists.forEach(loadSpecialistDataset); }
+  loadCompetitionIndex(); setInterval(loadCompetitionIndex, DATASET_POLL_MS);
   pollSpecialists(); setInterval(pollSpecialists, POLL_MS);
   loadSpecialistDatasets(); setInterval(loadSpecialistDatasets, DATASET_POLL_MS);
   poll(); setInterval(poll, POLL_MS);

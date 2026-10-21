@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
 import re
+import zlib
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urljoin, urlparse
@@ -12,9 +14,9 @@ from urllib.request import Request, urlopen
 from teutonic.evaluation.categories import DEFAULT_RULES_PATH, load_rules, plan_source_shards
 from teutonic.evaluation.long_documents import validate_long_documents
 
-
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_COMPRESSED_SHARDS = "_shards_zlib_base64"
 
 
 class EvaluationConfigurationError(RuntimeError):
@@ -28,6 +30,36 @@ def canonical_manifest_bytes(manifest: object) -> bytes:
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
+
+
+def manifest_for_storage(manifest):
+    """Keep flat mix inventories below PostgreSQL's 256 MiB JSONB container limit.
+
+    This is only a database encoding. The original public manifest and its
+    canonical checksum are reconstructed and verified when loading a snapshot.
+    Dashboard views omit the compressed field and use the inventory summaries.
+    """
+    if manifest.get("format") != "teutonic-category-mix-v1":
+        return manifest
+    return {
+        **{k: v for k, v in manifest.items() if k != "shards"},
+        _COMPRESSED_SHARDS: base64.b64encode(
+            zlib.compress(canonical_manifest_bytes(manifest["shards"]), level=1)
+        ).decode("ascii"),
+    }
+
+
+def manifest_from_storage(manifest):
+    if _COMPRESSED_SHARDS not in manifest:
+        return manifest
+    if manifest.get("format") != "teutonic-category-mix-v1" or "shards" in manifest:
+        raise ValueError("invalid compressed manifest storage")
+    decoder = zlib.decompressobj()
+    raw = decoder.decompress(base64.b64decode(manifest[_COMPRESSED_SHARDS], validate=True), 1024**3)
+    if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+        raise ValueError("compressed manifest is invalid or exceeds 1 GiB")
+    return {**{k: v for k, v in manifest.items() if k != _COMPRESSED_SHARDS},
+            "shards": json.loads(raw)}
 
 
 def validate_dataset_manifest(manifest: object) -> Mapping[str, Any]:
@@ -67,7 +99,7 @@ def validate_dataset_manifest(manifest: object) -> Mapping[str, Any]:
                 f"dataset manifest shard {index} does not reference an .npy file"
             )
     weights = value.get("category_weights")
-    if value.get("format") == "teutonic-split-v1" and weights is None:
+    if value.get("format") in {"teutonic-split-v1", "teutonic-category-mix-v1"} and weights is None:
         raise EvaluationConfigurationError("split manifest requires category weights")
     if weights is not None:
         if (
@@ -89,6 +121,29 @@ def validate_dataset_manifest(manifest: object) -> Mapping[str, Any]:
         references = [s.get("url") or s.get("key") for s in shards]
         if len(set(references)) != len(references):
             raise EvaluationConfigurationError("split manifest contains duplicate shards")
+    if value.get("format") == "teutonic-category-mix-v1":
+        sources = value.get("category_sources")
+        if not isinstance(sources, dict) or set(sources) != set(weights):
+            raise EvaluationConfigurationError("category mix requires original dataset identities")
+        if any(not isinstance(v, str) or not _NAME.fullmatch(v) for v in sources.values()):
+            raise EvaluationConfigurationError("invalid category dataset identity")
+        if any(s.get("dataset") != sources[s["category"]] for s in shards):
+            raise EvaluationConfigurationError("shard dataset differs from category identity")
+        pins = value.get("source_manifests", [])
+        if not isinstance(pins, list) or any(
+            not isinstance(p, dict)
+            or set(p) != {"name", "url", "sha256"}
+            or not isinstance(p["name"], str)
+            or not isinstance(p["url"], str)
+            or urlparse(p["url"]).scheme != "https"
+            or not urlparse(p["url"]).netloc
+            or not isinstance(p["sha256"], str)
+            or not _DIGEST.fullmatch(p["sha256"])
+            for p in pins
+        ):
+            raise EvaluationConfigurationError("invalid category mix source pins")
+        if {p.get("name") for p in pins} != set(sources.values()) or len(pins) != len(set(sources.values())):
+            raise EvaluationConfigurationError("category mix requires unique original source pins")
     return value
 
 
@@ -101,6 +156,7 @@ class DatasetManifestSnapshot:
     manifest: Mapping[str, Any]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "manifest", manifest_from_storage(self.manifest))
         if not _NAME.fullmatch(self.name):
             raise ValueError("dataset manifest name is invalid")
         parsed = urlparse(self.manifest_url)
@@ -415,7 +471,7 @@ def store_evaluation_configuration(
                         snapshot.name,
                         snapshot.manifest_url,
                         snapshot.manifest_sha256,
-                        json.dumps(snapshot.manifest, sort_keys=True, separators=(",", ":")),
+                        json.dumps(manifest_for_storage(snapshot.manifest), sort_keys=True, separators=(",", ":")),
                         snapshot.proportion,
                     ),
                 )

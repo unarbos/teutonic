@@ -10,7 +10,9 @@
 > code and chain contract.
 
 This file describes the Teutonic-II protocol. Evaluation documentation
-updated 2026-10-09 from the repository's document-masked scoring policy.
+updated 2026-10-21 for the MAIN/MIX01–MIX06 category-competition release.
+These rules apply after cutover; check published active competitions and
+thresholds before submitting.
 Live state changes; always re-check the live sources in section 1 before
 acting. IMPORTANT: guides that mention Hippius uploads, `v4|repo|digest|
 hotkey` reveals, coldkey-token repo naming, or the Quasar/Q3-8B chains
@@ -20,7 +22,8 @@ describe the RETIRED Teutonic-I protocol. Do not follow them.
 ## 0. TL;DR
 
 Teutonic is a king-of-the-hill LLM pretraining competition. Each competition
-has a "king" checkpoint. You (a miner) train a better checkpoint (a
+has its own king once established; a kingless MIX uses the latest MAIN
+king as its baseline. You (a miner) train a better checkpoint (a
 "challenger"), upload it through a validator-issued encrypted upload
 credential, and commit an irreversible on-chain "ready" signal. The
 validator verifies your snapshot byte-for-byte against the chain contract
@@ -39,8 +42,11 @@ Each hotkey gets exactly ONE submission, permanently. Plan accordingly.
 - Dashboard JSON (canonical machine-readable state, refreshed every 5-20 s):
   https://teutonic.ai/dashboard.json
   (direct origin: https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev/dashboard.json)
-- Active eval dataset config:
+- Active MAIN eval dataset config:
   https://teutonic.ai/datasets/manifest.json
+- Competition discovery (check `active`, `has_king`, and thresholds):
+  https://teutonic.ai/competitions.json
+- MIX configs: https://teutonic.ai/competitions/<mix01..mix06>/datasets/manifest.json
 - Human dashboard: https://teutonic.ai
 - Source repository (validator, miner CLI, evaluator, schemas):
   https://github.com/unarbos/teutonic
@@ -57,7 +63,7 @@ Key fields in dashboard.json:
 - `king`         — current king: `model_repo`, `king_digest` (sha256),
                    `hotkey`, `uid`, `reign_number`, `crowned_at`, plus the
                    duel stats that crowned it (`mu_hat`, `lcb`, `delta`)
-- `king_chain`   — recent reigns that currently share rewards
+- `king_chain`   — recent reign history; presence does not guarantee rewards
 - `king_payout`  — current king weight share and estimated earnings
 - `queue` / `current_eval` / `history` — pending, live, and past duels;
   pending and live entries expose `model_digest`; live scoring publishes
@@ -129,12 +135,12 @@ before proceeding.
    sample indices with replacement (10,000 resamples, alpha=0.001,
    bootstrap seed 0), recomputing that weighted ratio in every draw.
    Its lower quantile is the one-sided lower confidence bound (LCB).
-   The combined check requires `LCB > delta_threshold`; the default threshold
-   is 0.003 nats/token for MAIN and 0.0014 for MATH, CODE, and TEXT,
-   independently configurable in each competition. Specialists also require
-   `mu_hat >= delta_threshold` on their own 70% source, token-weighted across windows
-   and whole documents. Both checks use the configured domain threshold,
-   comparing values before rounding.
+   Acceptance requires whole-mix `LCB > delta_threshold`; the release default
+   is 0.0015 nats per scored token for MAIN and every MIX, independently
+   configurable in each competition. There is no additional largest-source,
+   own-source, or per-category improvement gate. Compare before rounding;
+   equality with the threshold does not pass.
+
 7. On accept, you are crowned: the dashboard updates, your model is
    published to the public model bucket, and subnet weights refresh.
 
@@ -142,38 +148,57 @@ Active manifests and thresholds are controlled by PostgreSQL. The public
 dataset summaries reflect those configurations; changing chain.toml alone
 does not change active evaluations.
 
-There are four competitions: MAIN, MATH, CODE, TEXT. Select one with
-`teutonic-miner ready --competition math` or `teutonic-miner submit ...
---competition math`. Omission means MAIN. Selection is fixed at the ready
-commitment; one ready submission per hotkey applies across all four.
+There are seven active competitions: MAIN and MIX01–MIX06. Select one with
+`teutonic-miner ready --competition MIX02` or
+`teutonic-miner submit ... --competition MIX02`. Names are case-insensitive;
+omission means MAIN. Selection is fixed at the ready commitment. One ready
+submission per hotkey applies globally across all competitions. The wire format
+reserves MIX01–MIX99, but this release enables only MIX01–MIX06. MATH, CODE and
+TEXT are retired: their histories remain readable, but they accept no new submissions.
 
-Specialists plan 14,000 windows from their own group plus 3,000 from each
-other group. The additional ~30M document tokens follow the same 70/15/15
-mix: approximately 21M input tokens from their own group and 4.5M from
-each other group. Every group has explicit category weights totaling 100%.
-Until a specialist gets its first winner, challengers face the current
-MAIN king using the specialist mix and threshold. All duels run sequentially.
+Each mix is an explicit flat list of unique categories. The same sampler uses
+its category weights as targets for both 20,000 windows and ~30M document input
+tokens; they are not fixed contributions to the final score. MAIN contains 24
+categories, proportional to token inventory. MIX06 contains all 25, adding
+`dclm-baseline-1.0` as one category. Follow each MIX's published category list
+and percentages rather than expanding retired competition names. MIX02 has no
+special sampling path and overlapping categories receive no extra weight.
 
-You can merge specialized MATH, CODE, and TEXT models into a single model
-and submit it to the MAIN competition. The merged model must satisfy the
-same model contract and beat the current MAIN king under MAIN evaluation.
+All MIXes start kingless. Their first challengers face the LATEST MAIN king using
+the selected MIX's own categories and threshold. If MAIN changes before coronation,
+the stale comparison is requeued against the latest MAIN king. After its first
+crown, a MIX uses its own latest king. All duels run sequentially. Merged models
+may enter MAIN if they satisfy the same contract and beat MAIN's king.
 
-Deployment preserves the existing five recipients at 20% each. As 0, 1,
-2, then 3 specialist kings are established, MAIN shares become respectively
-20/20/20/20/20, 25/20/20/20, 30/20/20, and 40/15. Every established split
-king gets 15%. New MAIN winners shift MAIN history; new specialist winners
-replace that split's king. Weights remain on the existing 101-block cadence.
+Uploading or losing does not change incentives. Cutover preserves MAIN's king
+and snapshots existing reward positions and proportions without changing initial
+payouts. Current MATH/CODE/TEXT kings and rewarded past MAIN positions remain as
+legacy reward positions; they do not automatically become MIX kings.
+Each FIRST MIX winner receives 12.5% and removes the oldest remaining legacy
+position, ordered by crowned block (bootstrap positions without reigns come first).
+That removed position receives zero. MAIN is protected from these evictions.
+The remaining budget, `100% - 12.5% * established_MIX_count`, is distributed
+between MAIN and surviving legacy positions in their relative snapshot proportions.
+Once no legacy positions remain, MAIN receives the entire remaining budget.
+With all six MIXes established, MAIN receives 25% and each MIX receives 12.5%.
+
+A later MIX winner takes that MIX's 12.5%, with no additional legacy eviction.
+A new MAIN winner takes MAIN's current allocation; the outgoing MAIN is not added
+to the legacy roster. Positions held by the same hotkey add together; losing one
+position does not remove its other entitlements. On-chain weights retain UID
+eligibility normalization and the existing 101-block publication cadence.
 
 Configured competitions: https://teutonic.ai/competitions.json
 MAIN: https://teutonic.ai/dashboard.json
-Splits: https://teutonic.ai/competitions/<math|code|text>/dashboard.json
+MIXes: https://teutonic.ai/competitions/<mix01..mix06>/dashboard.json
 Dataset policy: corresponding `datasets/manifest.json` under each prefix.
-Raw split inventories: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/<math|code|text>/manifest.json
+Raw inventories use immutable `splits/<main|mix01..mix06>/versions/<sha256>.json`
+paths under the public datasets bucket; release URLs are pinned in `chain.toml`.
 
 
 ### 3.1 Document-masked evaluation and complete documents
 
-Scoring policy: `document-masked-token-bootstrap-v1`.
+Scoring policy: `category-mix-token-bootstrap-v2`.
 Whole-document sampling policy: `long-documents-2k-8k-v1`.
 
 - MASKING: EOS token 151645 ends a document fragment. Attention cannot
@@ -189,12 +214,13 @@ Whole-document sampling policy: `long-documents-2k-8k-v1`.
   Only 2,049-8,192-token documents are eligible: the two buckets are
   2,049-4,096 and 4,097-8,192, inclusive. Documents of 8,193 tokens or more
   are excluded; longer documents are never cropped into the eligible range.
-- MIX: MAIN preserves its source proportions and category weights derived
-  from manifest shard counts. MATH, CODE and TEXT preserve their 70/15/15
-  source mix and explicit category weights. Within each category, document
-  COUNTS follow the eligible buckets' relative populations. Every nonempty
-  eligible bucket gets at least one complete document. Token quotas and
-  resulting percentages are approximate because documents are indivisible.
+- MIX: every competition uses its explicit category weights as sampling targets
+  for windows and whole documents. MAIN and MIX06 use token-inventory proportions;
+  the other MIXes use their declared flat category weights. Within each category,
+  document COUNTS follow eligible buckets' relative populations. Every nonempty
+  eligible bucket gets at least one complete document. Token quotas and resulting
+  percentages are approximate because documents are indivisible.
+
 - WEIGHT IN THE SCORE: with 20,000 x 2,048 window input tokens plus ~30M
   document input tokens, documents contribute about 42.3% of the combined
   mean's weight. The exact weight uses scored targets after masking.
@@ -202,8 +228,11 @@ Whole-document sampling policy: `long-documents-2k-8k-v1`.
   calculated from the combined sample. Bootstrap units are original
   windows or whole documents, not tokens or internal window fragments.
 - REPLAY: the request pins the index manifest's exact contents and SHA-256,
-  source manifests, file ETags and sizes. Index reads use validated HTTP
-  ranges and ETags; selected token shards are verified by full SHA-256.
+  source manifests, file ETags and sizes. Index reads check `If-Match`, returned
+  ETag, size and exact content range. Token shards are read through bounded HTTP
+  ranges; available whole-object SHA-256 metadata is compared with pinned values,
+  but full shard/index bodies are not downloaded to compute whole-file hashes.
+  Index inventory v2 permits ETag/size pins without per-file SHA-256; v1 requires it.
   Keep the request, model digests, block hash, hotkey and bootstrap seed
   to reproduce a run. Different block hashes produce different selections,
   but those selections can overlap. Replay also requires the pinned data
@@ -220,7 +249,7 @@ Whole-document sampling policy: `long-documents-2k-8k-v1`.
   use complete model replicas on single GPUs.
 
 The sample described here is configured as 20,000 windows plus approximately
-30M document input tokens; repository bootstrap defaults may differ.
+30M document input tokens for all seven release configurations.
 Check the selected competition's published configuration and evaluation
 request when reproducing a specific duel. Window-only masked evaluations
 retain the configured early-stopping rule; the mixed document sample is
@@ -312,29 +341,36 @@ release; do not keep idle pods.
 
 All public, no auth needed for reads.
 
-- Eval dataset config (what the duel draws from, updates over time):
-  https://teutonic.ai/datasets/manifest.json
-  Specialist configs use
-  https://teutonic.ai/competitions/<math|code|text>/datasets/manifest.json.
-- MAIN's default source mix from `chain.toml` is 32% `pretrain-behaviors`,
-  28% `math-reasoning`, 22% `txt360-v2`, 17% `code-reasoning`, and
-  1% `sft-reasoning`. Each raw source manifest is at
+- MAIN eval config: https://teutonic.ai/datasets/manifest.json
+- MIX configs: https://teutonic.ai/competitions/<mix01..mix06>/datasets/manifest.json
+- Six original sources: `pretrain-behaviors` (PretBeh), `math-reasoning`,
+  `txt360-v2`, `code-reasoning`, `sft-reasoning`, and `dclm-baseline-1.0`.
+  Each raw source manifest is at
   `https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/<source>/manifest.json`.
-- Specialists use the `splits/math`, `splits/code` and `splits/text`
-  manifests under that same public base, with 70% for their own group and
-  15% for each other group. Split groups contain explicitly weighted
-  categories drawn from the original sources; follow those manifests
-  rather than treating a split as one raw source dataset.
+- MAIN excludes DCLM and balances its original 24 categories by token inventory.
+  MIX06 includes all 25 categories, proportional to token inventory. The website's
+  DATASET MIX table uses this full six-dataset inventory; it is not MAIN's policy.
+- Every competition has unique category entries, explicit sampling targets and
+  immutable source pins. Follow the selected competition's active summary and
+  pinned raw manifest. Category summaries include `dataset` for original source
+  identity; weights are sampling targets, not fixed score weights. MIX02 keeps
+  its former CODE category set token-proportional within 50%; its other 50% is
+  token-proportional across PretBeh's format-rewrites, games, general and planning.
+  PretBeh categories already in CODE (reasoning, other, data-science) occur once.
+
 - Token data is stored in `.npy` shards of uint32 token IDs, in rows of
   2,048 tokens, using the genesis tokenizer. Shard descriptors identify
   their location, `n_tokens`, `size_bytes` and `sha256`. Storage row
   boundaries are not necessarily document boundaries.
-- Whole-document index inventory:
-  https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest.json
-  It lists category length tables, fragment pointers, fragment locations
-  and shard-name inventories with their SHA-256 hashes, ETags and sizes.
-  These indexes locate complete documents in the original token shards;
-  they are not a second copy of the training tokens.
+- Release whole-document index inventory (including DCLM):
+  https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest-bb93856956e924c6139bebf73601c72cd58007ce916e6095b9929dd1b1d450c7.json
+  Use the exact inventory pin in the evaluation request for replay. The mutable
+  `doc_index/manifest.json` may still serve historical configurations.
+  The inventory lists length tables, fragment pointers, fragments and shard names
+  with ETags, sizes and optional per-file SHA-256 in v2. Its own JSON is SHA-256
+  pinned. DCLM uses ETag/size pins without claiming whole-file hash verification.
+  These indexes locate documents in the original shards; they are not token copies.
+
 - Match your selected competition's mix, tokenizer, document boundaries
   and scored lengths when validating a candidate. FineWeb-only validation
   does not reproduce this evaluation distribution.
@@ -376,13 +412,16 @@ teutonic-miner upload --hotkey h0 --name teutonic-II-110B-<suffix> /path/to/mode
 5. READY (IRREVERSIBLE): after verifying the upload completed:
 
 ```bash
-teutonic-miner ready --hotkey h0
+teutonic-miner ready --hotkey h0 --competition MIX02
 ```
 
-   This commits `r2ready:v1:<base64url(registration_id || manifest_sha256)>`
-   on-chain, permanently consumes the hotkey's eligibility, and revokes
-   its upload credential. Or run the whole flow as one command:
-   `teutonic-miner submit --hotkey h0 --name <name> /path/to/model`.
+   For MIX02, this commits
+   `r2ready:v1:<base64url(registration_id || manifest_sha256)>:mix02`.
+   MAIN omits the competition suffix. Use the CLI to encode the commitment.
+   Ready permanently consumes the hotkey's eligibility and revokes its upload
+   credential. Or run the whole flow as one command:
+   `teutonic-miner submit --hotkey h0 --competition MIX02 --name <name> /path/to/model`.
+   Choose MAIN explicitly or omit `--competition` to target MAIN.
 6. DUEL: the validator queues the duel; watch `queue`, `current_eval`,
    then `history` in dashboard.json for the verdict (`mu_hat`, `lcb`,
    `accepted`).
@@ -393,8 +432,9 @@ teutonic-miner ready --hotkey h0
 1. START FROM THE KING. Download the current king from the public model
    bucket (section 2) at its pinned digest for your selected competition.
    Your challenger's token-weighted loss improvement must have an LCB
-   above that competition's threshold: defaults are 0.003 for MAIN and
-   0.0014 for MATH, CODE and TEXT, in nats per scored token.
+   strictly above that competition's threshold: the release default is 0.0015
+   nats per scored token for all seven competitions. For a kingless MIX, use
+   the latest MAIN king as the baseline and the selected MIX's evaluation mix.
 2. MATCH THE EVAL DISTRIBUTION. Use the source and category mix in section
    6, the genesis tokenizer, masked 2,048-token windows and complete
    2,049-8,192-token documents. Prevent attention across document boundaries
@@ -405,10 +445,8 @@ teutonic-miner ready --hotkey h0
    `teutonic.evaluation.policy.paired_bootstrap_verdict`, using alpha=0.001,
    n_bootstrap=10000, bootstrap_seed=0 and the selected competition's
    `delta_threshold`. Omitting token counts uses the historical equal-unit
-   calculation and does not reproduce masked scoring. For specialists, also call
-   `teutonic.evaluation.policy.apply_specialist_source_gate` with the verdict,
-   loss arrays, scored-token counts, aligned source labels, pinned dataset sources
-   and the same `delta_threshold`. Submit only when
+   calculation and does not reproduce masked scoring. Do not apply the retired
+   specialist-source gate: acceptance uses the whole-mix LCB alone. Submit only when
    your offline LCB clears the bar with margin; your offline sample differs
    from the validator's finalized-block draw.
 4. BE FAST AFTER A CROWNING. When `king.reign_number` bumps, start
@@ -467,8 +505,9 @@ teutonic-miner ready --hotkey h0
 - Reward publication health: `weight_status` (state, 101-block cadence,
   next due block) and `service_status` (overall health, per-service
   heartbeats).
-- Dataset config evolution: re-fetch
-  https://teutonic.ai/datasets/manifest.json — `config_version` changes
+- Dataset config evolution: re-fetch the selected competition's
+  `datasets/manifest.json` (MAIN at the root, MIXes under `competitions/mixNN/`).
+  `config_version` changes
   when operators alter the eval mix, n, delta or long-document configuration.
 - Detailed evaluator/replay reports include `component_scores` for windows
   and whole documents, plus `long_document_scores` by bucket, category and
@@ -487,7 +526,7 @@ teutonic-miner ready --hotkey h0
 ## 11. Rewards → compute → more mining (the self-sustaining loop)
 
 1. WIN A REIGN. Your hotkey enters its selected competition's reward position
-   under the gradual MAIN/specialist allocation described above. Emissions accrue
+   under the replacement-reward policy described above. Emissions accrue
    continuously as SN3 alpha staked to your hotkey. Estimated earnings:
    `king_payout` in dashboard.json.
 2. CHECK EARNINGS: `btcli wallet overview --wallet-name miner` or
@@ -499,8 +538,10 @@ teutonic-miner ready --hotkey h0
 4. BUY COMPUTE: fund Lium with TAO (section 5), rent a node, train the
    next challenger. Reserve TAO for future hotkey registrations
    (`market.sn3_reg_burn_tao` each).
-5. STAY REGISTERED: a past-king hotkey keeps paying while it remains in
-   the king chain and registered. Do not deregister a paying hotkey.
+5. STAY REGISTERED: rewards require an active reward position and an eligible
+   registered hotkey. Historical presence in `king_chain` does not guarantee a
+   payout; replaced positions stop receiving their allocation. Do not deregister
+   a paying hotkey.
 6. REPEAT from section 8 step 4.
 
 Sustainability math to track: (alpha emissions/day x alpha price in TAO)
@@ -546,8 +587,9 @@ the coldkey.
   submitted; register a new one.
 - "submitted model does not byte-match genesis contract files" — restore
   the six contract files from genesis, unchanged.
-- "registration already committed a different model manifest" — you
-  changed files between upload and ready; re-upload cleanly.
+- "registration already committed a different model manifest or competition" —
+  this registration already committed a different submission. Ready is irreversible;
+  re-uploading or changing `--competition` cannot recover its eligibility.
 - "hotkey was re-registered ... rerun register" — UID changed; redo
   `teutonic-miner register`.
 - "challenger .safetensors are identical to the king" / "has already
@@ -565,20 +607,20 @@ the coldkey.
 - dashboard: https://teutonic.ai/dashboard.json
 - dataset config: https://teutonic.ai/datasets/manifest.json
 - source shards: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/<source>/manifest.json
-- document indexes: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest.json
+- document indexes: use the immutable release URL in section 6 or the exact request pin
 - king download: https://pub-0821d4e196224864af220294345fd141.r2.dev/models/sha256/<king_digest>/
 - accept rule: paired-bootstrap LCB of token-weighted CE advantage > the
-  competition's delta_threshold (defaults: MAIN 0.003; MATH/CODE/TEXT 0.0014);
-  specialists also require own-source mu_hat >= delta_threshold
+  competition's delta_threshold (release default: 0.0015 for all seven);
+  no largest-source, own-source or category gate
 - sample: 20,000 masked 2,048-token windows + ~30M input tokens from
   complete 2,049-8,192-token documents; alpha=0.001, B=10000, bootstrap seed 0
-- specialist mix: 70% own group / 15% each other group, including the
-  additional document token budget
+- competitions: MAIN and MIX01–MIX06; explicit unique category lists and
+  sampling weights shared by windows and documents; kingless MIXes face latest MAIN
 - submission: `teutonic-miner register` -> `auth` -> `upload` -> `ready`
   (one shot per hotkey, forever)
 - contract: six genesis files byte-locked; weights only; <=250 GB
-- rewards: MAIN lineage and specialist allocations from section 3,
-  republished every 101 blocks
+- rewards: first MIX crowns displace oldest legacy positions; final allocation
+  MAIN 25%, six MIXes 12.5% each; publication retains the 101-block cadence
 - code: https://github.com/unarbos/teutonic
 
 ## Reference links
@@ -590,7 +632,7 @@ the coldkey.
 - [Evaluator engine](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/engine.py): model loading and scoring.
 - [Document masking](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/document_masking.py): attention boundaries and reset positions.
 - [Whole-document sampler](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/long_documents.py): reconstruction, competition mix and sample provenance.
-- [Document-index manifest](https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest.json): versioned index inventory for complete documents.
+- [Document-index manifest](https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest-bb93856956e924c6139bebf73601c72cd58007ce916e6095b9929dd1b1d450c7.json): immutable release inventory including DCLM.
 - [Ready-signal schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/ready-signal-v1.schema.json): `r2ready:v1` contract.
 - [Mailbox envelope schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/mailbox-envelope-v1.schema.json): encrypted credential contract.
 - [Dashboard schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/dashboard-v1.schema.json): dashboard JSON contract.

@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>Teutonic Dashboard</title>
   <link rel="icon" type="image/png" href="favicon.png">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=dataset-alignment-v1">
   <link rel="stylesheet" href="benchmark-layout.css">
 </head>
 <body>
@@ -31,14 +31,14 @@
       </div>
       <div class="dataset-panel" id="dataset-panel">
         <div class="dataset-panel-head">
-          <h2>MAIN DATASET MIX</h2>
-          <a id="dataset-manifest-link" href="https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev/datasets/manifest.json" target="_blank" rel="noopener">MANIFEST</a>
+          <h2>DATASET MIX</h2>
+          <a id="dataset-manifest-link" href="/competitions/mix06/datasets/manifest.json" target="_blank" rel="noopener">MANIFEST</a>
         </div>
         <p class="dataset-overview" id="dataset-summary" aria-live="polite">LOADING DATASET MANIFEST...</p>
         <div class="dataset-table-wrap">
           <table class="dataset-table">
-            <thead><tr><th>DATASET</th><th>WEIGHT</th><th>TOKENS</th><th>SEQ @ LEN</th><th>EVAL DRAW</th><th>SOURCE</th></tr></thead>
-            <tbody id="dataset-sources"><tr><td colspan="6" class="dataset-loading">LOADING...</td></tr></tbody>
+            <thead><tr><th>DATASET</th><th>TOKENS</th><th>SEQ @ LEN</th><th>SHARDS</th><th>AVG TOKENS / SHARD</th></tr></thead>
+            <tbody id="dataset-sources"><tr><td colspan="5" class="dataset-loading">LOADING...</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -47,12 +47,12 @@
           <h2 id="competition-dataset-heading">COMPETITION DATASET MIX</h2>
           <span class="dataset-help" id="competition-dataset-help">
             <button type="button" aria-label="About the competition dataset mix" aria-describedby="competition-dataset-tooltip">(?)</button>
-            <span id="competition-dataset-tooltip" class="dataset-help-tooltip" role="tooltip" hidden>Each competition evaluates models using its own mix of MATH, TEXT, and CODE samples. The planned mix is 70% from its specialty (21,000 sequences) and 15% from each other group (4,500 each). Cells show each group's weight and evaluation sample count; manifests provide the active settings. Until a competition has its first winner, challengers face the MAIN king using that competition's mix and threshold.</span>
+            <span id="competition-dataset-tooltip" class="dataset-help-tooltip" role="tooltip" hidden>Each competition uses an explicit category list. Weights are sampling targets for windows and whole documents. Acceptance requires the whole-mix LCB to exceed the threshold. A kingless MIX challenges the latest MAIN king.</span>
           </span>
         </div>
         <div class="dataset-table-wrap">
           <table class="dataset-table competition-dataset-table">
-            <thead><tr><th scope="col">COMPETITION</th><th scope="col">MATH</th><th scope="col">TEXT</th><th scope="col">CODE</th><th scope="col">SAMPLES</th><th scope="col">REQUIRED LCB</th><th scope="col">SOURCE</th></tr></thead>
+            <thead><tr><th scope="col">COMPETITION</th><th scope="col">CATEGORY WEIGHTS</th><th scope="col">WINDOWS</th><th scope="col">DOCUMENT TOKENS</th><th scope="col">STATUS</th><th scope="col">REQUIRED LCB</th><th scope="col">SOURCE</th></tr></thead>
             <tbody id="competition-datasets"></tbody>
           </table>
         </div>
@@ -147,9 +147,6 @@
           <div id="history-competition-filters" class="history-filters" role="group" aria-label="Filter evaluation history by competition">
             <button type="button" data-competition="all" aria-pressed="true" aria-controls="history-body">ALL</button>
             <button type="button" data-competition="main" aria-pressed="false" aria-controls="history-body">MAIN</button>
-            <button type="button" data-competition="math" aria-pressed="false" aria-controls="history-body">MATH</button>
-            <button type="button" data-competition="text" aria-pressed="false" aria-controls="history-body">TEXT</button>
-            <button type="button" data-competition="code" aria-pressed="false" aria-controls="history-body">CODE</button>
           </div>
         </div>
         <span class="section-heading-actions"><span id="history-count" aria-live="polite">0 RESULTS</span><button id="history-errors-toggle" type="button" aria-pressed="false">SHOW ERRORS</button></span>
@@ -174,7 +171,7 @@
 
     <footer><span>TEUTONIC / DASHBOARD V1</span><span id="last-refresh">LAST REFRESH --</span></footer>
   </main>
-  <script src="dashboard-v1.js?v=bbh-cot"></script>
-  <script src="app.js?v=bbh-cot"></script>
+  <script src="dashboard-v1.js?v=category-mixes-v3"></script>
+  <script src="app.js?v=category-mixes-v3"></script>
 </body>
 </html>

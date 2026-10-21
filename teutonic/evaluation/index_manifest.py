@@ -9,6 +9,7 @@ from .long_documents import _NAME, _SHA, DEFAULT_INDEX_BASE, _https, validate_in
 
 DEFAULT_INDEX_MANIFEST_URL = DEFAULT_INDEX_BASE + "/manifest.json"
 INDEX_FORMAT = "teutonic-document-index-v1"
+ETAG_INDEX_FORMAT = "teutonic-document-index-v2"
 TOKEN_FORMAT = {
     "eos_token_id": 151645,
     "length_includes_eos": True,
@@ -31,7 +32,7 @@ def index_paths(dataset, category):
 def validate_inventory(manifest, manifest_url):
     if not isinstance(manifest, dict) or set(manifest) != {"format", "token_format", "datasets", "files"}:
         raise ValueError("invalid document-index manifest fields")
-    if manifest["format"] != INDEX_FORMAT or manifest["token_format"] != TOKEN_FORMAT:
+    if manifest["format"] not in {INDEX_FORMAT, ETAG_INDEX_FORMAT} or manifest["token_format"] != TOKEN_FORMAT:
         raise ValueError("unsupported document-index binary/token format")
     datasets, files = manifest["datasets"], manifest["files"]
     if not isinstance(datasets, dict) or not datasets or not isinstance(files, dict):
@@ -51,8 +52,11 @@ def validate_inventory(manifest, manifest_url):
     if set(files) != expected:
         raise ValueError("document-index inventory has missing or unexpected files")
     for path, value in files.items():
-        if set(value) != {"size_bytes", "etag", "sha256"} or not _SHA.fullmatch(value["sha256"]):
-            raise ValueError("index inventory file requires SHA-256, ETag and size")
+        allowed = [{"size_bytes", "etag", "sha256"}]
+        if manifest["format"] == ETAG_INDEX_FORMAT:
+            allowed.append({"size_bytes", "etag"})
+        if set(value) not in allowed or ("sha256" in value and not _SHA.fullmatch(value["sha256"])):
+            raise ValueError("index inventory file requires ETag and size, plus SHA-256 for v1")
         validate_index_file({"url": urljoin(manifest_url, path), **value})
     return manifest
 

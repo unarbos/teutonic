@@ -58,146 +58,308 @@ initial_weight_uids = [110, 115, 143, 224, 226]
 "tokenizer.json" = "71e1168ef6233c01973f3b8b90abcd86236e146f7aee8da59655d2ca51afdb20"
 "tokenizer_config.json" = "2cb1d781e7d20a1386d6a6c2c89fdc9b18a9c6f277071488f39dbfc02829589e"
 
+# Shared sampling settings for the category competitions below.
 [evaluation]
-dataset_label = "pretrain-behaviors-math-reasoning-txt360-v2-code-reasoning-sft-reasoning"
-n = 30000
-delta_threshold = 0.003
 shards_per_dataset = 4
 
-[[evaluation.datasets]]
-name = "pretrain-behaviors"
+# Category registry: original dataset identity and token inventory used to calculate
+# the explicit weights below. Runtime weights stay pinned until an admin update.
+
+[categories.3efforts-pretrain]
+dataset = "sft-reasoning"
+tokens = 82360766464
+
+[categories.code-no-thinking]
+dataset = "code-reasoning"
+tokens = 462582843392
+
+[categories.code-no-thinking-hard]
+dataset = "code-reasoning"
+tokens = 360718086144
+
+[categories.code-task-synthesis]
+dataset = "code-reasoning"
+tokens = 292237750272
+
+[categories.code-thinking-hard]
+dataset = "code-reasoning"
+tokens = 300230647808
+
+[categories.code-thinking-v0]
+dataset = "code-reasoning"
+tokens = 523955963904
+
+[categories.code-thinking-v1]
+dataset = "code-reasoning"
+tokens = 488814632960
+
+[categories.codeio]
+dataset = "code-reasoning"
+tokens = 24682876928
+
+[categories.data-science]
+dataset = "pretrain-behaviors"
+tokens = 448671590400
+
+[categories."dclm-baseline-1.0"]
+dataset = "dclm-baseline-1.0"
+tokens = 3732172883968
+
+[categories.format-rewrites]
+dataset = "pretrain-behaviors"
+tokens = 376221806592
+
+[categories.games]
+dataset = "pretrain-behaviors"
+tokens = 168704589824
+
+[categories.general]
+dataset = "pretrain-behaviors"
+tokens = 684389128192
+
+[categories.instruction-following]
+dataset = "sft-reasoning"
+tokens = 46262804480
+
+[categories.math-dialogue]
+dataset = "math-reasoning"
+tokens = 1932428982272
+
+[categories.math-rewrite]
+dataset = "math-reasoning"
+tokens = 654784296960
+
+[categories.math-thinking-oss]
+dataset = "math-reasoning"
+tokens = 487488325632
+
+[categories.math-thinking-qwen]
+dataset = "math-reasoning"
+tokens = 811030714368
+
+[categories.other]
+dataset = "pretrain-behaviors"
+tokens = 519580758016
+
+[categories.planning]
+dataset = "pretrain-behaviors"
+tokens = 938289750016
+
+[categories.reasoning]
+dataset = "pretrain-behaviors"
+tokens = 1558229008384
+
+[categories.socratic-math-dialogue]
+dataset = "math-reasoning"
+tokens = 157755195392
+
+[categories.txt360-qa]
+dataset = "txt360-v2"
+tokens = 1275806531584
+
+[categories.web-high-medium]
+dataset = "txt360-v2"
+tokens = 899935692800
+
+[categories.web-high-nltk-qa]
+dataset = "txt360-v2"
+tokens = 948427145216
+
+[category_datasets.pretrain-behaviors]
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/pretrain-behaviors/manifest.json"
-proportion = 0.32
 
-[[evaluation.datasets]]
-name = "math-reasoning"
+[category_datasets.math-reasoning]
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/math-reasoning/manifest.json"
-proportion = 0.28
 
-[[evaluation.datasets]]
-name = "txt360-v2"
+[category_datasets.txt360-v2]
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/txt360-v2/manifest.json"
-proportion = 0.22
 
-[[evaluation.datasets]]
-name = "code-reasoning"
+[category_datasets.code-reasoning]
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/code-reasoning/manifest.json"
-proportion = 0.17
 
-[[evaluation.datasets]]
-name = "sft-reasoning"
+[category_datasets.sft-reasoning]
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/sft-reasoning/manifest.json"
-proportion = 0.01
 
-# Bootstrap defaults only. Runtime evaluation policy is stored in PostgreSQL.
+[category_datasets."dclm-baseline-1.0"]
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/dclm-baseline-1.0/manifest.json"
 
-[splits.math]
-n = 30000
-delta_threshold = 0.0014
-manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/math/manifest.json"
+[competitions.main]
+n = 20000
+long_document_tokens = 30000000
+delta_threshold = 0.0015
+incentive = 0.25
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/main/versions/44383013ef3b8c1fbaaf54ece816af899bb55727d18f842249931e56cf09e99d.json"
 
-[splits.math.categories.math-dialogue]
-dataset = "math-reasoning"
-weight = 0.413
+[competitions.main.categories]
+3efforts-pretrain = 0.005702236570177531
+code-no-thinking = 0.032026860841314966
+code-no-thinking-hard = 0.024974268096859438
+code-task-synthesis = 0.02023304126869432
+code-thinking-hard = 0.02078642845276555
+code-thinking-v0 = 0.03627602057154172
+code-thinking-v1 = 0.03384301525800841
+codeio = 0.0017089156587384823
+data-science = 0.031063717114591063
+format-rewrites = 0.026047666093356195
+games = 0.011680239547936962
+general = 0.047383589086851814
+instruction-following = 0.003202999035470814
+math-dialogue = 0.1337914602433774
+math-rewrite = 0.0453339025849804
+math-thinking-oss = 0.03375118854883953
+math-thinking-qwen = 0.05615160224410825
+other = 0.035973103781330514
+planning = 0.06496236443237345
+reasoning = 0.10788377546489362
+socratic-math-dialogue = 0.010922159699581744
+txt360-qa = 0.08833029333268202
+web-high-medium = 0.06230692644822899
+web-high-nltk-qa = 0.0656642256232968
 
-[splits.math.categories.math-thinking-qwen]
-dataset = "math-reasoning"
-weight = 0.174
+[competitions.mix01]
+n = 20000
+long_document_tokens = 30000000
+delta_threshold = 0.0015
+incentive = 0.125
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix01/versions/406f640bf0946c50625c54aa80334b9032ca2001bd5175ab18fed4f2e71ae94d.json"
 
-[splits.math.categories.math-rewrite]
-dataset = "math-reasoning"
-weight = 0.140
+[competitions.mix01.categories]
+3efforts-pretrain = 0.0081
+code-no-thinking = 0.04185
+code-no-thinking-hard = 0.0324
+code-task-synthesis = 0.02655
+code-thinking-hard = 0.027
+code-thinking-v0 = 0.04725
+code-thinking-v1 = 0.0441
+codeio = 0.0022500000000000003
+data-science = 0.0405
+"dclm-baseline-1.0" = 0.1
+format-rewrites = 0.03645
+games = 0.0162
+math-dialogue = 0.18585
+math-rewrite = 0.06300000000000001
+math-thinking-oss = 0.0468
+math-thinking-qwen = 0.0783
+other = 0.0468
+reasoning = 0.1413
+socratic-math-dialogue = 0.015300000000000001
 
-[splits.math.categories.math-thinking-oss]
-dataset = "math-reasoning"
-weight = 0.104
+[competitions.mix02]
+n = 20000
+long_document_tokens = 30000000
+delta_threshold = 0.0015
+incentive = 0.125
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix02/versions/2893ef85b15b2288e72fd6441bca7ff0059a15e0575130a5dfd48e4f4691d930.json"
 
-[splits.math.categories.format-rewrites]
-dataset = "pretrain-behaviors"
-weight = 0.081
+[competitions.mix02.categories]
+code-no-thinking = 0.046446819800482424
+code-no-thinking-hard = 0.036218826930655285
+code-task-synthesis = 0.029342882728315017
+code-thinking-hard = 0.03014543015704383
+code-thinking-v0 = 0.05260914577027315
+code-thinking-v1 = 0.04908069008018191
+codeio = 0.002478347723460182
+data-science = 0.0450500246747047
+format-rewrites = 0.08678282226851951
+games = 0.038914970312863825
+general = 0.1578675638512451
+other = 0.05216984197340116
+planning = 0.21643464356737158
+reasoning = 0.15645799016148235
 
-[splits.math.categories.games]
-dataset = "pretrain-behaviors"
-weight = 0.036
+[competitions.mix03]
+n = 20000
+long_document_tokens = 30000000
+delta_threshold = 0.0015
+incentive = 0.125
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix03/versions/5cca8513c719454e0d961f1d8d4b9b40a749e94e638f4e9e27cf861e495ecca2.json"
 
-[splits.math.categories.socratic-math-dialogue]
-dataset = "math-reasoning"
-weight = 0.034
+[competitions.mix03.categories]
+3efforts-pretrain = 0.010799999999999999
+code-no-thinking = 0.037200000000000004
+code-no-thinking-hard = 0.0288
+code-task-synthesis = 0.0236
+code-thinking-hard = 0.024
+code-thinking-v0 = 0.042
+code-thinking-v1 = 0.039200000000000006
+codeio = 0.002
+data-science = 0.036
+format-rewrites = 0.0486
+games = 0.021599999999999998
+math-dialogue = 0.24779999999999996
+math-rewrite = 0.084
+math-thinking-oss = 0.0624
+math-thinking-qwen = 0.10439999999999999
+other = 0.0416
+reasoning = 0.12560000000000002
+socratic-math-dialogue = 0.0204
 
-[splits.math.categories.3efforts-pretrain]
-dataset = "sft-reasoning"
-weight = 0.018
+[competitions.mix04]
+n = 20000
+long_document_tokens = 30000000
+delta_threshold = 0.0015
+incentive = 0.125
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix04/versions/97fa3df9158724931d5bd24c3c8bbfd44e0fab69b3fdc535f4f7ebdc5776a2b4.json"
 
-[splits.code]
-n = 30000
-delta_threshold = 0.0014
-manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/code/manifest.json"
+[competitions.mix04.categories]
+data-science = 0.02867468960179102
+format-rewrites = 0.02404440966684093
+games = 0.01078194352195978
+general = 0.04373944381067271
+other = 0.03320650845285186
+planning = 0.05996628249688012
+reasoning = 0.09958672244900357
+txt360-qa = 0.2858566442648218
+web-high-medium = 0.20163919123266216
+web-high-nltk-qa = 0.21250416450251594
 
-[splits.code.categories.reasoning]
-dataset = "pretrain-behaviors"
-weight = 0.314
+[competitions.mix05]
+n = 20000
+long_document_tokens = 30000000
+delta_threshold = 0.0015
+incentive = 0.125
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix05/versions/49c4198f6602b29505c01b931db0a9a3d877f2c51a36c8341e7a770d58691fee.json"
 
-[splits.code.categories.code-thinking-v0]
-dataset = "code-reasoning"
-weight = 0.105
+[competitions.mix05.categories]
+data-science = 0.05734937920358204
+"dclm-baseline-1.0" = 0.4
+format-rewrites = 0.04808881933368186
+games = 0.02156388704391956
+general = 0.08747888762134542
+other = 0.06641301690570373
+planning = 0.11993256499376025
+reasoning = 0.19917344489800715
 
-[splits.code.categories.other]
-dataset = "pretrain-behaviors"
-weight = 0.104
+[competitions.mix06]
+n = 20000
+long_document_tokens = 30000000
+delta_threshold = 0.0015
+incentive = 0.125
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix06/versions/23aa16564c225ef8212d82eeefe74cb47b0cae1daa8532ed05f0307104b92c29.json"
 
-[splits.code.categories.code-thinking-v1]
-dataset = "code-reasoning"
-weight = 0.098
-
-[splits.code.categories.code-no-thinking]
-dataset = "code-reasoning"
-weight = 0.093
-
-[splits.code.categories.data-science]
-dataset = "pretrain-behaviors"
-weight = 0.090
-
-[splits.code.categories.code-no-thinking-hard]
-dataset = "code-reasoning"
-weight = 0.072
-
-[splits.code.categories.code-thinking-hard]
-dataset = "code-reasoning"
-weight = 0.060
-
-[splits.code.categories.code-task-synthesis]
-dataset = "code-reasoning"
-weight = 0.059
-
-[splits.code.categories.codeio]
-dataset = "code-reasoning"
-weight = 0.005
-
-[splits.text]
-n = 30000
-delta_threshold = 0.0014
-manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/text/manifest.json"
-
-[splits.text.categories.txt360-qa]
-dataset = "txt360-v2"
-weight = 0.265
-
-[splits.text.categories.web-high-nltk-qa]
-dataset = "txt360-v2"
-weight = 0.198
-
-[splits.text.categories.planning]
-dataset = "pretrain-behaviors"
-weight = 0.196
-
-[splits.text.categories.web-high-medium]
-dataset = "txt360-v2"
-weight = 0.188
-
-[splits.text.categories.general]
-dataset = "pretrain-behaviors"
-weight = 0.143
-
-[splits.text.categories.instruction-following]
-dataset = "sft-reasoning"
-weight = 0.010
+[competitions.mix06.categories]
+3efforts-pretrain = 0.004531351310934958
+code-no-thinking = 0.025450532623886867
+code-no-thinking-hard = 0.019846104434215327
+code-task-synthesis = 0.01607843114692884
+code-thinking-hard = 0.016518186971005024
+code-thinking-v0 = 0.028827178835767128
+code-thinking-v1 = 0.026893761714027537
+codeio = 0.0013580105131030733
+data-science = 0.024685158803457445
+"dclm-baseline-1.0" = 0.20533789589969956
+format-rewrites = 0.020699093144648486
+games = 0.009281843735559129
+general = 0.037653942603581694
+instruction-following = 0.0025453019529584698
+math-dialogue = 0.10631900330765398
+math-rewrite = 0.03602513441525858
+math-thinking-oss = 0.026820790508106786
+math-thinking-qwen = 0.04462155038790621
+other = 0.028586462341890582
+planning = 0.051623129207160404
+reasoning = 0.08573114800921673
+socratic-math-dialogue = 0.008679426408189134
+txt360-qa = 0.07019273675554584
+web-high-medium = 0.049512953271372305
+web-high-nltk-qa = 0.05218087169792589

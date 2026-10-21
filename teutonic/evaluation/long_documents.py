@@ -189,6 +189,12 @@ def build_long_document_config(
             source = inventory["datasets"][snapshot.name]["source_manifest"]
             if source != {"url": snapshot.manifest_url, "sha256": snapshot.manifest_sha256}:
                 raise ValueError("index source manifest differs from evaluation source")
+    for snapshot in manifests:
+        if snapshot.manifest.get("format") == "teutonic-category-mix-v1":
+            for source in snapshot.manifest["source_manifests"]:
+                indexed = inventory["datasets"].get(source["name"], {}).get("source_manifest")
+                if indexed != {"url": source["url"], "sha256": source["sha256"]}:
+                    raise ValueError("category mix source differs from pinned document index")
     for item in categories:
         item["files"] = inventory_files(pin, item["dataset"], item["category"])
     return validate_long_documents(

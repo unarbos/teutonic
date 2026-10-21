@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import os
 import random
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +23,7 @@ from teutonic.evaluation.long_documents import (
     validate_long_documents,
 )
 from teutonic.evaluation.masking import DOCUMENT_EOS_TOKEN_ID
+from teutonic.evaluator.cache_lock import document_index_cache_dir
 from teutonic.evaluator.document_index import DocumentIndex, sample_category
 
 
@@ -80,9 +80,7 @@ def extend_with_long_documents(
             "long-document sampling requires a checkpoint context limit of at least 8192"
         )
     cap = config["max_document_tokens"]
-    cache = Path(
-        os.environ.get("TEUTONIC_DOC_INDEX_CACHE_DIR", sources.base.SHARD_CACHE_DIR / "doc_index")
-    )
+    cache = document_index_cache_dir(sources.base.SHARD_CACHE_DIR)
     proportions = {source["name"]: source["proportion"] for source in req.dataset_sources}
     snapshots = [manifest_loader(d, proportions[d["name"]], cache) for d in config["manifests"]]
     declared_mix = [{k: v for k, v in c.items() if k != "files"} for c in config["categories"]]

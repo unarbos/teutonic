@@ -17,8 +17,7 @@ import os
 import pathlib
 import re
 import tomllib
-from types import MappingProxyType
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Mapping
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent
@@ -38,6 +37,10 @@ _chain = _doc.get("chain", {})
 _arch = _doc.get("arch", {})
 _seed = _doc.get("seed", {})
 _evaluation = _doc.get("evaluation", {})
+CATEGORY_REGISTRY = _doc.get("categories", {})
+CATEGORY_DATASETS = _doc.get("category_datasets", {})
+COMPETITION_DEFAULTS = _doc.get("competitions", {})
+_main_evaluation = COMPETITION_DEFAULTS.get("main", {})
 
 _VALID_SEED_REPO_BACKENDS = {"hf"}
 
@@ -64,21 +67,21 @@ GENESIS_CONTRACT_FILES: Mapping[str, str] = MappingProxyType(
         for path, digest in sorted(_contract_files.items())
     }
 )
-EVALUATION_DATASET_LABEL: str = str(_evaluation.get("dataset_label") or "").strip()
-EVALUATION_N: int = int(_evaluation.get("n") or 0)
+# Bootstrap consumers use the same active MAIN definition as administration.
+EVALUATION_DATASET_LABEL: str = "main-categories-v1"
+EVALUATION_N: int = int(_main_evaluation.get("n") or 0)
 try:
-    EVALUATION_DELTA_THRESHOLD: float = float(_evaluation.get("delta_threshold"))
+    EVALUATION_DELTA_THRESHOLD: float = float(_main_evaluation.get("delta_threshold"))
 except (TypeError, ValueError) as exc:
     raise RuntimeError(
-        "chain.toml [evaluation].delta_threshold must be numeric"
+        "chain.toml [competitions.main].delta_threshold must be numeric"
     ) from exc
-EVALUATION_DATASETS: tuple[dict[str, object], ...] = tuple(
+EVALUATION_DATASETS: tuple[dict[str, object], ...] = (
     {
-        "name": str(item.get("name") or "").strip(),
-        "manifest_url": str(item.get("manifest_url") or "").strip(),
-        "proportion": float(item.get("proportion") or 0),
-    }
-    for item in _evaluation.get("datasets", ())
+        "name": "main",
+        "manifest_url": str(_main_evaluation.get("manifest_url") or ""),
+        "proportion": 1.0,
+    },
 )
 EVALUATION_SHARDS_PER_DATASET: int = int(_evaluation.get("shards_per_dataset") or 0)
 CHAIN_GENERATION: str = str(_chain.get("generation") or "").strip() or (
@@ -110,30 +113,14 @@ if any(
     for path, digest in GENESIS_CONTRACT_FILES.items()
 ):
     raise RuntimeError("chain.toml contains an invalid genesis contract file lock")
-if not EVALUATION_DATASET_LABEL:
-    raise RuntimeError("chain.toml [evaluation].dataset_label is required")
 if EVALUATION_N < 1:
-    raise RuntimeError("chain.toml [evaluation].n must be positive")
+    raise RuntimeError("chain.toml [competitions.main].n must be positive")
 if not math.isfinite(EVALUATION_DELTA_THRESHOLD) or EVALUATION_DELTA_THRESHOLD < 0:
-    raise RuntimeError("chain.toml [evaluation].delta_threshold must be finite and non-negative")
-if not EVALUATION_DATASETS:
-    raise RuntimeError("chain.toml [[evaluation.datasets]] requires at least one dataset")
+    raise RuntimeError("chain.toml [competitions.main].delta_threshold must be finite and non-negative")
 if EVALUATION_SHARDS_PER_DATASET < 1:
     raise RuntimeError("chain.toml [evaluation].shards_per_dataset must be positive")
-if any(
-    not item["name"]
-    or not str(item["manifest_url"]).startswith("https://")
-    or not 0 < float(item["proportion"]) <= 1
-    for item in EVALUATION_DATASETS
-):
-    raise RuntimeError("chain.toml contains an invalid evaluation dataset")
-if not math.isclose(
-    sum(float(item["proportion"]) for item in EVALUATION_DATASETS),
-    1.0,
-    rel_tol=0.0,
-    abs_tol=1e-9,
-):
-    raise RuntimeError("chain.toml evaluation dataset proportions must sum to 1")
+if not str(EVALUATION_DATASETS[0]["manifest_url"]).startswith("https://"):
+    raise RuntimeError("chain.toml [competitions.main].manifest_url must use HTTPS")
 if not CHAIN_GENERATION or "|" in CHAIN_GENERATION or len(CHAIN_GENERATION) > 128:
     raise RuntimeError("chain.toml produces an invalid chain generation")
 
@@ -177,6 +164,3 @@ __all__ = [
     "SEED_NAMESPACE",
     "load_arch",
 ]
-
-# Consumed by administrative tooling only; never overrides active database settings.
-SPLIT_DEFAULTS = _doc.get("splits", {})

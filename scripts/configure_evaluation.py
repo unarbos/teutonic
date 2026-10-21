@@ -16,8 +16,10 @@ if __package__ in (None, ""):
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 import chain_config
+from teutonic.competitions import ACTIVE_COMPETITIONS, normalize_competition
 from teutonic.evaluation.configuration import (
     DatasetManifestSnapshot,
     EvaluationSettings,
@@ -36,8 +38,11 @@ from teutonic.evaluation.long_documents import (
     MAX_DOCUMENT_TOKENS,
     build_long_document_config,
 )
+from teutonic.evaluation.mixes import competition_snapshot, validate_definitions
+from teutonic.weights.transition import snapshot_transition
 
-COMPETITIONS = ("main", "math", "code", "text")
+COMPETITIONS = ACTIVE_COMPETITIONS
+LEGACY_SPLITS = ("math", "code", "text")
 
 
 def required(name: str) -> str:
@@ -50,15 +55,18 @@ def required(name: str) -> str:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--competition", choices=COMPETITIONS, default="main")
+    group.add_argument("--competition", type=normalize_competition, choices=COMPETITIONS, default="main")
     group.add_argument(
-        "--all", action="store_true", help="atomically configure all four competitions"
+        "--all", action="store_true", help="atomically configure all seven competitions"
     )
     parser.add_argument(
         "--initialize",
         action="store_true",
         help="allow missing configurations to use chain.toml defaults",
     )
+    parser.add_argument("--replace-definition", action="store_true", help="replace categories and policy defaults from chain.toml")
+    parser.add_argument("--bundle-dir", type=Path, help="prepared immutable manifests from prepare_competition_mixes.py")
+    parser.add_argument("--cutover", action="store_true", help="snapshot rewards, activate MIXes and retire legacy competitions atomically")
     parser.add_argument("--delta-threshold", type=float)
     parser.add_argument("--n", type=int)
     parser.add_argument("--shards-per-dataset", type=int)
@@ -109,32 +117,14 @@ def load_active(connection, competition_id):
     }
 
 
-def initial_configuration(key, fetch):
-    if key == "main":
-        defaults = {
-            "dataset_label": chain_config.EVALUATION_DATASET_LABEL,
-            "n": chain_config.EVALUATION_N,
-            "delta_threshold": chain_config.EVALUATION_DELTA_THRESHOLD,
+def initial_configuration(key, fetch, bundle_dir=None):
+    if key not in chain_config.COMPETITION_DEFAULTS:
+        raise ValueError(f"no active competition definition: {key}")
+    spec = chain_config.COMPETITION_DEFAULTS[key]
+    return {"dataset_label": f"{key}-categories-v1", "n": spec["n"],
+            "delta_threshold": spec["delta_threshold"],
             "shards_per_dataset": chain_config.EVALUATION_SHARDS_PER_DATASET,
-        }
-        sources = chain_config.EVALUATION_DATASETS
-    else:
-        split = chain_config.SPLIT_DEFAULTS[key]
-        defaults = {
-            "dataset_label": f"{key}-70-15-15",
-            "n": split["n"],
-            "delta_threshold": split["delta_threshold"],
-            "shards_per_dataset": chain_config.EVALUATION_SHARDS_PER_DATASET,
-        }
-        sources = tuple(
-            {
-                "name": k,
-                "manifest_url": chain_config.SPLIT_DEFAULTS[k]["manifest_url"],
-                "proportion": 0.7 if k == key else 0.15,
-            }
-            for k in COMPETITIONS[1:]
-        )
-    return {**defaults, "manifests": tuple(fetch(**item) for item in sources)}
+            "manifests": (competition_snapshot(key, fetch, bundle_dir),)}
 
 
 def prepare_configuration(current, key, args, fetch=None):
@@ -155,10 +145,11 @@ def prepare_configuration(current, key, args, fetch=None):
             cache[identity] = fetch(**source)
         return replace(cache[identity], proportion=source["proportion"])
 
-    if current is None:
-        if not args.initialize:
+    replacing = getattr(args, "replace_definition", False)
+    if current is None or replacing:
+        if current is None and not args.initialize:
             raise ValueError(f"{key} has no active configuration; use --initialize")
-        result = initial_configuration(key, download)
+        result = initial_configuration(key, download, getattr(args, "bundle_dir", None))
     else:
         result = dict(current)
         result["manifests"] = tuple(
@@ -170,12 +161,24 @@ def prepare_configuration(current, key, args, fetch=None):
     unknown = set(overrides) - {s.name for s in result["manifests"]}
     if unknown:
         raise ValueError(f"unknown manifest names for {key}: {sorted(unknown)}")
+    if key in COMPETITIONS:
+        snapshots = result["manifests"]
+        if len(snapshots) != 1 or snapshots[0].name != key or snapshots[0].proportion != 1:
+            raise ValueError("category competitions require one flat manifest")
+        manifest = snapshots[0].manifest
+        if manifest.get("format") != "teutonic-category-mix-v1" or manifest.get("competition") != key:
+            raise ValueError(f"invalid category competition manifest: {key}")
+        if current and not replacing and (
+            manifest["category_weights"] != current["manifests"][0].manifest.get("category_weights")
+            or manifest["category_sources"] != current["manifests"][0].manifest.get("category_sources")
+        ):
+            raise ValueError("changing category definitions requires --replace-definition")
     for field in ("delta_threshold", "n", "shards_per_dataset"):
         if getattr(args, field) is not None:
             result[field] = getattr(args, field)
-    if key != "main":
+    if key in LEGACY_SPLITS:
         snapshots = result["manifests"]
-        if {s.name for s in snapshots} != set(COMPETITIONS[1:]):
+        if {s.name for s in snapshots} != set(LEGACY_SPLITS):
             raise ValueError("specialist configurations require math, code, and text manifests")
         for s in snapshots:
             if s.manifest.get("format") != "teutonic-split-v1" or s.manifest.get("split") != s.name:
@@ -188,6 +191,8 @@ def prepare_configuration(current, key, args, fetch=None):
             raise ValueError("a category occurs in multiple split manifests")
     previous_long = result.get("long_documents")
     budget = args.long_document_tokens
+    if budget is None and (current is None or replacing) and key in chain_config.COMPETITION_DEFAULTS:
+        budget = chain_config.COMPETITION_DEFAULTS[key]["long_document_tokens"]
     if budget is not None and budget < 0:
         raise ValueError("--long-document-tokens cannot be negative")
     if budget == 0:
@@ -222,6 +227,9 @@ def prepare_configuration(current, key, args, fetch=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
     keys = COMPETITIONS if args.all else (args.competition,)
+    validate_definitions()
+    if args.cutover and not (args.all and args.initialize and args.replace_definition):
+        raise ValueError("--cutover requires --all --initialize --replace-definition")
     main_name = required("TEUTONIC_COMPETITION")
     netuid, generation = int(required("TEUTONIC_NETUID")), required("TEUTONIC_CHAIN_GENERATION")
     # One transaction makes --all atomic and serializes administrative updates.
@@ -232,15 +240,12 @@ def main(argv=None) -> int:
         ).fetchone()
         if main is None or main["competition_key"] != "main":
             raise RuntimeError("TEUTONIC_COMPETITION must identify the existing main competition")
-        prepared = []
-        fetched = {}
-
-        def cached_fetch(**source):
-            identity = (source["name"], source["manifest_url"])
-            if identity not in fetched:
-                fetched[identity] = fetch_dataset_manifest(**source)
-            return replace(fetched[identity], proportion=source["proportion"])
-
+        transition = None
+        if args.cutover:
+            transition = snapshot_transition(connection, main)
+            print(json.dumps({"reward_transition": transition, "dry_run": args.dry_run}))
+        elif not main["reward_transition"]:
+            raise ValueError("initialize the category competitions with --cutover")
         for key in keys:
             name = main_name if key == "main" else key
             row = connection.execute(
@@ -257,7 +262,7 @@ def main(argv=None) -> int:
             ):
                 raise ValueError(f"competition name already belongs to another scope: {name}")
             current = load_active(connection, row["competition_id"]) if row else None
-            config, version = prepare_configuration(current, key, args, cached_fetch)
+            config, version = prepare_configuration(current, key, args)
             print(
                 json.dumps(
                     {
@@ -267,7 +272,8 @@ def main(argv=None) -> int:
                         "delta_threshold": config["delta_threshold"],
                         "previous_delta_threshold": current["delta_threshold"] if current else None,
                         "dry_run": args.dry_run,
-                        "long_documents": config.get("long_documents"),
+                        "long_document_tokens": (config.get("long_documents") or {}).get("token_budget"),
+                        "category_weights": {s.name: s.manifest.get("category_weights") for s in config["manifests"]},
                         "manifests": [
                             {
                                 "name": s.name,
@@ -280,14 +286,14 @@ def main(argv=None) -> int:
                     }
                 )
             )
-            prepared.append((key, name, row, config))
-        if args.dry_run:
-            connection.rollback()
-            return 0
-        for key, name, row, config in prepared:
+            if args.dry_run:
+                del current, config
+                continue
+            # Store one large inventory at a time, within the same outer transaction.
+            # Any later validation/write failure still rolls the entire update back.
             if row is None:
                 row = connection.execute(
-                    "INSERT INTO control_plane.competitions(netuid,chain_generation,name,competition_key,main_competition_id) VALUES (%s,%s,%s,%s,%s) RETURNING competition_id",
+                    "INSERT INTO control_plane.competitions(netuid,chain_generation,name,competition_key,main_competition_id,active) VALUES (%s,%s,%s,%s,%s,false) RETURNING competition_id",
                     (netuid, generation, name, key, main["competition_id"]),
                 ).fetchone()
             connection.execute(
@@ -296,6 +302,20 @@ def main(argv=None) -> int:
             )
             store_evaluation_configuration(
                 connection, netuid=netuid, chain_generation=generation, competition=name, **config
+            )
+            del current, config
+        if args.dry_run:
+            connection.rollback()
+            return 0
+        if args.cutover:
+            connection.execute(
+                "UPDATE control_plane.competitions SET reward_transition=%s WHERE competition_id=%s",
+                (Jsonb(transition), main["competition_id"]),
+            )
+            connection.execute(
+                """UPDATE control_plane.competitions SET active=(competition_key=ANY(%s))
+                   WHERE competition_id=%s OR main_competition_id=%s""",
+                (list(COMPETITIONS), main["competition_id"], main["competition_id"]),
             )
     return 0
 

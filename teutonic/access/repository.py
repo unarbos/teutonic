@@ -910,6 +910,12 @@ class AccessControllerRepository:
                 raise ControllerInvariantError("ready signal hotkey does not own registration")
             if registration["state"] != "active":
                 raise ControllerInvariantError("ready signal registration is not active")
+            if not cursor.execute(
+                """SELECT 1 FROM control_plane.competitions WHERE netuid=%s
+                   AND chain_generation=%s AND competition_key=%s AND active""",
+                (registration["netuid"], registration["chain_generation"], signal.competition),
+            ).fetchone():
+                raise ControllerInvariantError("ready signal targets an inactive or unconfigured competition")
             activation_position = (
                 registration["activation_finalized_block"],
                 registration["activation_extrinsic_index"],

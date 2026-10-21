@@ -31,6 +31,7 @@
 .dataset-help button:hover,.dataset-help button:focus-visible{color:var(--ink)}
 .dataset-help button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 .dataset-help-tooltip{position:absolute;top:100%;left:0;width:min(440px,100%);padding:12px;border:var(--border);background:var(--paper);color:var(--ink);box-shadow:0 4px 14px var(--faint);font:400 12px/1.6 var(--font);text-transform:none;letter-spacing:normal}
+#dataset-panel .dataset-table th:last-child,#dataset-panel .dataset-table td:last-child{text-align:right}
 .competition-dataset-table tbody th{font-size:10px}
 .competition-dataset-table tbody th .dataset-sub{font-weight:400}
 .competition-dataset-table td:nth-child(n+2):nth-child(-n+4){font-weight:700}

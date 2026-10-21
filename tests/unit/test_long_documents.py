@@ -2,7 +2,9 @@ import copy
 import hashlib
 import io
 import json
+import tomllib
 from datetime import UTC
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 
@@ -36,6 +38,7 @@ from teutonic.evaluator.document_index import (
 )
 from teutonic.evaluator.long_documents import extend_with_long_documents, sequence_digest
 
+LEGACY_CONFIG = tomllib.loads((Path(__file__).parents[1] / "fixtures/legacy_evaluation.toml").read_text())
 
 def snapshot(name, shards, proportion=1, **extra):
     manifest = {"shards": shards, **extra}
@@ -76,7 +79,7 @@ def build_long_document_config(sources, describe=descriptor, index_base="https:/
 
 def all_sources():
     groups = {}
-    for spec in chain_config.SPLIT_DEFAULTS.values():
+    for spec in LEGACY_CONFIG["splits"].values():
         for category, item in spec["categories"].items():
             dataset = item["dataset"]
             groups.setdefault(dataset, []).append(
@@ -87,7 +90,7 @@ def all_sources():
                     "size_bytes": 2048 * 100000 * 4 + 128,
                 }
             )
-    proportions = {s["name"]: s["proportion"] for s in chain_config.EVALUATION_DATASETS}
+    proportions = {s["name"]: s["proportion"] for s in LEGACY_CONFIG["evaluation"]["datasets"]}
     return tuple(snapshot(k, v, proportions[k]) for k, v in groups.items())
 
 
@@ -97,7 +100,7 @@ def test_competition_mix_uses_existing_source_and_category_weights(competition):
 
     sources = all_sources()
     if competition != "main":
-        manifests = build_manifests(sources, chain_config.SPLIT_DEFAULTS)
+        manifests = build_manifests(sources, LEGACY_CONFIG["splits"])
         sources = tuple(
             snapshot(k, v.pop("shards"), 0.7 if k == competition else 0.15, **v)
             for k, v in manifests.items()
@@ -406,10 +409,22 @@ def make_index_fixture(tmp_path):
     return config, snap, factory, documents, paths, server
 
 
-def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize("flat_mix", [False, True])
+def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_path, monkeypatch, flat_mix):
     import teutonic.evaluator as evaluator_package
 
     config, snap, factory, documents, paths, _server = make_index_fixture(tmp_path)
+    if flat_mix:
+        from teutonic.evaluation.index_manifest import ETAG_INDEX_FORMAT, pin_index_manifest
+        from teutonic.evaluation.mixes import build_mix_manifests
+        manifest = build_mix_manifests((snap,), {"mix02": {"categories": {"codeio": 1.0}}})["mix02"]
+        snap = snapshot("mix02", manifest.pop("shards"), **manifest)
+        inventory = json.loads(config["index_manifest"]["content"])
+        inventory["format"] = ETAG_INDEX_FORMAT
+        for entry in inventory["files"].values():
+            entry.pop("sha256")
+        pin = pin_index_manifest(json.dumps(inventory).encode(), config["index_manifest"]["url"])
+        config = build_config((snap,), token_budget=15000, index_manifest=pin)
     fake_sources = SimpleNamespace(
         base=SimpleNamespace(SHARD_CACHE_DIR=tmp_path),
         ShardRef=lambda *args: SimpleNamespace(
@@ -529,8 +544,10 @@ def test_previous_unbounded_policy_is_not_silently_replayed():
 
 def test_budget_changes_preserve_pins_and_threshold_updates_do_not_fetch(monkeypatch):
     from scripts import configure_evaluation as cli
+    from teutonic.evaluation.mixes import build_mix_manifests
 
-    sources = all_sources()
+    manifest = build_mix_manifests(all_sources(), {"main": chain_config.COMPETITION_DEFAULTS["main"]})["main"]
+    sources = (snapshot("main", manifest.pop("shards"), **manifest),)
     config = build_long_document_config(sources, describe=descriptor)
     current = {
         "dataset_label": "main",
@@ -637,3 +654,30 @@ def test_inventory_builder_hashes_parallel_ranges_in_file_order():
     server.wrong_range = True
     with pytest.raises(ValueError, match='range'):
         hash_remote_ranges(descriptor, 3, chunk_bytes=10000, opener=server.open)
+
+
+def test_metadata_inventory_build_never_downloads_index_bodies(tmp_path, monkeypatch):
+    from scripts import build_document_index_manifest as builder
+    from teutonic.evaluation.index_manifest import ETAG_INDEX_FORMAT, pin_index_manifest
+    sources = tmp_path / "sources.json"
+    output = tmp_path / "inventory.json"
+    sources.write_text(json.dumps({"datasets": {"dclm-baseline-1.0": {
+        "categories": ["dclm-baseline-1.0"],
+        "source_manifest": {"url": "https://datasets.example/dclm/manifest.json", "sha256": "a" * 64}}}}))
+    monkeypatch.setattr(builder, "describe_index_file", lambda url: {
+        "url": url, "etag": '"abc123-20"', "size_bytes": 1000})
+    monkeypatch.setattr(builder, "urlopen", lambda *a, **kw: pytest.fail("index body download"))
+    monkeypatch.setattr(builder, "hash_remote_ranges", lambda *a, **kw: pytest.fail("remote hashing"))
+    args = ["--sources", str(sources), "--output", str(output),
+            "--manifest-url", "https://datasets.example/doc_index/new.json"]
+    with pytest.raises(SystemExit):
+        builder.main(args)
+    builder.main([*args, "--metadata-only"])
+    manifest = json.loads(output.read_text())
+    assert manifest["format"] == ETAG_INDEX_FORMAT
+    assert len(manifest["files"]) == 4
+    assert all(set(f) == {"etag", "size_bytes"} for f in manifest["files"].values())
+    pin_index_manifest(output.read_bytes(), args[-1])
+    manifest["format"] = "teutonic-document-index-v1"
+    with pytest.raises(ValueError, match="SHA-256"):
+        pin_index_manifest(json.dumps(manifest).encode(), args[-1])

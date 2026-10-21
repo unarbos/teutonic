@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -32,7 +33,7 @@ class DashboardObjectStore:
             raise ValueError("dashboard bucket is required")
         if maximum_bytes < 1024:
             raise ValueError("dashboard maximum object size is too small")
-        if prefix not in {"", "competitions/math/", "competitions/code/", "competitions/text/"}:
+        if prefix and not re.fullmatch(r"competitions/(math|code|text|mix(?:0[1-9]|[1-9][0-9]))/", prefix):
             raise ValueError("invalid competition publication prefix")
         self.prefix = prefix
         self.client = client

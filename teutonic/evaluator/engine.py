@@ -75,8 +75,7 @@ from teutonic.evaluation.masking import (
     token_weights,
 )
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE, MAX_BATCH_SIZE
-from teutonic.evaluation.policy import apply_specialist_source_gate
-from teutonic.evaluator.cache_lock import cache_lock
+from teutonic.evaluator.cache_lock import cache_lock, document_index_cache_dir
 from teutonic.evaluator.document_index import DocumentIndexDownloadError, RangeDownloadError
 from teutonic.evaluator.document_masking import masked_model_inputs
 from teutonic.evaluator.module_cache import transformers_module_cache_lock
@@ -2282,10 +2281,6 @@ def bootstrap_verdict(
         delta_threshold=req.delta_threshold,
         scored_tokens=scored_tokens,
     )
-    apply_specialist_source_gate(
-        verdict, king_losses, challenger_losses, scored_tokens,
-        source_labels, req.dataset_sources, req.delta_threshold,
-    )
     verdict.update(
         scoring_policy=MASKED_POLICY_VERSION,
         document_eos_token_id=DOCUMENT_EOS_TOKEN_ID,
@@ -2585,6 +2580,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         on_phase({"phase": "setup_start"})
         cache_locks.enter_context(cache_lock(MODEL_CACHE_DIR))
         cache_locks.enter_context(cache_lock(SHARD_CACHE_DIR))
+        cache_locks.enter_context(cache_lock(document_index_cache_dir(SHARD_CACHE_DIR)))
         resolver = R2ArtifactResolver(MODEL_CACHE_DIR / "immutable-r2")
         on_phase({"phase": "artifact_materialization_start", "role": "king"})
         king_snapshot = resolver.resolve(protocol_request.king)

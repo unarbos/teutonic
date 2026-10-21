@@ -120,15 +120,18 @@ def main() -> int:
                         try:
                             result, dataset_result, active = service.publish_once()
                             rows = connection.execute(
-                                "SELECT competition, competition_key, has_king, eval_n, delta_threshold FROM control_plane.dashboard_competitions WHERE netuid=%s AND chain_generation=%s AND main_competition=%s ORDER BY competition_key",
+                                "SELECT competition, competition_key, has_king, eval_n, delta_threshold, active, reward_transition, document_tokens FROM control_plane.dashboard_competitions WHERE netuid=%s AND chain_generation=%s AND main_competition=%s ORDER BY competition_key",
                                 (netuid, repository.chain_generation, repository.competition),
                             ).fetchall()
                             index = []
-                            for name, key, has_king, eval_n, delta in rows:
+                            for name, key, has_king, eval_n, delta, enabled, transition, document_tokens in rows:
                                 prefix = "" if key == "main" else f"competitions/{key}/"
                                 index.append(
                                     {
                                         "competition": key,
+                                        "active": enabled,
+                                        "reward_transition": transition if key == "main" else None,
+                                        "document_tokens": document_tokens,
                                         "name": name,
                                         "has_king": has_king,
                                         "eval_n": eval_n,

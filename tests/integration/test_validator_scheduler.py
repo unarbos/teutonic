@@ -1745,6 +1745,56 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             0,
         )
 
+    def test_mix_crown_persists_replacement_once_and_stale_preview_rolls_back(self):
+        from psycopg.types.json import Jsonb
+
+        from teutonic.validator.repository import SchedulerInvariantError
+        self._stale_fixture("mix02")
+        state = {"version": "mix-replacement-v1",
+                 "main": {"id": "main", "hotkey": "genesis-hotkey", "weight": .6},
+                 "legacy": [{"id": "old", "hotkey": "old-winner", "weight": .4}],
+                 "mixes": {}, "evictions": []}
+        self.connection.execute("UPDATE control_plane.competitions SET reward_transition=%s WHERE competition_id=%s", (Jsonb(state), self.competition_id))
+        claim = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertEqual(claim.claimed_king_reign_id, str(self.genesis_reign_id))
+        promotion = self._accept_and_promote(claim)
+        hotkeys, weights = self.repository.promotion_weight_policy(str(promotion))
+        self.assertEqual(set(hotkeys), {"genesis-hotkey", "hotkey-3"})
+        self.assertAlmostEqual(dict(zip(hotkeys, weights))["genesis-hotkey"], .875)
+        self.assertAlmostEqual(dict(zip(hotkeys, weights))["hotkey-3"], .125)
+
+        def crown(values):
+            return self.repository.crown_promoted_winner(
+                str(promotion), now=NOW, crowned_finalized_block=110,
+                policy_hotkeys=hotkeys, policy_weights=values,
+                target_hotkeys=hotkeys, target_uids=[0, 3], normalized_weights=weights)
+
+        with self.assertRaises(SchedulerInvariantError):
+            crown([.5, .5])
+        self.assertEqual(self.connection.execute("SELECT reward_transition FROM control_plane.competitions WHERE competition_id=%s", (self.competition_id,)).fetchone()[0], state)
+        reign = crown(weights)
+        self.assertEqual(crown(weights), reign)
+        stored = self.connection.execute("SELECT reward_transition FROM control_plane.competitions WHERE competition_id=%s", (self.competition_id,)).fetchone()[0]
+        self.assertEqual(stored["legacy"], [])
+        self.assertEqual(len(stored["evictions"]), 1)
+        self.assertEqual(stored["mixes"], {"mix02": "hotkey-3"})
+        self.assertEqual(self.connection.execute("SELECT policy_weights FROM control_plane.weight_publications").fetchone()[0], list(weights))
+
+    def test_kingless_mix_requeues_if_latest_main_changes_before_crown(self):
+        self._stale_fixture("mix06")
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        promotion = self._accept_and_promote(first)
+        latest = self._replace_test_king(self.competition_id)
+        self.assertIsNone(self._crown_test_promotion(promotion))
+        second = self.repository.claim_next(now=NOW, policy=policy(max_attempts=1))
+        self.assertEqual(second.claimed_king_reign_id, latest)
+        self.assertEqual(self.repository.retry_attempt_number(second.evaluation_id), 1)
+
+    def test_retired_competition_is_not_claimed(self):
+        competition = self._stale_fixture("code")
+        self.connection.execute("UPDATE control_plane.competitions SET active=false WHERE competition_id=%s", (competition,))
+        self.assertIsNone(self.repository.claim_next(now=NOW, policy=policy()))
+
     def test_duplicate_verdict_and_crown_create_one_logical_outcome(self) -> None:
         claim = self.repository.claim_next(now=NOW, policy=policy())
         result = terminal_result(claim.request, accepted=True)

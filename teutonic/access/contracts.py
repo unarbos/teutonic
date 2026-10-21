@@ -16,7 +16,7 @@ _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _LEGACY_READY_SIGNAL = re.compile(
     r"^r2ready:v1\|(?P<registration_id>[0-9a-f]{64})\|(?P<manifest_sha256>[0-9a-f]{64})$"
 )
-_COMPACT_READY_SIGNAL = re.compile(r"^r2ready:v1:(?P<identity>[A-Za-z0-9_-]{86})(?::(?P<competition>main|math|code|text))?$")
+_COMPACT_READY_SIGNAL = re.compile(r"^r2ready:v1:(?P<identity>[A-Za-z0-9_-]{86})(?::(?P<competition>main|math|code|text|mix(?:0[1-9]|[1-9][0-9])))?$")
 
 
 def ready_signal_payload(registration_id: str, manifest_sha256: str, competition: str = "main") -> str:
@@ -25,7 +25,8 @@ def ready_signal_payload(registration_id: str, manifest_sha256: str, competition
         raise ValueError("ready signal registration ID must be a lowercase SHA-256 digest")
     if not _HEX_DIGEST.fullmatch(manifest_sha256):
         raise ValueError("ready signal manifest SHA-256 must be a lowercase digest")
-    if competition not in {"main", "math", "code", "text"}:
+    competition = competition.strip().lower()
+    if competition not in {"main", "math", "code", "text"} and not re.fullmatch(r"mix(?:0[1-9]|[1-9][0-9])", competition):
         raise ValueError("unknown competition")
     identity = bytes.fromhex(registration_id) + bytes.fromhex(manifest_sha256)
     encoded = base64.urlsafe_b64encode(identity).rstrip(b"=").decode("ascii")

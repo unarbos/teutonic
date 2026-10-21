@@ -1,8 +1,13 @@
 """Coordinate evaluator cache use with cleanup in other processes."""
 
 import fcntl
+import os
 from contextlib import contextmanager
 from pathlib import Path
+
+
+def document_index_cache_dir(shard_cache_dir: Path) -> Path:
+    return Path(os.environ.get("TEUTONIC_DOC_INDEX_CACHE_DIR", shard_cache_dir / "doc_index"))
 
 
 @contextmanager
