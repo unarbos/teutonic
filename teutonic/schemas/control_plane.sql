@@ -921,18 +921,21 @@ CREATE VIEW control_plane.dashboard_evaluation_history WITH (security_barrier='t
     e.dataset_version,
     e.completed_at,
         CASE
-            WHEN (p.state = 'promoted'::text) THEN u.model_name
+            WHEN (published_reign.reign_id IS NOT NULL OR p.state = 'promoted'::text) THEN u.model_name
             ELSE NULL::text
         END AS public_model_name,
         CASE
+            WHEN (published_reign.reign_id IS NOT NULL) THEN published_reign.model_digest
             WHEN (p.state = 'promoted'::text) THEN p.model_digest
             ELSE NULL::bpchar
         END AS public_model_digest,
         CASE
+            WHEN (published_reign.reign_id IS NOT NULL) THEN published_reign.public_prefix
             WHEN (p.state = 'promoted'::text) THEN p.public_prefix
             ELSE NULL::text
         END AS public_model_reference,
         CASE
+            WHEN (published_reign.reign_id IS NOT NULL) THEN 'winner'::text
             WHEN (p.state = 'promoted'::text) THEN p.disposition
             ELSE NULL::text
         END AS publication_disposition,
@@ -969,6 +972,11 @@ CREATE VIEW control_plane.dashboard_evaluation_history WITH (security_barrier='t
           WHERE ((baseline_identity.coldkey IS NULL) AND (snapshot.netuid = c.netuid) AND (snapshot.chain_generation = c.chain_generation) AND (assignment.hotkey = baseline.hotkey) AND snapshot.is_complete)
           ORDER BY snapshot.finalized_block DESC
          LIMIT 1) baseline_identity_fallback ON (true))
+     LEFT JOIN control_plane.king_reigns published_reign
+       ON published_reign.competition_id = e.competition_id
+      AND published_reign.model_digest = u.model_digest
+      AND published_reign.causing_evaluation_id = e.evaluation_id
+      AND published_reign.accepted_upload_id = e.upload_id
   WHERE (e.state = ANY (ARRAY['completed'::text, 'terminal_failure'::text]));
 
 

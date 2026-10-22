@@ -631,6 +631,9 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         self.assertEqual(history["publication_disposition"], "non_winner")
 
     def test_winner_identity_waits_for_committed_crown(self):
+        self._crown_winner()
+
+    def _crown_winner(self):
         digest = self.ids["model_digest"]
         self.owner.execute(
             "UPDATE control_plane.evaluations SET verdict = 'accepted' WHERE evaluation_id = %s",
@@ -704,6 +707,89 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         after_crown = self.repository.project(now=NOW)["history"][0]
         self.assertEqual(after_crown["model_identity"], "public")
         self.assertEqual(after_crown["publication_disposition"], "winner")
+
+    def test_crowned_history_survives_promotion_reuse_in_another_competition(self):
+        self._crown_winner()
+        original = self.repository.project(now=NOW)["history"][0]
+        competition, reign = self.owner.execute(
+            "SELECT competition_id, current_reign_id FROM control_plane.competitions"
+        ).fetchone()
+        other_competition = self.owner.execute(
+            """INSERT INTO control_plane.competitions (
+                netuid, chain_generation, name, competition_key, main_competition_id
+            ) VALUES (306, 'test', 'mix06', 'mix06', %s) RETURNING competition_id""",
+            (competition,),
+        ).fetchone()[0]
+        other_registration, other_hotkey = "6" * 64, "5" + "J" * 47
+        self.owner.execute(
+            """INSERT INTO control_plane.registrations (
+                registration_id, netuid, chain_generation, uid, hotkey,
+                first_seen_finalized_block, last_seen_finalized_block, model_prefix, state
+            ) VALUES (%s, 306, 'test', 8, %s, 900, 1000, %s, 'active')""",
+            (other_registration, other_hotkey, f"models/registrations/{other_registration}/"),
+        )
+        self.owner.execute(
+            """INSERT INTO control_plane.r2_parent_tokens (
+                registration_id, cloudflare_token_id, access_key_id, state, activated_at
+            ) VALUES (%s, 'other-parent-token', 'other-parent-access', 'active', %s)""",
+            (other_registration, NOW),
+        )
+        other_upload = self.owner.execute(
+            """INSERT INTO control_plane.uploads (
+                registration_id, chain_generation, signalling_hotkey, ready_payload,
+                ready_finalized_block, ready_extrinsic_index, ready_event_index,
+                manifest_sha256, manifest_signature_verified, model_digest, model_name,
+                object_count, total_size_bytes, state, ready_at
+            ) SELECT %s, chain_generation, %s, ready_payload,
+                     1002, 0, 0, repeat('6', 64), true, model_digest, 'owner/other-mix',
+                     object_count, total_size_bytes, 'promoted', ready_at
+                FROM control_plane.uploads WHERE upload_id = %s RETURNING upload_id""",
+            (other_registration, other_hotkey, self.ids["upload"]),
+        ).fetchone()[0]
+        self.owner.execute(
+            """INSERT INTO control_plane.verified_uploads (
+                upload_id, immutable_bucket, immutable_prefix, model_digest,
+                manifest_sha256, object_count, total_size_bytes, verified_at
+            ) SELECT %s, immutable_bucket, %s, model_digest,
+                     repeat('6', 64), object_count, total_size_bytes, verified_at
+                FROM control_plane.verified_uploads WHERE upload_id = %s""",
+            (other_upload, f"models/registrations/{other_registration}/", self.ids["upload"]),
+        )
+        other_evaluation = self.owner.execute(
+            """INSERT INTO control_plane.evaluations (
+                upload_id, competition_id, attempt_number, claimed_king_reign_id,
+                state, policy_version, code_version, dataset_version,
+                sampling_seed, bootstrap_seed, thresholds, verdict, verdict_summary, completed_at
+            ) SELECT %s, %s, 1, %s, state, policy_version, code_version, dataset_version,
+                     sampling_seed, bootstrap_seed, thresholds, 'accepted', verdict_summary, completed_at
+                FROM control_plane.evaluations WHERE evaluation_id = %s RETURNING evaluation_id""",
+            (other_upload, other_competition, reign, self.ids["evaluation"]),
+        ).fetchone()[0]
+        # persist_verdict reassigns the one promotion per digest to the latest win.
+        self.owner.execute(
+            "UPDATE control_plane.model_promotions SET evaluation_id = %s WHERE model_digest = %s",
+            (other_evaluation, self.ids["model_digest"]),
+        )
+        # Both current and historical crowns must remain public.
+        for ended in (False, True):
+            with self.subTest(ended=ended):
+                if ended:
+                    self.owner.execute(
+                        """UPDATE control_plane.king_reigns
+                              SET ended_at = %s, replacement_reason = 'accepted_challenger'
+                            WHERE reign_id = %s""",
+                        (NOW + timedelta(hours=1), reign),
+                    )
+                after = self.repository.project(now=NOW)["history"]
+                self.assertEqual(len(after), 1)
+                for key in ("model_identity", "challenger_repo", "challenger_digest",
+                            "model_reference", "publication_disposition"):
+                    self.assertEqual(after[0][key], original[key])
+                # The shared public artifact alone cannot reveal an uncrowned win.
+                other = self.repository.competition_scope("mix06").project(now=NOW)["history"]
+                self.assertEqual(len(other), 1)
+                self.assertEqual(other[0]["model_identity"], "hidden_until_promotion")
+                self.assertIsNone(other[0]["challenger_digest"])
 
     def test_dashboard_role_can_only_read_approved_views(self):
         approved = self.dashboard.execute(
