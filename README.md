@@ -168,7 +168,10 @@ Miners can select `MAIN` or `MIX01`–`MIX06` with
 selects MAIN. One ready submission per hotkey is shared across all competitions.
 Each competition uses an explicit category list, 20,000 windows, and 30M whole-document
 input tokens. Acceptance uses the whole mix's token-weighted bootstrap LCB.
-A kingless MIX challenges the latest MAIN king using its own mix and threshold.
+A kingless MIX challenges its fixed starting MAIN king using its own mix and threshold.
+The starting king is pinned once; later MAIN promotions do not move it. After its
+first win, the MIX challenges its own current king. `competitions.json` publishes
+the pinned model as `starting_king`.
 
 At cutover, current rewards are preserved. Each first MIX winner receives 12.5%
 and evicts one oldest legacy reward position; after all six MIXes have winners,

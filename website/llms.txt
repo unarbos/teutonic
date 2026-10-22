@@ -22,8 +22,9 @@ describe the RETIRED Teutonic-I protocol. Do not follow them.
 ## 0. TL;DR
 
 Teutonic is a king-of-the-hill LLM pretraining competition. Each competition
-has its own king once established; a kingless MIX uses the latest MAIN
-king as its baseline. You (a miner) train a better checkpoint (a
+has its own king once established; a kingless MIX uses a fixed starting MAIN
+king as its baseline. Later MAIN promotions do not move that starting point.
+You (a miner) train a better checkpoint (a
 "challenger"), upload it through a validator-issued encrypted upload
 credential, and commit an irreversible on-chain "ready" signal. The
 validator verifies your snapshot byte-for-byte against the chain contract
@@ -164,10 +165,13 @@ categories, proportional to token inventory. MIX06 contains all 25, adding
 and percentages rather than expanding retired competition names. MIX02 has no
 special sampling path and overlapping categories receive no extra weight.
 
-All MIXes start kingless. Their first challengers face the LATEST MAIN king using
-the selected MIX's own categories and threshold. If MAIN changes before coronation,
-the stale comparison is requeued against the latest MAIN king. After its first
-crown, a MIX uses its own latest king. All duels run sequentially. Merged models
+All MIXes start kingless. Their first challengers face a FIXED starting MAIN king
+using the selected MIX's own categories and threshold. This king is pinned once
+at initialization (or when the fixed-baseline migration is applied to an existing
+kingless MIX). MAIN promotions do not change this opponent, including during an
+evaluation or retry. Read `starting_king` in `competitions.json` for the pinned
+model digest and public model reference. After its first crown, a MIX uses its
+own current king. All duels run sequentially. Merged models
 may enter MAIN if they satisfy the same contract and beat MAIN's king.
 
 Uploading or losing does not change incentives. Cutover preserves MAIN's king
@@ -440,7 +444,8 @@ teutonic-miner ready --hotkey h0 --competition MIX02
    Your challenger's token-weighted loss improvement must have an LCB
    strictly above that competition's threshold: the release default is 0.0015
    nats per scored token for all seven competitions. For a kingless MIX, use
-   the latest MAIN king as the baseline and the selected MIX's evaluation mix.
+   its fixed `starting_king` from `competitions.json` as the baseline and the
+   selected MIX's evaluation mix. Do not substitute a newer MAIN king.
 2. MATCH THE EVAL DISTRIBUTION. Use the source and category mix in section
    6, the genesis tokenizer, masked 2,048-token windows and complete
    2,049-8,192-token documents. Prevent attention across document boundaries
@@ -621,7 +626,7 @@ the coldkey.
 - sample: 20,000 masked 2,048-token windows + ~30M input tokens from
   complete 2,049-8,192-token documents; alpha=0.001, B=10000, bootstrap seed 0
 - competitions: MAIN and MIX01–MIX06; explicit unique category lists and
-  sampling weights shared by windows and documents; kingless MIXes face latest MAIN
+  sampling weights shared by windows and documents; kingless MIXes face their fixed starting MAIN king
 - submission: `teutonic-miner register` -> `auth` -> `upload` -> `ready`
   (one shot per hotkey, forever)
 - contract: six genesis files byte-locked; weights only; <=250 GB

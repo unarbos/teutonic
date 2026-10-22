@@ -176,7 +176,7 @@ class ValidatorRepository:
                 SELECT c.competition_id, c.name AS competition_name, c.competition_key,
                        (SELECT ec.config_version FROM control_plane.evaluation_configs ec
                          WHERE ec.competition_id=c.competition_id AND ec.active) AS config_version,
-                       COALESCE(c.current_reign_id, main.current_reign_id) AS current_reign_id,
+                       COALESCE(c.current_reign_id, CASE WHEN c.competition_key LIKE 'mix%%' THEN c.starting_reign_id ELSE main.current_reign_id END) AS current_reign_id,
                        k.model_digest AS king_digest, k.public_bucket AS king_bucket,
                        k.public_prefix AS king_prefix,
                        u.upload_id, u.registration_id, u.model_digest, u.model_name,
@@ -199,7 +199,7 @@ class ValidatorRepository:
                   JOIN control_plane.competitions main
                     ON main.competition_id = COALESCE(c.main_competition_id, c.competition_id)
                   JOIN control_plane.king_reigns k
-                    ON k.reign_id = COALESCE(c.current_reign_id, main.current_reign_id)
+                    ON k.reign_id = COALESCE(c.current_reign_id, CASE WHEN c.competition_key LIKE 'mix%%' THEN c.starting_reign_id ELSE main.current_reign_id END)
                   JOIN LATERAL (
                       SELECT candidate.*
                         FROM control_plane.uploads candidate
@@ -484,7 +484,7 @@ class ValidatorRepository:
     def _split_baseline_changed(self, cursor, row) -> bool:
         current = cursor.execute(
             """SELECT c.competition_key,
-                      COALESCE(c.current_reign_id, main.current_reign_id) AS reign_id
+                      COALESCE(c.current_reign_id, CASE WHEN c.competition_key LIKE 'mix%%' THEN c.starting_reign_id ELSE main.current_reign_id END) AS reign_id
                  FROM control_plane.competitions c
                  JOIN control_plane.competitions main
                    ON main.competition_id = COALESCE(c.main_competition_id, c.competition_id)
@@ -1236,7 +1236,7 @@ class ValidatorRepository:
                 """
                 SELECT p.*, e.upload_id AS winning_upload_id,
                        winner_model.model_digest AS evaluated_model_digest, e.competition_id, e.claimed_king_reign_id, e.policy_version, e.verdict, e.attempt_number,
-                       u.signalling_hotkey, r.uid, c.current_reign_id, c.next_reign_number,
+                       u.signalling_hotkey, r.uid, c.current_reign_id, c.starting_reign_id, c.next_reign_number,
                        c.competition_key, main.competition_id AS main_id,
                        main.current_reign_id AS main_reign_id, main.reward_main_hotkeys, main.reward_transition
                   FROM control_plane.model_promotions p
@@ -1274,7 +1274,11 @@ class ValidatorRepository:
                     evaluation_id=row["evaluation_id"], reason=ownership_error, now=now,
                 )
                 return None
-            if (row["current_reign_id"] or row["main_reign_id"]) != row["claimed_king_reign_id"]:
+            baseline = row["current_reign_id"] or (
+                row["starting_reign_id"] if row["competition_key"].startswith("mix")
+                else row["main_reign_id"]
+            )
+            if baseline != row["claimed_king_reign_id"]:
                 if row["competition_key"] != "main":
                     self._requeue_stale(
                         cursor, {**row, "upload_id": row["winning_upload_id"]}, now=now

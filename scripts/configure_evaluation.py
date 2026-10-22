@@ -286,6 +286,10 @@ def main(argv=None) -> int:
                     }
                 )
             )
+            if key.startswith("mix") and not (
+                row and (row["current_reign_id"] or row["starting_reign_id"])
+            ) and main["current_reign_id"] is None:
+                raise ValueError("a kingless MIX requires a MAIN king to pin its starting point")
             if args.dry_run:
                 del current, config
                 continue
@@ -296,6 +300,13 @@ def main(argv=None) -> int:
                     "INSERT INTO control_plane.competitions(netuid,chain_generation,name,competition_key,main_competition_id,active) VALUES (%s,%s,%s,%s,%s,false) RETURNING competition_id",
                     (netuid, generation, name, key, main["competition_id"]),
                 ).fetchone()
+            if key.startswith("mix"):
+                connection.execute(
+                    """UPDATE control_plane.competitions SET starting_reign_id=%s
+                       WHERE competition_id=%s AND starting_reign_id IS NULL
+                         AND current_reign_id IS NULL""",
+                    (main["current_reign_id"], row["competition_id"]),
+                )
             connection.execute(
                 "INSERT INTO control_plane.evaluation_early_stopping_policies(competition_id) VALUES (%s) ON CONFLICT DO NOTHING",
                 (row["competition_id"],),

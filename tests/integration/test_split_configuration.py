@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="PostgreSQL integration
 LEGACY_CONFIG = tomllib.loads((Path(__file__).parents[1] / "fixtures/legacy_evaluation.toml").read_text())
 
 def cleanup(connection):
-    connection.execute("UPDATE control_plane.competitions SET current_reign_id=NULL,reward_reign_id=NULL WHERE netuid=998")
+    connection.execute("UPDATE control_plane.competitions SET current_reign_id=NULL,reward_reign_id=NULL,starting_reign_id=NULL WHERE netuid=998")
     connection.execute("DELETE FROM control_plane.weight_publications WHERE competition_id IN (SELECT competition_id FROM control_plane.competitions WHERE netuid=998)")
     connection.execute("DELETE FROM control_plane.king_reigns WHERE competition_id IN (SELECT competition_id FROM control_plane.competitions WHERE netuid=998)")
     connection.execute(
@@ -206,18 +206,35 @@ def test_initialize_dry_run_targeted_update_and_atomic_all(database, tmp_path):
     assert len(summaries) == 7
     assert all("shards" not in r["manifest_json"] and "_shards_zlib_base64" not in r["manifest_json"] for r in summaries)
     assert all(r["delta_threshold"] == chain_config.COMPETITION_DEFAULTS[r["competition_key"]]["delta_threshold"] for r in rows)
-    states = database.execute("SELECT competition_key,active,current_reign_id,reward_transition FROM control_plane.competitions WHERE netuid=998").fetchall()
+    states = database.execute("SELECT competition_key,active,current_reign_id,starting_reign_id,reward_transition FROM control_plane.competitions WHERE netuid=998").fetchall()
     assert {r["competition_key"] for r in states if r["active"]} == set(admin.COMPETITIONS)
     assert all(r["current_reign_id"] is None for r in states if r["competition_key"].startswith("mix"))
+    starting_king = next(r["current_reign_id"] for r in states if r["competition_key"] == "main")
+    assert all(r["starting_reign_id"] == starting_king for r in states if r["competition_key"].startswith("mix"))
     state = next(r["reward_transition"] for r in states if r["competition_key"] == "main")
     assert dict(zip(*replacement_rewards(state))) == pytest.approx({"latest-main": .6, "old-winner": .4})
     budgets = database.execute("SELECT ec.eval_n,ec.long_documents FROM control_plane.evaluation_configs ec JOIN control_plane.competitions c USING(competition_id) WHERE c.netuid=998 AND ec.active").fetchall()
     assert all(r["eval_n"] == 20000 and r["long_documents"]["token_budget"] == 30000000 for r in budgets)
+    database.execute(
+        "UPDATE control_plane.king_reigns SET ended_at=now(),replacement_reason='accepted_challenger' WHERE reign_id=%s",
+        (starting_king,),
+    )
+    new_main = database.execute(
+        """INSERT INTO control_plane.king_reigns (
+            competition_id,reign_number,model_digest,public_bucket,public_prefix,
+            hotkey,uid,crowned_at,crowned_finalized_block,previous_reign_id
+        ) SELECT competition_id,1,%s,'public',%s,'new-main',3,now(),101,reign_id
+            FROM control_plane.king_reigns WHERE reign_id=%s RETURNING reign_id,competition_id""",
+        ("c" * 64, f"models/sha256/{'c' * 64}/", starting_king),
+    ).fetchone()
+    database.execute("UPDATE control_plane.competitions SET current_reign_id=%s WHERE competition_id=%s",
+                     (new_main["reign_id"], new_main["competition_id"]))
     with patch.object(admin, "fetch_dataset_manifest", side_effect=AssertionError("unexpected network request")):
         assert run_admin("--competition", "MIX02", "--delta-threshold", ".004") == 0
     changed = policies(database)
     assert [r for r in changed if r["competition_key"] != "mix02"] == [r for r in rows if r["competition_key"] != "mix02"]
     assert next(r for r in changed if r["competition_key"] == "mix02")["delta_threshold"] == .004
+    assert database.execute("SELECT starting_reign_id FROM control_plane.competitions WHERE netuid=998 AND competition_key='mix02'").fetchone()["starting_reign_id"] == starting_king
 
 
 def test_reward_snapshot_orders_reigns_by_position_when_hotkeys_overlap(database):

@@ -768,10 +768,35 @@ and MIX02 has no special sampling path. DCLM is the single category `dclm-baseli
 
 Keep `TEUTONIC_COMPETITION` set to the existing MAIN database name on every control
 plane service. One validator, promotion worker, and weight publisher serve all seven.
-MIXes start without kings. A kingless MIX challenges the **latest MAIN king** using
-that MIX's categories and threshold. If MAIN changes before coronation, the old
-comparison is requeued against the latest MAIN without consuming a failure retry.
-After its first win, a MIX uses its own latest king.
+MIXes start without kings. A kingless MIX challenges a **fixed starting MAIN king**
+using that MIX's categories and threshold. `starting_reign_id` is pinned once at
+initialization; later MAIN promotions do not change claims, retries, or coronation
+checks for that MIX. After its first win, a MIX uses its own current king.
+Configuration refreshes preserve the pin. `competitions.json` includes a
+`starting_king` object with the pinned reign ID, model digest, public model reference,
+name, UID, and hotkey; a starting king does not count as a MIX king or receive MIX rewards.
+
+For an existing deployment that follows the latest MAIN, use the following update.
+Let active evaluations finish and their promotions commit, then stop the validator
+and promotion worker before pulling the new code. This prevents a MAIN promotion
+between selecting the fixed starting point and switching the workers to the new rule.
+
+```bash
+pm2 stop teutonic-validator teutonic-promotion-worker
+git pull --ff-only
+docker compose exec -T postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-psqlrc -v ON_ERROR_STOP=1' \
+  < scripts/db/pin_mix_starting_kings.sql
+pm2 restart ecosystem.config.js --only teutonic-validator,teutonic-promotion-worker,teutonic-dashboard-view --update-env
+```
+
+Only restart after the migration reports `COMMIT`. The migration prints the pins
+for active kingless MIXes and captures the MAIN king **at migration time**. Existing
+MIX kings and reward state are unchanged. Re-running the migration does not move
+existing pins. If the migration times out waiting for a lock, retry it before
+restarting. No new environment variables or evaluator restart are required for
+this baseline-selection change. Publish the updated `website/llms.txt` with the
+normal website documentation deployment so miners see the new rule.
 
 The cutover snapshots all currently rewarded positions and their durable shares;
 cutover itself changes no payouts. Legacy recipients are ordered by crowned block
@@ -916,6 +941,7 @@ mkdir -p /srv/teutonic-backups
 export TEUTONIC_BACKUP_FILE="/srv/teutonic-backups/pre-category-mixes-$(date +%Y%m%d-%H%M%S).dump"
 scripts/db/backup_control_plane.sh
 psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/add_category_competitions.sql
+psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/pin_mix_starting_kings.sql
 ```
 
 This migration assumes the existing split-competition and long-document migrations

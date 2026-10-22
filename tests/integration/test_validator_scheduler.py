@@ -438,6 +438,11 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             "INSERT INTO control_plane.competitions(netuid,chain_generation,name,competition_key,main_competition_id) VALUES (306,'test',%s,%s,%s) RETURNING competition_id",
             (key, key, self.competition_id),
         ).fetchone()[0]
+        if key.startswith("mix"):
+            self.connection.execute(
+                "UPDATE control_plane.competitions SET starting_reign_id=%s WHERE competition_id=%s",
+                (self.genesis_reign_id, competition),
+            )
         self.connection.execute(
             "INSERT INTO control_plane.evaluation_early_stopping_policies(competition_id,enabled,check_interval) VALUES (%s,true,8)",
             (competition,),
@@ -894,7 +899,7 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         return result
 
     def test_split_deferred_baselines_refresh_after_fallback_and_existing_king(self):
-        for key in ("code", "math", "text"):
+        for key in ("code", "math", "text", "mix06"):
             for own_king in (False, True):
                 with self.subTest(key=key, own_king=own_king):
                     competition = self._stale_fixture(key)
@@ -1780,15 +1785,84 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         self.assertEqual(stored["mixes"], {"mix02": "hotkey-3"})
         self.assertEqual(self.connection.execute("SELECT policy_weights FROM control_plane.weight_publications").fetchone()[0], list(weights))
 
-    def test_kingless_mix_requeues_if_latest_main_changes_before_crown(self):
-        self._stale_fixture("mix06")
+    def test_kingless_mix_keeps_starting_main_when_main_changes(self):
+        for phase in ("before_claim", "before_dispatch", "before_crown"):
+            with self.subTest(phase=phase):
+                competition = self._stale_fixture("mix06")
+                if phase == "before_claim":
+                    self._replace_test_king(self.competition_id)
+                first = self.repository.claim_next(now=NOW, policy=policy())
+                self.assertEqual(first.claimed_king_reign_id, str(self.genesis_reign_id))
+                if phase == "before_dispatch":
+                    self._replace_test_king(self.competition_id)
+                self.assertEqual(self.repository.dispatch_baseline(first.evaluation_id), "current")
+                promotion = self._accept_and_promote(first)
+                if phase == "before_crown":
+                    self._replace_test_king(self.competition_id)
+                crown = self._crown_test_promotion(promotion)
+                self.assertIsNotNone(crown)
+                row = self.connection.execute(
+                    "SELECT current_reign_id, starting_reign_id FROM control_plane.competitions WHERE competition_id=%s",
+                    (competition,),
+                ).fetchone()
+                self.assertEqual(str(row[0]), str(crown))
+                self.assertEqual(row[1], self.genesis_reign_id)
+                self.assertEqual(self.repository.retry_attempt_number(first.evaluation_id), 1)
+
+    def test_kingless_mix_retry_keeps_starting_main_after_main_promotion(self):
+        self._stale_fixture("mix04")
         first = self.repository.claim_next(now=NOW, policy=policy())
-        promotion = self._accept_and_promote(first)
-        latest = self._replace_test_king(self.competition_id)
-        self.assertIsNone(self._crown_test_promotion(promotion))
-        second = self.repository.claim_next(now=NOW, policy=policy(max_attempts=1))
-        self.assertEqual(second.claimed_king_reign_id, latest)
-        self.assertEqual(self.repository.retry_attempt_number(second.evaluation_id), 1)
+        self.repository.start_evaluating(
+            first.evaluation_id, evaluator_job_id=first.eval_id, now=NOW,
+            lease=timedelta(minutes=1),
+        )
+        self._replace_test_king(self.competition_id)
+        self.repository.fail_attempt(
+            first.evaluation_id, now=NOW, failure_class="transient_infrastructure",
+            public_error_code="worker_lost", retry=True, retry_delay=timedelta(0),
+        )
+        retry = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertEqual(retry.claimed_king_reign_id, first.claimed_king_reign_id)
+        self.assertEqual(retry.request["king"], first.request["king"])
+        self.assertEqual(self.repository.retry_attempt_number(retry.evaluation_id), 2)
+
+    def test_starting_king_migration_pins_current_main_once(self):
+        from pathlib import Path
+
+        competition = self._stale_fixture("mix01")
+        self.connection.execute(
+            "UPDATE control_plane.competitions SET starting_reign_id=NULL WHERE competition_id=%s",
+            (competition,),
+        )
+        already_crowned = self._create_specialist("mix05")
+        own_king = self._replace_test_king(already_crowned, "d" * 64)
+        before = self.connection.execute(
+            "SELECT current_reign_id, starting_reign_id FROM control_plane.competitions WHERE competition_id=%s",
+            (already_crowned,),
+        ).fetchone()
+        pinned = self._replace_test_king(self.competition_id)
+        script = (Path(__file__).parents[2] / "scripts/db/pin_mix_starting_kings.sql").read_text()
+        script = "\n".join(line for line in script.splitlines() if not line.startswith("\\"))
+        self.connection.execute(script)
+        self._replace_test_king(self.competition_id, "f" * 64)
+        self.connection.execute(script)
+        row = self.connection.execute(
+            "SELECT starting_reign_id::text,current_reign_id FROM control_plane.competitions WHERE competition_id=%s",
+            (competition,),
+        ).fetchone()
+        self.assertEqual(row, (pinned, None))
+        after = self.connection.execute(
+            "SELECT current_reign_id, starting_reign_id FROM control_plane.competitions WHERE competition_id=%s",
+            (already_crowned,),
+        ).fetchone()
+        self.assertEqual(after, before)
+        self.assertEqual(str(after[0]), own_king)
+        public = self.connection.execute(
+            "SELECT has_king, starting_king FROM control_plane.dashboard_competitions WHERE competition='mix01'",
+        ).fetchone()
+        self.assertFalse(public[0])
+        self.assertEqual(public[1]["reign_id"], pinned)
+        self.assertEqual(public[1]["model_digest"], "e" * 64)
 
     def test_retired_competition_is_not_claimed(self):
         competition = self._stale_fixture("code")
