@@ -455,6 +455,85 @@
         return datasetPresentation(Object.assign({}, manifest, { sources: sources }));
     }
 
+    function benchmarkTimestamp(value) {
+        var time = Date.parse(value || "");
+        return Number.isFinite(time) ? time : 0;
+    }
+
+    function benchmarkDetailsKey(competition, kingId, key) {
+        if (!/^(main|mix0[1-6])$/.test(competition || "") || !/^[A-Za-z0-9_-]+$/.test(kingId || "")) return null;
+        var prefix = competition === "main" ? "king-benchmark-daily" : "competitions/" + competition;
+        var expected = prefix + "/kings/" + kingId + "/results.json";
+        return !key || key === expected ? expected : null;
+    }
+
+    function benchmarkDetailRequests(source) {
+        var requests = new Map(), competition = source.competition;
+        function add(kingId, key) {
+            var path = benchmarkDetailsKey(competition, kingId, key);
+            if (path) requests.set(kingId, { kingId: kingId, key: path });
+        }
+        ((source.results || {}).kings || []).forEach(function(item) {
+            if (!item || typeof item !== "object") return;
+            if (String(item.status || (item.result || {}).status || "pending").toLowerCase() !== "completed") add(item.king_id || ((item.result || {}).model || {}).king_id, item.details_key);
+        });
+        var latest = source.latest || {}, model = latest.current_king || {}, result = latest.latest_result || {};
+        if (model.king_id && String(latest.status || "pending").toLowerCase() !== "completed") add(model.king_id);
+        if (result.model && String(result.status || "pending").toLowerCase() !== "completed") add(result.model.king_id);
+        return Array.from(requests.values());
+    }
+
+    function mergeBenchmarkSources(sources) {
+        var merged = new Map(), generatedAt = null;
+        sources.forEach(function(source) {
+            var competition = source.competition, payload = source.results || {}, latest = source.latest || {};
+            if (!/^(main|mix0[1-6])$/.test(competition || "")) throw new Error("unsupported benchmark competition");
+            if (source.results && (["teutonic-king-benchmark-all-results.v1", "teutonic-king-benchmark-all-results.v2"].indexOf(payload.schema_version) === -1 || !Array.isArray(payload.kings))) throw new Error("unsupported benchmark results schema");
+            var candidates = (payload.kings || []).filter(function(item) { return item && typeof item === "object"; });
+            var latestResult = latest.latest_result;
+            if (latestResult && latestResult.model && latestResult.model.king_id) candidates.unshift({ king_id: latestResult.model.king_id, updated_at: latestResult.generated_at || latest.generated_at, status: latestResult.status, result: latestResult });
+            var current = latest.current_king;
+            if (current && current.king_id && !candidates.some(function(item) { return (item.king_id || ((item.result || {}).model || {}).king_id) === current.king_id; })) candidates.push({ king_id: current.king_id, updated_at: latest.generated_at, status: latest.status || "pending", result: { model: current, benchmarks: [] } });
+            (source.details || []).forEach(function(item) {
+                var result = item.result || {};
+                if (!result.model || result.model.king_id !== item.king_id) throw new Error("benchmark detail king does not match request");
+                candidates.push({ king_id: item.king_id, details_key: item.details_key, updated_at: result.generated_at, status: result.status, result: result });
+            });
+            [payload.generated_at, latest.generated_at].forEach(function(value) { if (benchmarkTimestamp(value) > benchmarkTimestamp(generatedAt)) generatedAt = value; });
+            candidates.sort(function(a, b) { return benchmarkTimestamp(a.updated_at || (a.result || {}).generated_at) - benchmarkTimestamp(b.updated_at || (b.result || {}).generated_at); });
+            candidates.forEach(function(item) {
+                var result = item.result || {}, kingId = item.king_id || (result.model || {}).king_id;
+                if (!kingId) return;
+                var identity = competition + ":" + kingId, previous = merged.get(identity) || {}, oldResult = previous.result || {};
+                var benchmarks = new Map();
+                (oldResult.benchmarks || []).forEach(function(row) { if (row && typeof row.name === "string") benchmarks.set(benchmarkKey(row.name), row); });
+                (result.benchmarks || []).forEach(function(row) {
+                    if (!row || typeof row.name !== "string") return;
+                    var name = benchmarkKey(row.name), old = benchmarks.get(name);
+                    var oldScore = old && old.metric && old.metric.value != null && finiteNumber(old.metric.value, null) != null;
+                    var newScore = row.metric && row.metric.value != null && finiteNumber(row.metric.value, null) != null;
+                    if (oldScore && (!newScore || String(old.status).toLowerCase() === "completed" && String(row.status).toLowerCase() !== "completed")) return;
+                    benchmarks.set(name, Object.assign({}, old, row));
+                });
+                var model = Object.assign({}, oldResult.model, result.model);
+                model.competition_key = competition;
+                var next = Object.assign({}, previous, item, { competition: competition, king_id: kingId });
+                next.details_key = benchmarkDetailsKey(competition, kingId, item.details_key || previous.details_key);
+                next.result = Object.assign({}, oldResult, result, { model: model, benchmarks: Array.from(benchmarks.values()) });
+                merged.set(identity, next);
+                if (benchmarkTimestamp(next.updated_at) > benchmarkTimestamp(generatedAt)) generatedAt = next.updated_at;
+            });
+            var publicationCurrent = (payload.kings || []).find(function(item) { return item && ((item.result || {}).model || {}).is_current === true; });
+            var currentId = current && benchmarkTimestamp(latest.generated_at) >= benchmarkTimestamp(payload.generated_at) ? current.king_id : publicationCurrent ? publicationCurrent.king_id || ((publicationCurrent.result || {}).model || {}).king_id : null;
+            if (source.results || current) {
+                merged.forEach(function(item) { if (item.competition === competition) item.result.model.is_current = item.king_id === currentId; });
+            }
+        });
+        var kings = Array.from(merged.values());
+        return { schema_version: "teutonic-king-benchmark-all-results.v2", generated_at: generatedAt, kings: kings,
+            benchmark_result_count: kings.reduce(function(count, item) { return count + item.result.benchmarks.filter(function(row) { return row.metric && row.metric.value != null && finiteNumber(row.metric.value, null) != null; }).length; }, 0) };
+    }
+
     function benchmarkPresentation(payload, selectedKingId) {
         if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
             throw new Error("benchmark results must be an object");
@@ -470,6 +549,8 @@
             item = item || {};
             var result = item.result || {};
             var model = result.model || {};
+            var competition = item.competition || model.competition_key || model.competition || "main";
+            if (!/^mix0[1-6]$/.test(competition)) competition = "main";
             var byName = {};
             (Array.isArray(result.benchmarks) ? result.benchmarks : []).forEach(function(row) {
                 if (row && typeof row.name === "string") byName[benchmarkKey(row.name)] = row;
@@ -487,24 +568,36 @@
                     wallTimeSeconds: row.wall_time_s == null ? null : finiteNumber(row.wall_time_s, null)
                 };
             });
+            var kingId = String(item.king_id || model.king_id || "");
+            var scored = benchmarks.filter(function(row) { return row.status === "completed" && row.score != null; });
             return {
-                kingId: String(item.king_id || model.king_id || ""),
+                kingId: kingId,
+                key: competition + ":" + kingId,
+                competition: competition,
+                detailsKey: benchmarkDetailsKey(competition, kingId, item.details_key),
                 reignNumber: Math.max(0, Math.floor(finiteNumber(model.reign_number, 0))),
                 uid: Math.max(0, Math.floor(finiteNumber(model.uid, 0))),
                 hotkey: String(model.hotkey || ""),
                 modelRepo: String(model.model_repo || "Public king model"),
                 crownedAt: model.crowned_at || null,
+                timestamp: model.crowned_at || item.updated_at || result.generated_at || null,
                 current: model.is_current === true,
                 status: String(item.status || result.status || "pending").toLowerCase(),
                 updatedAt: item.updated_at || result.generated_at || null,
                 completed: benchmarks.filter(function(row) { return row.status === "completed"; }).length,
+                scored: scored.length,
+                average: scored.length === BENCHMARK_SPECS.length ? scored.reduce(function(sum, row) { return sum + row.score; }, 0) / scored.length : null,
+                partialAverage: scored.length ? scored.reduce(function(sum, row) { return sum + row.score; }, 0) / scored.length : null,
                 benchmarks: benchmarks
             };
         }).filter(function(king) { return king.kingId; }).sort(function(a, b) {
-            return b.reignNumber - a.reignNumber || String(b.crownedAt || "").localeCompare(String(a.crownedAt || ""));
+            return benchmarkTimestamp(b.timestamp) - benchmarkTimestamp(a.timestamp) || b.reignNumber - a.reignNumber || a.competition.localeCompare(b.competition) || a.kingId.localeCompare(b.kingId);
         });
-        var selected = kings.find(function(king) { return king.kingId === selectedKingId; })
-            || kings.find(function(king) { return king.current; }) || kings[0] || null;
+        var ranked = kings.filter(function(king) { return king.average != null; }).sort(function(a, b) { return b.average - a.average; });
+        var best = ranked[0] || null;
+        var partial = kings.slice().sort(function(a, b) { return b.scored - a.scored || (b.partialAverage == null ? -1 : b.partialAverage) - (a.partialAverage == null ? -1 : a.partialAverage); })[0];
+        var selected = kings.find(function(king) { return king.key === selectedKingId || king.kingId === selectedKingId; })
+            || best || partial || null;
         var series = BENCHMARK_SPECS.map(function(spec) {
             return {
                 name: spec.name,
@@ -512,7 +605,9 @@
                     var benchmark = king.benchmarks.find(function(row) { return row.name === spec.name; });
                     return {
                         kingId: king.kingId,
+                        competition: king.competition,
                         reignNumber: king.reignNumber,
+                        timestamp: king.timestamp,
                         score: benchmark ? benchmark.score : null,
                         status: benchmark ? benchmark.status : "pending",
                         current: king.current
@@ -526,6 +621,7 @@
             benchmarkResultCount: Math.max(0, Math.floor(finiteNumber(payload.benchmark_result_count, 0))),
             kings: kings,
             selected: selected,
+            best: best,
             benchmarkCount: BENCHMARK_SPECS.length,
             series: series
         };
@@ -550,6 +646,9 @@
         graphPointRadius: graphPointRadius,
         lossChartPresentation: lossChartPresentation,
         datasetChangePresentation: datasetChangePresentation,
+        benchmarkDetailsKey: benchmarkDetailsKey,
+        benchmarkDetailRequests: benchmarkDetailRequests,
+        mergeBenchmarkSources: mergeBenchmarkSources,
         benchmarkPresentation: benchmarkPresentation
     };
 });

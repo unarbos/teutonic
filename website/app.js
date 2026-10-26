@@ -2,7 +2,8 @@
   "use strict";
   var ENDPOINT = "/dashboard.json";
   var DATASET_MANIFEST_URL = "/competitions/mix06/datasets/manifest.json";
-  var BENCHMARK_RESULTS_URL = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev/king-benchmark-daily/all-kings/results.json";
+  var BENCHMARK_STORAGE_BASE = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev/";
+  var BENCHMARK_COMPETITIONS = ["main", "mix01", "mix02", "mix03", "mix04", "mix05", "mix06"];
   var MODEL_STORAGE_BASE = "https://pub-0821d4e196224864af220294345fd141.r2.dev/";
   var POLL_MS = 15000;
   var DATASET_POLL_MS = 60000;
@@ -11,11 +12,14 @@
   var mainQueueFailed = false;
   var benchmarkPayload = null;
   var benchmarkHistoryVisible = false;
+  var benchmarkSources = new Map();
+  var benchmarkLoading = false;
   var historyShowErrors = false;
   var historyCompetition = "all";
   var historyExpandedDetails = new Set();
   var numberFormats = new Map();
   var dateFormat = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  var shortDateFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit" });
   var pendingJson = new Map();
   var sharedRenderFrame = null;
   var historyRenderTimer = null;
@@ -32,6 +36,7 @@
   function usd(value) { var n = finite(value); return n == null ? "--" : "$" + n.toFixed(2); }
   function short(value, head, tail) { var s = String(value || ""); head = head || 9; tail = tail || 5; return s.length > head + tail + 1 ? s.slice(0, head) + "…" + s.slice(-tail) : (s || "--"); }
   function date(value) { if (!value) return "--"; var d = new Date(value); return Number.isNaN(d.getTime()) ? "--" : dateFormat.format(d); }
+  function shortDate(value) { if (!value) return "--"; var d = new Date(value); return Number.isNaN(d.getTime()) ? "--" : shortDateFormat.format(d); }
   function age(value) { if (!value) return "--"; var seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return seconds + "S AGO"; if (seconds < 3600) return Math.floor(seconds / 60) + "M AGO"; if (seconds < 86400) return Math.floor(seconds / 3600) + "H AGO"; return Math.floor(seconds / 86400) + "D AGO"; }
   function identity(row) { if (!row) return "--"; if (row.model_identity === "hidden_until_promotion") return TeutonicDashboardV1.HIDDEN; return row.challenger_repo || row.model_repo || (row.model_digest ? "SHA256 " + short(row.model_digest, 10, 4) : "PUBLIC MODEL"); }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
@@ -124,19 +129,19 @@
     if (subtext) { var sub = document.createElement("span"); sub.className = "dataset-sub"; sub.textContent = subtext; td.appendChild(sub); }
     row.appendChild(td);
   }
-  function fetchJson(url) {
+  function fetchJson(url, cacheMode) {
     if (pendingJson.has(url)) return pendingJson.get(url);
     var cacheable = /\/datasets\/manifest\.json$|\/results\.json$/.test(url);
-    var request = fetch(url, { cache: cacheable ? "default" : "no-cache" }).then(function (response) {
+    var request = fetch(url, { cache: cacheMode || (cacheable ? "default" : "no-cache"), credentials: "omit" }).then(function (response) {
       if (!response.ok) throw new Error("HTTP " + response.status);
       return response.json();
     }).finally(function () { pendingJson.delete(url); });
     pendingJson.set(url, request);
     return request;
   }
-  async function fetchFirstJson(urls) {
+  async function fetchFirstJson(urls, cacheMode) {
     var lastError;
-    for (var i = 0; i < urls.length; i++) { try { return await fetchJson(urls[i]); } catch (error) { lastError = error; } }
+    for (var i = 0; i < urls.length; i++) { try { return await fetchJson(urls[i], cacheMode); } catch (error) { lastError = error; } }
     throw lastError || new Error("no JSON endpoint available");
   }
   function benchmarkSparkline(series) {
@@ -149,10 +154,11 @@
     function x(index) { return points.length === 1 ? W / 2 : left + index / (points.length - 1) * (W - left - right); }
     function y(value) { return top + (max - value) / (max - min) * (H - top - bottom); }
     if (points.length > 1) svg.appendChild(node("polyline", { points: points.map(function(point, index) { return x(index).toFixed(1) + "," + y(point.score).toFixed(1); }).join(" "), class: "bench-sparkline-line" }));
-    var pointRadius = TeutonicDashboardV1.graphPointRadius(points.length, W - left - right, 1, 2.7);
-    points.forEach(function(point, index) { var radius = point.current ? Math.min(3.5, pointRadius + 0.8) : pointRadius, dot = node("circle", { cx: x(index).toFixed(1), cy: y(point.score).toFixed(1), r: radius.toFixed(2), class: point.current ? "bench-sparkline-point current" : "bench-sparkline-point" }), title = node("title"); title.textContent = "REIGN #" + point.reignNumber + " · " + percent(point.score); dot.appendChild(title); svg.appendChild(dot); });
-    var first = node("text", { x: left, y: H - 3, class: "bench-sparkline-label", "text-anchor": "start" }); first.textContent = "R" + points[0].reignNumber; svg.appendChild(first);
-    if (points.length > 1) { var last = node("text", { x: W - right, y: H - 3, class: "bench-sparkline-label", "text-anchor": "end" }); last.textContent = "R" + points[points.length - 1].reignNumber; svg.appendChild(last); }
+    // Leave room for each marker's outline, including when the SVG scales down.
+    var spacing = points.length > 1 ? (W - left - right) / (points.length - 1) : Infinity, pointRadius = Math.min(2.7, spacing * .24);
+    points.forEach(function(point, index) { var dot = node("circle", { cx: x(index).toFixed(3), cy: y(point.score).toFixed(3), r: pointRadius.toFixed(3), class: "bench-sparkline-point", "data-competition": point.competition, "data-date": point.timestamp || "" }), title = node("title"); dot.style.strokeWidth = (pointRadius * .6).toFixed(3); title.textContent = date(point.timestamp) + " · " + point.competition.toUpperCase() + " · REIGN #" + point.reignNumber + " · " + percent(point.score); dot.appendChild(title); svg.appendChild(dot); });
+    var first = node("text", { x: left, y: H - 3, class: "bench-sparkline-label", "text-anchor": "start" }); first.textContent = shortDate(points[0].timestamp); svg.appendChild(first);
+    if (points.length > 1) { var last = node("text", { x: W - right, y: H - 3, class: "bench-sparkline-label", "text-anchor": "end" }); last.textContent = shortDate(points[points.length - 1].timestamp); svg.appendChild(last); }
     return svg;
   }
   function renderBenchmarkHistory(view) {
@@ -160,26 +166,76 @@
     panel.hidden = !benchmarkHistoryVisible; toggle.textContent = benchmarkHistoryVisible ? "HIDE HISTORY" : "SHOW HISTORY"; toggle.setAttribute("aria-pressed", benchmarkHistoryVisible ? "true" : "false");
     clear(graphs); clear(body); if (!benchmarkHistoryVisible) return;
     view.series.forEach(function(series) { var tile = document.createElement("article"), heading = document.createElement("div"), name = document.createElement("strong"), latest = document.createElement("span"), lastPoint = series.points.length ? series.points[series.points.length - 1] : null; tile.className = "bench-history-graph"; heading.className = "bench-history-graph-head"; name.textContent = series.name; latest.textContent = lastPoint ? "LATEST " + percent(lastPoint.score) : "NO SCORES"; heading.appendChild(name); heading.appendChild(latest); tile.appendChild(heading); tile.appendChild(benchmarkSparkline(series)); graphs.appendChild(tile); });
-    if (!view.kings.length) return emptyRow(body, view.series.length + 3, "NO BENCHMARK HISTORY YET");
-    view.kings.forEach(function(king) { var row = document.createElement("tr"), byName = {}; if (king.current) row.className = "bench-history-current"; king.benchmarks.forEach(function(benchmark) { byName[benchmark.name] = benchmark; }); cell(row, "#" + king.reignNumber); cell(row, king.uid); cell(row, king.modelRepo, "", king.hotkey); view.series.forEach(function(series) { var benchmark = byName[series.name]; cell(row, benchmark && benchmark.score != null ? percent(benchmark.score) : "--", "mono", benchmark ? benchmark.status.toUpperCase() : "PENDING"); }); body.appendChild(row); });
+    if (!view.kings.length) return emptyRow(body, view.series.length + 6, "NO BENCHMARK HISTORY YET");
+    var fragment = document.createDocumentFragment();
+    view.kings.forEach(function(king) {
+      var row = document.createElement("tr"), byName = {};
+      row.dataset.king = king.key; row.dataset.competition = king.competition; row.dataset.date = king.timestamp || "";
+      if (king.current) row.classList.add("bench-history-current");
+      if (view.best && king.key === view.best.key) row.classList.add("bench-history-best");
+      king.benchmarks.forEach(function(benchmark) { byName[benchmark.name] = benchmark; });
+      cell(row, king.competition.toUpperCase()); cell(row, date(king.timestamp)); cell(row, "#" + king.reignNumber); cell(row, king.uid);
+      var modelCell = cell(row, "", "", king.hotkey);
+      if (king.detailsKey) { var link = document.createElement("a"); link.textContent = king.modelRepo; link.href = BENCHMARK_STORAGE_BASE + king.detailsKey; link.target = "_blank"; link.rel = "noopener"; modelCell.appendChild(link); }
+      else modelCell.textContent = king.modelRepo;
+      cell(row, percent(king.average), "mono bench-average", king.average == null ? king.scored + "/" + view.benchmarkCount + " SCORED · AVERAGE REQUIRES ALL BENCHMARKS" : "MEAN OF " + view.benchmarkCount + " COMPLETED BENCHMARKS");
+      view.series.forEach(function(series) { var benchmark = byName[series.name]; cell(row, benchmark && benchmark.score != null ? percent(benchmark.score) : "--", "mono", benchmark ? benchmark.status.toUpperCase() : "PENDING"); });
+      fragment.appendChild(row);
+    });
+    body.appendChild(fragment);
   }
   function renderBenchmarks(payload) {
     var view = TeutonicDashboardV1.benchmarkPresentation(payload), selected = view.selected, meta = el("benchmark-meta"), grid = el("benchmark-grid");
     benchmarkPayload = payload;
     meta.textContent = view.kingCount + (view.kingCount === 1 ? " KING" : " KINGS") + " · " + view.benchmarkResultCount + " RESULTS · " + age(view.generatedAt);
     renderBenchmarkHistory(view);
-    if (!selected) { text("benchmark-model", "NO KING BENCHMARK RESULTS YET"); text("benchmark-identity", "THE DAILY BENCHMARK QUEUE HAS NOT PUBLISHED A RESULT"); clear(grid); var none = document.createElement("p"); none.className = "bench-empty"; none.textContent = "WAITING FOR THE FIRST KING RESULT"; grid.appendChild(none); return; }
+    if (!selected) { text("benchmark-model", "NO KING BENCHMARK RESULTS YET"); text("benchmark-identity", "NO PUBLIC KING RESULT HAS BEEN PUBLISHED"); clear(grid); var none = document.createElement("p"); none.className = "bench-empty"; none.textContent = "WAITING FOR THE FIRST KING RESULT"; grid.appendChild(none); return; }
     text("benchmark-model", selected.modelRepo);
-    var identityNode = el("benchmark-identity"); clear(identityNode); identityNode.appendChild(document.createTextNode("REIGN #" + selected.reignNumber + " · UID " + selected.uid + " · ")); identityNode.appendChild(hotkeyLink(selected.hotkey, 12, 6)); identityNode.appendChild(document.createTextNode(" · " + selected.completed + "/" + view.benchmarkCount + " COMPLETE · UPDATED " + age(selected.updatedAt)));
+    var identityNode = el("benchmark-identity"), selectionLabel = selected.average == null ? "BEST AVAILABLE · AWAITING A COMPLETE KING" : "BEST AVG " + percent(selected.average);
+    clear(identityNode); identityNode.appendChild(document.createTextNode(selectionLabel + " · " + selected.competition.toUpperCase() + " · REIGN #" + selected.reignNumber + " · UID " + selected.uid + " · ")); identityNode.appendChild(hotkeyLink(selected.hotkey, 12, 6)); identityNode.appendChild(document.createTextNode(" · " + selected.scored + "/" + view.benchmarkCount + " SCORED · UPDATED " + age(selected.updatedAt)));
+    el("benchmark-results-link").href = selected.detailsKey ? BENCHMARK_STORAGE_BASE + selected.detailsKey : BENCHMARK_STORAGE_BASE + "king-benchmark-daily/all-kings/results.json";
+    grid.dataset.king = selected.key;
     clear(grid);
     selected.benchmarks.forEach(function (benchmark) { var card = document.createElement("article"), name = document.createElement("div"), score = document.createElement("div"), status = document.createElement("div"), state = document.createElement("span"), shots = document.createElement("span"); card.className = "bench-card"; card.dataset.status = benchmark.status; name.className = "bench-name"; name.textContent = benchmark.name; score.className = "bench-score"; score.textContent = benchmark.score == null ? "--" : percent(benchmark.score); score.title = [benchmark.metric, finite(benchmark.wallTimeSeconds) == null ? "" : metric(benchmark.wallTimeSeconds, 0) + " seconds"].filter(Boolean).join(" · "); status.className = "bench-status"; state.textContent = benchmark.status.replaceAll("_", " "); shots.textContent = benchmark.fewshot + "-SHOT"; status.appendChild(state); status.appendChild(shots); card.appendChild(name); card.appendChild(score); card.appendChild(status); grid.appendChild(card); });
   }
+  function loadBenchmarkJson(key) {
+    return fetchFirstJson([BENCHMARK_STORAGE_BASE + key, "/benchmarks/" + key], "no-cache");
+  }
+  async function loadCompetitionBenchmarks(competition) {
+    var previous = benchmarkSources.get(competition) || {}, prefix = competition === "main" ? "king-benchmark-daily" : "competitions/" + competition;
+    var source = Object.assign({}, previous, { competition: competition, warnings: [] });
+    var publications = await Promise.allSettled([loadBenchmarkJson(prefix + "/all-kings/results.json"), loadBenchmarkJson(prefix + "/all-kings/latest.json")]);
+    if (publications[0].status === "fulfilled") {
+      try { TeutonicDashboardV1.benchmarkPresentation(publications[0].value); source.results = publications[0].value; }
+      catch (error) { source.warnings.push("HISTORY"); }
+    } else source.warnings.push("HISTORY");
+    if (publications[1].status === "fulfilled" && publications[1].value.schema_version === "teutonic-king-benchmark-index.v1") source.latest = publications[1].value;
+    else source.warnings.push("LIVE UPDATES");
+    var requests = TeutonicDashboardV1.benchmarkDetailRequests(source);
+    var details = await Promise.allSettled(requests.map(function(request) { return loadBenchmarkJson(request.key); }));
+    var knownDetails = new Map((previous.details || []).map(function(item) { return [item.king_id, item]; }));
+    details.forEach(function(result, index) {
+      var request = requests[index];
+      if (result.status === "fulfilled" && result.value.model && result.value.model.king_id === request.kingId && Array.isArray(result.value.benchmarks)) knownDetails.set(request.kingId, { king_id: request.kingId, details_key: request.key, result: result.value });
+      else source.warnings.push("RUNNING RESULT");
+    });
+    source.details = Array.from(knownDetails.values());
+    benchmarkSources.set(competition, source);
+  }
   async function loadBenchmarks() {
+    if (benchmarkLoading) return;
+    benchmarkLoading = true;
     try {
-      var payload = await fetchFirstJson(["/benchmarks/results.json", BENCHMARK_RESULTS_URL]);
-      renderBenchmarks(payload);
+      await Promise.all(BENCHMARK_COMPETITIONS.map(loadCompetitionBenchmarks));
+      var sources = Array.from(benchmarkSources.values());
+      if (!sources.some(function(source) { return source.results || source.latest; })) throw new Error("no public benchmark feed is available");
+      renderBenchmarks(TeutonicDashboardV1.mergeBenchmarkSources(sources));
+      var warnings = sources.filter(function(source) { return source.warnings.length; }).map(function(source) { return source.competition.toUpperCase() + " " + source.warnings.join(" / "); });
+      var status = el("benchmark-feed-status"); status.hidden = !warnings.length;
+      status.textContent = warnings.length ? "PUBLIC UPDATES UNAVAILABLE: " + warnings.join(" · ") + ". SHOWING AVAILABLE PUBLISHED RESULTS." : "";
     }
     catch (error) { if (!benchmarkPayload) { text("benchmark-meta", "BENCHMARK RESULTS UNAVAILABLE"); clear(el("benchmark-grid")); var empty = document.createElement("p"); empty.className = "bench-empty"; empty.textContent = "LIVE BENCHMARK RESULTS COULD NOT BE LOADED"; el("benchmark-grid").appendChild(empty); } }
+    finally { benchmarkLoading = false; }
   }
   function renderDatasetManifest(manifest) {
     var view = TeutonicDashboardV1.mainDatasetPresentation(manifest), summary = [view.rows.length + (view.rows.length === 1 ? " DATASET" : " DATASETS")];

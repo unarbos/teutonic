@@ -76,6 +76,32 @@ def test_origin_gzip_and_manifest_freshness(monkeypatch, clock):
     assert upstream.call_count == 1
 
 
+@pytest.mark.parametrize("competition,prefix", [
+    ("main", "king-benchmark-daily"),
+    ("mix01", "competitions/mix01"),
+    ("mix06", "competitions/mix06"),
+])
+@pytest.mark.parametrize("suffix,ttl", [
+    ("all-kings/results.json", 60),
+    ("all-kings/latest.json", 5),
+    ("kings/reign-000001-uid-42/results.json", 5),
+])
+def test_public_benchmark_paths_and_running_refresh(competition, prefix, suffix, ttl):
+    path = f"/benchmarks/{prefix}/{suffix}"
+    assert preview.public_data_url(path) == preview.PUBLIC_BENCHMARK_ORIGIN + f"/{prefix}/{suffix}"
+    assert preview.feed_cache_seconds(path) == ttl
+
+
+@pytest.mark.parametrize("path", [
+    "/benchmarks/competitions/mix07/all-kings/results.json",
+    "/benchmarks/competitions/mix01/kings/../private/results.json",
+    "/benchmarks/competitions/mix01/kings/king/model.bin",
+    "/benchmarks/https://other.example/results.json",
+])
+def test_benchmark_proxy_rejects_unknown_files(path):
+    assert preview.public_data_url(path) is None
+
+
 def test_concurrent_visitors_share_one_upstream_request(monkeypatch, clock):
     upstream = Mock(side_effect=lambda *args, **kwargs: response(b'{"competitions":[]}'))
     monkeypatch.setattr(preview, "urlopen", upstream)

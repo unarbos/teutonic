@@ -365,4 +365,5 @@ assert.strictEqual(datasetChanges[0].fromLabel, "mix-v1");
 assert.strictEqual(datasetChanges[0].toLabel, "mix-v2");
 assert.ok(datasetChanges[0].changes.some((change) => change.includes("EVAL SAMPLES")));
 assert.ok(datasetChanges[0].changes.some((change) => change.includes("fixture CONTENT")));
+require("./benchmark_sources.test.js");
 console.log("dashboard-v1 representative render states passed");

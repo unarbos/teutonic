@@ -7,7 +7,7 @@
   <title>Teutonic Dashboard</title>
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css?v=dataset-alignment-v1">
-  <link rel="stylesheet" href="benchmark-layout.css">
+  <link rel="stylesheet" href="benchmark-layout.css?v=all-kings-v3">
 </head>
 <body>
   <main class="page">
@@ -80,16 +80,17 @@
 
     <section class="bench-panel" aria-labelledby="benchmark-heading">
       <div class="bench-head">
-        <h2 id="benchmark-heading">MAIN KING BENCHMARKS</h2>
+        <h2 id="benchmark-heading">KING BENCHMARKS</h2>
         <span class="bench-actions">
           <span id="benchmark-meta" class="bench-meta">LOADING RESULTS</span>
           <button id="benchmark-history-toggle" type="button" aria-pressed="false">SHOW HISTORY</button>
         </span>
       </div>
       <div class="bench-selected">
-        <div><strong id="benchmark-model">WAITING FOR BENCHMARK DATA</strong><span id="benchmark-identity">ALL-KINGS DAILY RESULTS</span></div>
+        <div><strong id="benchmark-model">WAITING FOR BENCHMARK DATA</strong><span id="benchmark-identity">BEST AVERAGE ACROSS MAIN AND MIX01–MIX06</span></div>
         <a id="benchmark-results-link" href="/benchmarks/results.json" target="_blank" rel="noopener">RESULTS.JSON</a>
       </div>
+      <p id="benchmark-feed-status" class="bench-feed-status" role="status" hidden></p>
       <div id="benchmark-grid" class="bench-grid" aria-live="polite">
         <p class="bench-empty">LOADING LIVE KING BENCHMARKS</p>
       </div>
@@ -97,7 +98,7 @@
         <div id="benchmark-history-graphs" class="bench-history-graphs" aria-label="Benchmark score history graphs"></div>
         <div class="table-wrap">
           <table class="bench-history-table">
-            <thead><tr><th>REIGN</th><th>UID</th><th>MODEL</th><th>BBH COT</th><th>MMLU</th><th>HELLASWAG</th><th>WINOGRANDE</th><th>GSM8K</th><th>PIQA</th><th>ARC-C</th><th>ARC-E</th><th>GPQA DIAMOND</th><th>MATH-500</th><th>HUMANEVAL-SANITIZED</th><th>MBPP-SANITIZED</th></tr></thead>
+            <thead><tr><th>COMPETITION</th><th title="Newest first">DATE</th><th>REIGN</th><th>UID</th><th>MODEL</th><th title="Mean across all 12 completed benchmarks">AVG</th><th>BBH COT</th><th>MMLU</th><th>HELLASWAG</th><th>WINOGRANDE</th><th>GSM8K</th><th>PIQA</th><th>ARC-C</th><th>ARC-E</th><th>GPQA DIAMOND</th><th>MATH-500</th><th>HUMANEVAL-SANITIZED</th><th>MBPP-SANITIZED</th></tr></thead>
             <tbody id="benchmark-history-body"></tbody>
           </table>
         </div>
@@ -171,7 +172,7 @@
 
     <footer><span>TEUTONIC / DASHBOARD V1</span><span id="last-refresh">LAST REFRESH --</span></footer>
   </main>
-  <script src="dashboard-v1.js?v=performance-v5"></script>
-  <script src="app.js?v=performance-v19"></script>
+  <script src="dashboard-v1.js?v=all-kings-v7"></script>
+  <script src="app.js?v=all-kings-v22"></script>
 </body>
 </html>

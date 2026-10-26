@@ -22,14 +22,14 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_DASHBOARD_ORIGIN = "https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev"
-PUBLIC_BENCHMARK_URL = (
-    "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev"
-    "/king-benchmark-daily/all-kings/results.json"
-)
+PUBLIC_BENCHMARK_ORIGIN = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev"
+PUBLIC_BENCHMARK_URL = PUBLIC_BENCHMARK_ORIGIN + "/king-benchmark-daily/all-kings/results.json"
 
 
 def feed_cache_seconds(path: str) -> int:
-    if path.endswith("/manifest.json") or path == "/benchmarks/results.json":
+    if path.startswith("/benchmarks/"):
+        return 5 if path.endswith("/latest.json") or "/kings/" in path else 60
+    if path.endswith("/manifest.json"):
         return 60
     return 15 if path == "/competitions.json" else 5
 
@@ -100,6 +100,11 @@ def public_data_url(path: str) -> str | None:
     """Proxy only known public feeds; all website assets come from the checkout."""
     if path == "/benchmarks/results.json":
         return PUBLIC_BENCHMARK_URL
+    if re.fullmatch(
+        r"/benchmarks/(?:king-benchmark-daily|competitions/mix0[1-6])/"
+        r"(?:all-kings/(?:results|latest)|kings/[A-Za-z0-9_-]+/results)\.json", path
+    ):
+        return PUBLIC_BENCHMARK_ORIGIN + path.removeprefix("/benchmarks")
     if path in {"/dashboard.json", "/competitions.json", "/datasets/manifest.json"}:
         return PUBLIC_DASHBOARD_ORIGIN + path
     if re.fullmatch(

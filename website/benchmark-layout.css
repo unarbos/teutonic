@@ -3,6 +3,15 @@
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
+.bench-feed-status { position:relative; margin:0 0 10px; color:var(--muted); font:10px/1.5 var(--mono); }
+.bench-feed-status[hidden] { display:none; }
+.bench-history-table a { color:var(--ink); text-decoration:none; border-bottom:1px dotted var(--muted); }
+.bench-history-best .bench-average { font-weight:700; }
+.bench-history-best { background:var(--wash); }
+
+.bench-sparkline-line { stroke-width:1; }
+.bench-sparkline-point { vector-effect:none; }
+
 @media (max-width: 640px) {
   .bench-grid,
   .bench-history-graphs {
