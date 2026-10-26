@@ -272,11 +272,11 @@
             var source = group && typeof group.source === "string" && group.source.trim()
                 ? group.source.trim() : "dataset";
             var rawNames = group && Array.isArray(group.names) ? group.names : [];
-            var names = [];
+            var names = [], seen = new Set();
             rawNames.forEach(function(value) {
                 if (typeof value !== "string" || !value.trim()) return;
                 var name = value.trim();
-                if (names.indexOf(name) === -1) names.push(name);
+                if (!seen.has(name)) { seen.add(name); names.push(name); }
             });
             return { source: source, names: names };
         }).filter(function(group) { return group.names.length > 0; });

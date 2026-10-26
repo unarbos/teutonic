@@ -14,17 +14,24 @@
   var historyShowErrors = false;
   var historyCompetition = "all";
   var historyExpandedDetails = new Set();
+  var numberFormats = new Map();
+  var dateFormat = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  var pendingJson = new Map();
+  var sharedRenderFrame = null;
+  var historyRenderTimer = null;
+  var smoothingCache = new Map();
+  var mainPolling = false;
   var smoothMode = localStorage.getItem("smoothMode") || "lowess";
   if (smoothMode !== "lowess" && smoothMode !== "normal") smoothMode = "lowess";
   function el(id) { return document.getElementById(id); }
   function text(id, value) { el(id).textContent = value == null || value === "" ? "--" : String(value); }
   function finite(value) { if (value == null || value === "") return null; var n = Number(value); return Number.isFinite(n) ? n : null; }
-  function number(value, digits) { var n = finite(value); return n == null ? "--" : n.toLocaleString(undefined, { minimumFractionDigits: digits || 0, maximumFractionDigits: digits || 0 }); }
+  function number(value, digits) { var n = finite(value); if (n == null) return "--"; digits = digits || 0; if (!numberFormats.has(digits)) numberFormats.set(digits, new Intl.NumberFormat(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })); return numberFormats.get(digits).format(n); }
   function metric(value, digits) { var n = finite(value); return n == null ? "--" : n.toFixed(digits == null ? 6 : digits); }
   function percent(value) { var n = finite(value); return n == null ? "--" : (n * 100).toFixed(1) + "%"; }
   function usd(value) { var n = finite(value); return n == null ? "--" : "$" + n.toFixed(2); }
   function short(value, head, tail) { var s = String(value || ""); head = head || 9; tail = tail || 5; return s.length > head + tail + 1 ? s.slice(0, head) + "…" + s.slice(-tail) : (s || "--"); }
-  function date(value) { if (!value) return "--"; var d = new Date(value); return Number.isNaN(d.getTime()) ? "--" : d.toLocaleString([], { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }); }
+  function date(value) { if (!value) return "--"; var d = new Date(value); return Number.isNaN(d.getTime()) ? "--" : dateFormat.format(d); }
   function age(value) { if (!value) return "--"; var seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return seconds + "S AGO"; if (seconds < 3600) return Math.floor(seconds / 60) + "M AGO"; if (seconds < 86400) return Math.floor(seconds / 3600) + "H AGO"; return Math.floor(seconds / 86400) + "D AGO"; }
   function identity(row) { if (!row) return "--"; if (row.model_identity === "hidden_until_promotion") return TeutonicDashboardV1.HIDDEN; return row.challenger_repo || row.model_repo || (row.model_digest ? "SHA256 " + short(row.model_digest, 10, 4) : "PUBLIC MODEL"); }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
@@ -75,14 +82,28 @@
     }
     td.appendChild(panel); return row;
   }
-  function makeHistoryRowExpandable(row, details, item, detailKey) {
-    var detailType = item.upload_id ? "upload failure" : "evaluation", labelId = item.challenge_id || item.upload_id || "", initiallyExpanded = historyExpandedDetails.has(detailKey); row.classList.add("history-row"); row.tabIndex = 0; row.setAttribute("aria-expanded", initiallyExpanded ? "true" : "false"); row.setAttribute("aria-controls", details.id); row.setAttribute("aria-label", (initiallyExpanded ? "Hide" : "Show") + " details for " + detailType + " " + labelId); row.title = "Click to " + (initiallyExpanded ? "hide" : "show") + " " + detailType + " details";
-    function toggle(event) { if (event.type === "click" && event.target.closest("a,button")) return; if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return; if (event.type === "keydown") event.preventDefault(); var expanded = row.getAttribute("aria-expanded") === "true"; if (expanded) historyExpandedDetails.delete(detailKey); else historyExpandedDetails.add(detailKey); row.setAttribute("aria-expanded", expanded ? "false" : "true"); row.setAttribute("aria-label", (expanded ? "Show" : "Hide") + " details for " + detailType + " " + labelId); row.title = expanded ? "Click to show " + detailType + " details" : "Click to hide " + detailType + " details"; details.hidden = expanded; }
+  function makeHistoryRowExpandable(row, item, index, detailKey) {
+    var details = null, detailType = item.upload_id ? "upload failure" : "evaluation", labelId = item.challenge_id || item.upload_id || "", initiallyExpanded = historyExpandedDetails.has(detailKey);
+    function ensureDetails() {
+      if (!details) { details = historyShardRow(item, index, detailKey); row.after(details); row.setAttribute("aria-controls", details.id); }
+      details.hidden = false;
+    }
+    row.classList.add("history-row"); row.tabIndex = 0; row.setAttribute("aria-expanded", String(initiallyExpanded)); row.setAttribute("aria-label", (initiallyExpanded ? "Hide" : "Show") + " details for " + detailType + " " + labelId); row.title = "Click to " + (initiallyExpanded ? "hide" : "show") + " " + detailType + " details";
+    if (initiallyExpanded) ensureDetails();
+    function toggle(event) { if (event.type === "click" && event.target.closest("a,button")) return; if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return; if (event.type === "keydown") event.preventDefault(); var expanded = row.getAttribute("aria-expanded") === "true"; if (expanded) historyExpandedDetails.delete(detailKey); else { historyExpandedDetails.add(detailKey); ensureDetails(); } row.setAttribute("aria-expanded", expanded ? "false" : "true"); row.setAttribute("aria-label", (expanded ? "Show" : "Hide") + " details for " + detailType + " " + labelId); row.title = expanded ? "Click to show " + detailType + " details" : "Click to hide " + detailType + " details"; if (details) details.hidden = expanded; }
     row.addEventListener("click", toggle); row.addEventListener("keydown", toggle);
   }
   function ema(values, alpha) { if (alpha >= 1 || !values.length) return values.slice(); var output = [values[0]]; for (var i = 1; i < values.length; i++) output.push(alpha * values[i] + (1 - alpha) * output[i - 1]); return output; }
   function lowess(values, strength) { var n = values.length; if (n < 3 || strength <= 0) return values.slice(); var span = Math.min(n, Math.max(3, Math.ceil(n * (.12 + strength * .58)))), output = []; for (var i = 0; i < n; i++) { var distances = []; for (var j = 0; j < n; j++) distances.push({ index: j, distance: Math.abs(j - i) }); distances.sort(function (a, b) { return a.distance - b.distance; }); var bandwidth = distances[span - 1].distance || 1, sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0; for (var k = 0; k < span; k++) { var index = distances[k].index, u = distances[k].distance / bandwidth, weight = Math.pow(1 - Math.pow(u, 3), 3), xValue = index, yValue = values[index]; sw += weight; swx += weight * xValue; swy += weight * yValue; swxx += weight * xValue * xValue; swxy += weight * xValue * yValue; } var denominator = sw * swxx - swx * swx; output.push(Math.abs(denominator) < 1e-12 || sw === 0 ? (sw ? swy / sw : values[i]) : (swy - ((sw * swxy - swx * swy) / denominator) * swx) / sw + ((sw * swxy - swx * swy) / denominator) * i); } return output; }
-  function smoothSeries(values, amount) { if (amount <= 0) return values.slice(); return smoothMode === "normal" ? ema(values, 1 / (1 + amount * 20)) : lowess(values, amount); }
+  function smoothSeries(values, amount) {
+    if (amount <= 0) return values.slice();
+    var key = smoothMode + ":" + amount + ":" + values.length + ":" + values.join(",");
+    if (smoothingCache.has(key)) return smoothingCache.get(key);
+    var series = smoothMode === "normal" ? ema(values, 1 / (1 + amount * 20)) : lowess(values, amount);
+    if (smoothingCache.size >= 4) smoothingCache.delete(smoothingCache.keys().next().value);
+    smoothingCache.set(key, series);
+    return series;
+  }
 
   function compactNumber(value) {
     var n = finite(value); if (n == null) return "--";
@@ -103,11 +124,15 @@
     if (subtext) { var sub = document.createElement("span"); sub.className = "dataset-sub"; sub.textContent = subtext; td.appendChild(sub); }
     row.appendChild(td);
   }
-  async function fetchJson(url) {
-    var separator = url.indexOf("?") === -1 ? "?" : "&";
-    var response = await fetch(url + separator + "t=" + Date.now(), { cache: "no-store" });
-    if (!response.ok) throw new Error("HTTP " + response.status);
-    return response.json();
+  function fetchJson(url) {
+    if (pendingJson.has(url)) return pendingJson.get(url);
+    var cacheable = /\/datasets\/manifest\.json$|\/results\.json$/.test(url);
+    var request = fetch(url, { cache: cacheable ? "default" : "no-cache" }).then(function (response) {
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      return response.json();
+    }).finally(function () { pendingJson.delete(url); });
+    pendingJson.set(url, request);
+    return request;
   }
   async function fetchFirstJson(urls) {
     var lastError;
@@ -264,6 +289,14 @@
     text("eval-percent", pct.toFixed(0) + "% · " + number(ev.progress) + "/" + number(ev.total)); el("eval-progress").style.width = pct + "%";
   }
   function renderSharedEvaluation() { renderQueue(); renderEvaluation(); }
+  function scheduleSharedRender() {
+    if (sharedRenderFrame != null) return;
+    sharedRenderFrame = requestAnimationFrame(function () {
+      sharedRenderFrame = null; renderSharedEvaluation(); renderReigns();
+      if (historyRenderTimer != null) clearTimeout(historyRenderTimer);
+      historyRenderTimer = setTimeout(renderHistory, 150);
+    });
+  }
   function renderQueue() {
     var sources = competitionSources(), rows = globalQueueRows(), missing = [], stale = [];
     sources.forEach(function (source) {
@@ -298,6 +331,8 @@
     text(id, notes.join(" · ")); el(id).hidden = !notes.length;
   }
   function renderHistory() {
+    if (historyRenderTimer != null) clearTimeout(historyRenderTimer);
+    historyRenderTimer = null;
     var history = [];
     competitionSources().forEach(function (source) {
       if (historyCompetition !== "all" && source.key !== historyCompetition) return;
@@ -312,7 +347,9 @@
     text("history-count", countLabel);
     var toggle = el("history-errors-toggle"); toggle.textContent = historyShowErrors ? "HIDE ERRORS" : "SHOW ERRORS"; toggle.setAttribute("aria-pressed", historyShowErrors ? "true" : "false");
     if (!rows.length) return emptyRow(body, 11, view.errorCount && !historyShowErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET"); clear(body);
-    rows.forEach(function (item, index) { var detailKey = item.competition + "-" + historyDetailKey(item, index), tr = document.createElement("tr"), details = historyShardRow(item, index, detailKey); cell(tr, item.competition.toUpperCase()); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); cell(tr, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); makeHistoryRowExpandable(tr, details, item, detailKey); body.appendChild(tr); body.appendChild(details); });
+    var fragment = document.createDocumentFragment();
+    rows.forEach(function (item, index) { var detailKey = item.competition + "-" + historyDetailKey(item, index), tr = document.createElement("tr"); cell(tr, item.competition.toUpperCase()); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); cell(tr, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); fragment.appendChild(tr); makeHistoryRowExpandable(tr, item, index, detailKey); });
+    body.appendChild(fragment);
   }
   function renderReigns() {
     var body = el("reigns-body"), rows = [];
@@ -424,8 +461,8 @@
       marker.addEventListener("blur", hideTooltip);
     });
   }
-  function render(d) { TeutonicDashboardV1.validate(d); lastPayload = d; mainQueueFailed = false; renderHeader(d); renderReigns(); renderChart(d); renderSharedEvaluation(); renderHistory(); renderWeightStatus(d); text("last-refresh", "LAST REFRESH " + new Date().toLocaleTimeString()); el("error-banner").hidden = true; }
-  async function poll() { try { var response = await fetch(ENDPOINT + "?t=" + Date.now(), { cache: "no-store" }); if (!response.ok) throw new Error("dashboard request returned HTTP " + response.status); render(await response.json()); } catch (error) { mainQueueFailed = true; renderSharedEvaluation(); renderReigns(); renderHistory(); var banner = el("error-banner"); banner.textContent = "DATA REFRESH FAILED — " + error.message + (lastPayload ? " — SHOWING LAST GOOD PUBLICATION" : ""); banner.hidden = false; } }
+  function render(d) { TeutonicDashboardV1.validate(d); lastPayload = d; mainQueueFailed = false; renderHeader(d); renderChart(d); scheduleSharedRender(); renderWeightStatus(d); text("last-refresh", "LAST REFRESH " + new Date().toLocaleTimeString()); el("error-banner").hidden = true; }
+  async function poll() { if (mainPolling) return; mainPolling = true; try { render(await fetchJson(ENDPOINT)); } catch (error) { mainQueueFailed = true; scheduleSharedRender(); var banner = el("error-banner"); banner.textContent = "DATA REFRESH FAILED — " + error.message + (lastPayload ? " — SHOWING LAST GOOD PUBLICATION" : ""); banner.hidden = false; } finally { mainPolling = false; } }
   function setTheme(theme) { document.documentElement.dataset.theme = theme; el("theme-toggle").textContent = theme === "dark" ? "LIGHT" : "DARK"; if (lastPayload) renderChart(lastPayload); }
   var savedTheme = localStorage.getItem("dashboard-theme"); setTheme(savedTheme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")); el("theme-toggle").addEventListener("click", function () { var next = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; localStorage.setItem("dashboard-theme", next); setTheme(next); });
   var smoothSlider = el("smooth-slider"), savedSmoothing = localStorage.getItem("smoothing");
@@ -454,8 +491,11 @@
   datasetHelpButton.addEventListener("click", showDatasetHelp);
   datasetHelpButton.addEventListener("blur", function () { if (!datasetHelp.matches(":hover")) datasetHelpTooltip.hidden = true; });
   document.addEventListener("keydown", function (event) { if (event.key === "Escape") datasetHelpTooltip.hidden = true; });
-  var chartResizeFrame = null;
-  window.addEventListener("resize", function () { if (chartResizeFrame != null) cancelAnimationFrame(chartResizeFrame); chartResizeFrame = requestAnimationFrame(function () { chartResizeFrame = null; if (lastPayload) renderChart(lastPayload); }); });
+  var chartResizeTimer = null;
+  window.addEventListener("resize", function () {
+    if (chartResizeTimer != null) clearTimeout(chartResizeTimer);
+    chartResizeTimer = setTimeout(function () { chartResizeTimer = null; if (lastPayload) renderChart(lastPayload); }, 150);
+  });
   var specialists = [];
   var mainMixState = null;
   async function loadCompetitionIndex() {
@@ -478,7 +518,8 @@
         state.active = item.active !== false; state.hasKing = item.has_king;
         state.rewardTransition = item.reward_transition;
         state.documentTokens = item.document_tokens;
-        renderCompetitionDataset(state); loadSpecialistDataset(state);
+        renderCompetitionDataset(state);
+        if (state.active) loadSpecialistDataset(state);
         if (key !== "main") pollSpecialist(state);
       });
     } catch (error) { text("queue-status", "Competition index unavailable; showing last publication."); }
@@ -490,7 +531,7 @@
       var d = await fetchJson(state.prefix + "dashboard.json");
       TeutonicDashboardV1.validate(d); state.dashboard = d; state.failed = false;
     } catch (error) { state.failed = true; }
-    finally { state.polling = false; renderSharedEvaluation(); renderReigns(); renderHistory(); }
+    finally { state.polling = false; scheduleSharedRender(); }
   }
   function renderCompetitionDataset(state) {
     if (state.active === false) { state.datasetRow.remove(); return; }
@@ -527,7 +568,7 @@
     finally { state.loadingDataset = false; renderCompetitionDataset(state); }
   }
   function pollSpecialists() { specialists.forEach(pollSpecialist); }
-  function loadSpecialistDatasets() { specialists.forEach(loadSpecialistDataset); }
+  function loadSpecialistDatasets() { specialists.filter(function (state) { return state.active !== false; }).forEach(loadSpecialistDataset); }
   loadCompetitionIndex(); setInterval(loadCompetitionIndex, DATASET_POLL_MS);
   pollSpecialists(); setInterval(pollSpecialists, POLL_MS);
   loadSpecialistDatasets(); setInterval(loadSpecialistDatasets, DATASET_POLL_MS);

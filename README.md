@@ -12,7 +12,7 @@ resets their positions, and excludes predictions across document boundaries.
 Scores are weighted by scored-token counts; bootstrap resamples paired original
 windows. See [masked evaluation setup and GPU checks](DEPLOY.md#document-masked-evaluation).
 
-Evaluation can additionally sample approximately 6M tokens in complete documents
+Evaluation can additionally sample complete documents
 between 2049 and 8192 tokens, with category-proportional coverage of 2049–4096
 and 4097–8192. It supports MAIN, MATH, CODE and TEXT, with a combined token-weighted verdict
 and separate long-document metrics. See [configuration and GPU validation](DEPLOY.md#additional-long-document-evaluation).
@@ -173,21 +173,3 @@ The starting king is pinned once; later MAIN promotions do not move it. After it
 first win, the MIX challenges its own current king. `competitions.json` publishes
 the pinned model as `starting_king`.
 
-At cutover, current rewards are preserved. Each first MIX winner receives 12.5%
-and evicts one oldest legacy reward position; after all six MIXes have winners,
-MAIN receives 25%. Historical math/code/text results remain visible.
-PostgreSQL controls the active configuration; editing `chain.toml` does not activate it.
-See [deployment and configuration](DEPLOY.md#main-and-mix01mix06-category-competitions)
-for preparation, local validation, deployment, replacement rewards, and rollback.
-
-## Local website preview
-
-```bash
-.venv/bin/python scripts/serve_website_preview.py --port 8765 --mix-kings 2
-```
-
-Open <http://localhost:8765>. This serves `website/` with the category weights,
-sample counts, and thresholds from `chain.toml`, plus synthetic demo models and
-activity. It does not connect to PostgreSQL or submit transactions.
-Use `--mix-kings 0` for the initial transition or `--mix-kings 6` for the final
-25% MAIN / 12.5% per MIX allocation. Stop the preview with Ctrl+C.

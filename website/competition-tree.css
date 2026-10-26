@@ -1,0 +1,72 @@
+.competition-tree-panel { width:100%; padding:14px; scroll-margin-top:16px; }
+.competition-tree-intro { position:relative; color:var(--muted); font-size:11px; }
+.competition-tree-intro { margin-bottom:6px; }
+.competition-tree-toolbar { position:relative; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding:6px 0; border-bottom:1px dotted var(--faint); }
+.tree-compare-control { display:flex; align-items:center; gap:8px; margin-left:auto; color:var(--muted); font:10px var(--mono); }
+.tree-compare-control select { padding:6px 8px; max-width:180px; border:var(--border); border-radius:0; background:var(--paper); color:var(--ink); font:10px var(--mono); cursor:pointer; }
+.tree-compare-control select:focus-visible { outline:2px solid var(--ink); outline-offset:3px; }
+.competition-tree-toolbar button { padding:6px 10px; border:var(--border); background:var(--paper); color:var(--ink); cursor:pointer; font:10px var(--mono); }
+.competition-tree-toolbar button:hover { background:var(--ink); color:var(--paper); }
+.competition-tree-toolbar button:focus-visible { outline:2px solid var(--ink); outline-offset:3px; }
+.competition-tree-toolbar button:disabled { cursor:wait; opacity:.5; }
+.competition-graph-layout { position:relative; }
+#competition-shared-tree { position:relative; overflow-x:auto; padding:4px 0; contain:layout paint; }
+.competition-graph { display:block; width:100%; height:340px; min-width:640px; }
+.competition-graph.is-moving .competition-edge-labels { display:none; }
+.competition-edge-tooltip { position:fixed; top:0; left:0; z-index:100; padding:6px 9px; max-width:calc(100vw - 16px); border:1px solid var(--ink); background:var(--paper); color:var(--ink); font:10px var(--mono); pointer-events:none; }
+.competition-edge-tooltip[hidden] { display:none; }
+.competition-tree-edge path { fill:none; stroke:var(--muted); stroke-width:1.2; }
+.competition-tree-edge .competition-tree-line { opacity:.42; transition:opacity .18s ease,stroke .18s ease; }
+.competition-tree-edge text { opacity:0; fill:var(--ink); font:11px var(--mono); paint-order:stroke; stroke:var(--paper); stroke-width:5px; stroke-linejoin:round; pointer-events:none; }
+.competition-tree-edge.is-highlighted .competition-tree-line { stroke:var(--ink); opacity:.85; stroke-width:1.6px; }
+.competition-tree-edge.is-highlighted .competition-graph-overlap { opacity:1; }
+.competition-tree-node rect { fill:var(--paper); stroke:var(--ink); stroke-width:1; transition:fill .3s ease,stroke-width .3s ease; }
+.competition-tree-node text { fill:var(--ink); font:700 16px var(--mono); }
+.competition-tree-node .competition-node-count { fill:var(--muted); font:10px var(--mono); }
+.competition-tree-node .competition-root-caption { font:8px var(--mono); letter-spacing:.16em; }
+.competition-tree-node.is-root rect { fill:var(--ink); stroke-width:1.5; }
+.competition-tree-node.is-root text { fill:var(--paper); }
+.competition-tree-edge, .competition-tree-node { cursor:pointer; }
+.competition-tree-edge .competition-tree-hit { stroke:transparent; stroke-width:20px; pointer-events:stroke; }
+.competition-tree-edge:not(.is-highlighted) .competition-tree-hit { stroke-width:6px; }
+.competition-tree-edge:hover .competition-tree-line, .competition-tree-edge[aria-pressed="true"] .competition-tree-line, .competition-tree-edge:focus-visible .competition-tree-line { stroke:var(--ink); stroke-width:2.5px; opacity:1; }
+.competition-tree-edge[aria-pressed="true"] .competition-graph-overlap, .competition-tree-edge:focus-visible .competition-graph-overlap { fill:var(--ink); opacity:1; }
+.competition-tree-node:not(.is-root):hover rect { fill:var(--wash); stroke-width:2px; }
+.competition-tree-node.is-root:hover rect { stroke-width:3px; }
+.competition-tree-node:focus-visible, .competition-tree-edge:focus-visible { outline:2px solid var(--ink); outline-offset:5px; }
+.tree-details { position:relative; margin-top:16px; padding:14px; border:1px solid var(--faint); text-align:left; }
+.tree-details[hidden], .tree-details-filters[hidden] { display:none; }
+.tree-details-header { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+.tree-details-header > button { flex-shrink:0; white-space:nowrap; }
+.tree-details-header h3 { font:700 13px var(--mono); }
+.tree-details-header h3:focus { outline:none; }
+.tree-details-header p { margin-top:5px; color:var(--muted); font-size:11px; }
+.tree-details button { padding:5px 9px; border:var(--border); background:var(--paper); color:var(--ink); cursor:pointer; font:10px var(--mono); }
+.tree-details button:hover, .tree-details button[aria-pressed="true"] { background:var(--ink); color:var(--paper); }
+.tree-details button:focus-visible { outline:2px solid var(--ink); outline-offset:3px; }
+.tree-details-filters { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+.tree-details-scroll { max-height:280px; overflow:auto; margin-top:10px; }
+.tree-category-table { table-layout:auto; font:11px var(--mono); }
+.tree-category-table th, .tree-category-table td { padding:8px; text-align:right; }
+.tree-category-table th:first-child, .tree-category-table td:first-child { text-align:left; }
+.tree-category-table td:first-child { white-space:normal; overflow-wrap:anywhere; }
+.tree-category-table td small { display:block; margin-top:3px; color:var(--muted); font:9px var(--mono); }
+.tree-category-table tbody tr:hover td { color:var(--ink); background:var(--wash); cursor:default; }
+@media (min-width:1200px) {
+  .competition-graph-layout:has(.tree-details:not([hidden])) { display:grid; grid-template-columns:minmax(0,1fr) 360px; grid-template-rows:348px; align-items:stretch; gap:14px; }
+  .competition-graph-layout .tree-details { margin:4px 0; padding:12px; min-width:0; min-height:0; }
+  .competition-graph-layout .tree-details:not([hidden]) { display:flex; flex-direction:column; }
+  .competition-graph-layout .tree-details-header, .competition-graph-layout .tree-details-filters { flex-shrink:0; }
+  .competition-graph-layout .tree-details-scroll { flex:1; min-height:0; max-height:none; }
+  .competition-graph-layout .tree-category-table { font-size:10px; }
+  .competition-graph-layout .tree-category-table th, .competition-graph-layout .tree-category-table td { padding:6px; }
+}
+@media (max-width:640px) {
+  .competition-tree-panel { padding:10px; }
+  .competition-graph { min-width:0; height:auto; aspect-ratio:420 / 440; }
+  .tree-compare-control { order:2; flex-basis:100%; margin-left:0; justify-content:space-between; }
+  .competition-tree-node .competition-node-name { font-size:18px; }
+  .competition-tree-node .competition-node-count { font-size:12px; }
+  .competition-tree-edge .competition-graph-overlap { font-size:13px; }
+}
+@media (prefers-reduced-motion:reduce) { .competition-tree-node rect, .competition-tree-edge .competition-tree-line { transition:none; } }

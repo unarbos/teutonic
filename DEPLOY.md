@@ -1006,7 +1006,8 @@ budgets, correct thresholds, all MIXes kingless, and unchanged initial weights.
 The page shows the six-dataset inventory (including DCLM), category percentages,
 king/fallback state, and retired history. The reward transition stays in the
 backend and is not displayed as a separate section. Upload `dashboard-v1.js`,
-`app.js`, `style.css`, and the updated `llms.txt` before `index.html`; the HTML uses
+`app.js`, `style.css`, and the updated
+`llms.txt` before `index.html`; the HTML uses
 new asset cache versions. Publish the
 updated dashboard JSON feeds before uploading the page, including dataset sources'
 `dataset` field and `competitions/mix06/datasets/manifest.json`. Do not upload local
