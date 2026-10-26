@@ -17,6 +17,7 @@ const DATASET_MANIFEST_PATH = "/datasets/manifest.json";
 const BENCHMARK_ORIGIN = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev";
 const BENCHMARK_RESULTS_PATH = "/benchmarks/results.json";
 const BENCHMARK_SOURCE_PATH = "/king-benchmark-daily/all-kings/results.json";
+const BENCHMARK_FEED_PATH = /^\/benchmarks\/((?:king-benchmark-daily|competitions\/mix0[1-6])\/(?:all-kings\/(?:results|latest)|kings\/[A-Za-z0-9_-]+\/results)\.json)$/;
 
 // Content types that drive the live dashboard. These must always reflect
 // the current bytes in the bucket, so we disable every layer of caching.
@@ -37,9 +38,10 @@ export default {
   async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname === "" || url.pathname === "/" ? "/index.html" : url.pathname;
+    const benchmarkFeed = path.match(BENCHMARK_FEED_PATH);
 
     if (
-      (path === DATASET_MANIFEST_PATH || path === BENCHMARK_RESULTS_PATH)
+      (path === DATASET_MANIFEST_PATH || path === BENCHMARK_RESULTS_PATH || benchmarkFeed)
       && request.method !== "GET" && request.method !== "HEAD"
     ) {
       return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
@@ -53,6 +55,8 @@ export default {
       target = DATASET_ORIGIN + DATASET_MANIFEST_PATH + (url.search || "");
     } else if (path === BENCHMARK_RESULTS_PATH) {
       target = BENCHMARK_ORIGIN + BENCHMARK_SOURCE_PATH + (url.search || "");
+    } else if (benchmarkFeed) {
+      target = BENCHMARK_ORIGIN + "/" + benchmarkFeed[1] + (url.search || "");
     } else {
       target = ORIGIN + path + (url.search || "");
     }
