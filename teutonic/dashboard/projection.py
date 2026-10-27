@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import logging
 import math
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Any, Mapping
 from urllib.parse import unquote, urlsplit
 
+from psycopg.errors import QueryCanceled
 from psycopg.rows import dict_row
 
+from teutonic.evaluation.category_scores import category_scores_from_samples
+
 DASHBOARD_LOCK_ID = 6_082_759_349_011_801
+
+# Publisher connections are reopened between polls. Keep only compact aggregates
+# across repository instances, never the large private per-sample audit arrays.
+_CATEGORY_SCORE_CACHE: OrderedDict[tuple, list[dict[str, Any]]] = OrderedDict()
+_CATEGORY_SCORE_CACHE_LIMIT = 4096
+_CATEGORY_AUDITS_PER_POLL = 2
+_CATEGORY_QUERY_TIMEOUT_MS = 1000
+log = logging.getLogger(__name__)
 
 PUBLIC_ERROR_MESSAGES = {
     "ArtifactIntegrityError": "The uploaded model artifacts failed integrity verification.",
@@ -130,6 +144,87 @@ def _source_scores(value: Any) -> list[dict[str, Any]]:
             }
         )
     return scores
+
+
+def _category_score_rows(
+    cursor, rows, *, competition: str = "unknown"
+) -> dict[tuple, list[dict[str, Any]]]:
+    result = {}
+    pending = []
+    for row in rows:
+        identity = (row["challenge_id"], row["completed_at"])
+        key = (str(row["evaluation_id"]), row["result_artifact_sha256"], row["updated_at"])
+        if key in _CATEGORY_SCORE_CACHE:
+            _CATEGORY_SCORE_CACHE.move_to_end(key)
+            result[identity] = _CATEGORY_SCORE_CACHE[key]
+        else:
+            pending.append((row, identity, key))
+    # Fetch at most two audit blobs per competition and poll. Old evaluations
+    # backfill gradually; cached scores and the rest of the dashboard stay ready.
+    batch = pending[:_CATEGORY_AUDITS_PER_POLL]
+    log.debug(
+        "Category loss cache | competition=%s evaluations=%d hits=%d pending=%d cache_entries=%d",
+        competition, len(rows), len(result), len(pending), len(_CATEGORY_SCORE_CACHE),
+    )
+    if not batch:
+        return result
+    query_started = monotonic()
+    log.info(
+        "Category loss fetch | competition=%s requested=%d cached=%d pending=%d timeout_ms=%d",
+        competition, len(batch), len(result), len(pending), _CATEGORY_QUERY_TIMEOUT_MS,
+    )
+    try:
+        # A timeout rolls back only this savepoint, preserving the dashboard's
+        # outer snapshot and its original statement timeout.
+        with cursor.connection.transaction():
+            previous_timeout = cursor.execute("SHOW statement_timeout").fetchone()[
+                "statement_timeout"
+            ]
+            cursor.execute("SELECT set_config('statement_timeout', %s, true)",
+                           (str(_CATEGORY_QUERY_TIMEOUT_MS),))
+            audits = cursor.execute(
+                """
+                SELECT evaluation_id,
+                       verdict_summary -> 'sample_results' AS samples,
+                       verdict_summary -> 'dataset_identity' AS dataset_identity,
+                       COALESCE(verdict_summary -> 'shards_used',
+                                verdict_summary #> '{dataset,shards_used}') AS shards_used
+                  FROM control_plane.evaluations
+                 WHERE evaluation_id = ANY(%s)
+                """,
+                ([row["evaluation_id"] for row, _identity, _key in batch],),
+            ).fetchall()
+            cursor.execute("SELECT set_config('statement_timeout', %s, true)",
+                           (previous_timeout,))
+    except QueryCanceled:
+        log.warning(
+            "Category loss timeout | competition=%s requested=%d postgres_ms=%.1f "
+            "timeout_ms=%d cached=%d pending=%d; publishing cached scores and retrying later",
+            competition, len(batch), (monotonic() - query_started) * 1000,
+            _CATEGORY_QUERY_TIMEOUT_MS, len(result), len(pending),
+        )
+        return result
+    query_ms = (monotonic() - query_started) * 1000
+    aggregate_started = monotonic()
+    ready = 0
+    by_id = {row["evaluation_id"]: row for row in audits}
+    for row, identity, key in batch:
+        audit = by_id.get(row["evaluation_id"], {})
+        scores = _source_scores(category_scores_from_samples(
+            audit.get("samples"), audit.get("dataset_identity"), audit.get("shards_used")
+        ))
+        result[identity] = scores
+        ready += bool(scores)
+        _CATEGORY_SCORE_CACHE[key] = scores
+        while len(_CATEGORY_SCORE_CACHE) > _CATEGORY_SCORE_CACHE_LIMIT:
+            _CATEGORY_SCORE_CACHE.popitem(last=False)
+    log.info(
+        "Category loss backfill | competition=%s fetched=%d ready=%d unavailable=%d "
+        "pending=%d postgres_ms=%.1f aggregate_ms=%.1f cache_entries=%d",
+        competition, len(audits), ready, len(batch) - ready, len(pending) - len(batch),
+        query_ms, (monotonic() - aggregate_started) * 1000, len(_CATEGORY_SCORE_CACHE),
+    )
+    return result
 
 
 def _dataset_source(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -370,13 +465,16 @@ class DashboardProjectionRepository:
                 "'control_plane.evaluations', 'SELECT') AS allowed"
             ).fetchone()
             if source_score_access and source_score_access["allowed"]:
+                score_query_started = monotonic()
                 source_score_rows = cursor.execute(
                     """
                     SELECT SUBSTRING(
                                encode(public.digest(e.upload_id::text, 'sha256'), 'hex')
                                FROM 1 FOR 16
                            ) AS challenge_id,
-                           e.verdict_summary -> 'source_scores' AS source_scores
+                           e.verdict_summary -> 'source_scores' AS source_scores,
+                           e.evaluation_id, e.result_artifact_sha256,
+                           e.updated_at, e.completed_at
                       FROM control_plane.evaluations e
                       JOIN control_plane.competitions c
                         ON c.competition_id = e.competition_id
@@ -384,10 +482,18 @@ class DashboardProjectionRepository:
                        AND c.chain_generation = %s
                        AND c.name = %s
                        AND e.state IN ('completed', 'terminal_failure')
-                       AND jsonb_typeof(e.verdict_summary -> 'source_scores') = 'object'
+                     ORDER BY e.completed_at DESC NULLS LAST, e.evaluation_id DESC
                     """,
                     self._scope,
                 ).fetchall()
+                log.info(
+                    "Evaluation score index | competition=%s evaluations=%d postgres_ms=%.1f",
+                    self.competition, len(source_score_rows),
+                    (monotonic() - score_query_started) * 1000,
+                )
+            category_scores_by_evaluation = _category_score_rows(
+                cursor, source_score_rows, competition=self.competition
+            )
             upload_failures = cursor.execute(
                 _scope_sql("dashboard_upload_failures")
                 + " ORDER BY failed_at ASC, challenge_id ASC",
@@ -404,12 +510,20 @@ class DashboardProjectionRepository:
         service_status = self._services(services, current, weight_status, generated)
         king = self._king(king_rows[0]) if king_rows else None
         current_weight = _float(king_rows[0].get("current_weight")) if king_rows else None
-        source_scores_by_challenge = {
-            row["challenge_id"]: _source_scores(row["source_scores"])
+        # One upload can have several terminal attempts with different scores.
+        source_scores_by_evaluation = {
+            (row["challenge_id"], row["completed_at"]): _source_scores(row["source_scores"])
             for row in source_score_rows
         }
         history_entries = [
-            self._history(row, source_scores_by_challenge.get(row["challenge_id"], []))
+            self._history(
+                row,
+                source_scores_by_evaluation.get((row["challenge_id"], row["completed_at"]), []),
+                category_scores_by_evaluation.get((row["challenge_id"], row["completed_at"]), []),
+                ((row["challenge_id"], row["completed_at"]) in source_scores_by_evaluation
+                    and (row["challenge_id"], row["completed_at"])
+                    not in category_scores_by_evaluation),
+            )
             for row in history
         ]
         history_entries.extend(self._upload_failure(row) for row in upload_failures)
@@ -568,7 +682,10 @@ class DashboardProjectionRepository:
             "delta_threshold": _float(row["delta_threshold"]),
         }
 
-    def _history(self, row, source_scores: list[dict[str, Any]]) -> dict[str, Any]:
+    def _history(
+        self, row, source_scores: list[dict[str, Any]], category_scores: list[dict[str, Any]],
+        category_scores_pending: bool = False,
+    ) -> dict[str, Any]:
         public = row["public_model_digest"] is not None
         failed = row["verdict"] == "failed"
         error_code = row["public_error_code"] if failed else None
@@ -591,6 +708,8 @@ class DashboardProjectionRepository:
             "early_stopped": _bool(row["early_stopped"]),
             "shards_used": _shards_used(row.get("shards_used")),
             "source_scores": source_scores,
+            "category_scores": category_scores,
+            "category_scores_pending": category_scores_pending,
             "error_code": error_code,
             "error_message": PUBLIC_ERROR_MESSAGES.get(error_code) if error_code else None,
             "policy_version": row["policy_version"],
@@ -624,6 +743,7 @@ class DashboardProjectionRepository:
             "early_stopped": False,
             "shards_used": [],
             "source_scores": [],
+            "category_scores": [],
             "error_code": error_code,
             "error_message": PUBLIC_ERROR_MESSAGES[error_code],
             "policy_version": None,

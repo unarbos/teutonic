@@ -291,6 +291,8 @@
             }
           }
         },
+        "category_scores": { "$ref": "#/$defs/history_entry/properties/source_scores" },
+        "category_scores_pending": { "type": "boolean" },
         "error_code": { "$ref": "#/$defs/nullable_string" },
         "error_message": { "$ref": "#/$defs/nullable_string" },
         "policy_version": { "$ref": "#/$defs/nullable_string" },

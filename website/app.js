@@ -47,12 +47,12 @@
   function hotkeyText(id, prefix, hotkey, head, tail) { var node = el(id); clear(node); node.title = hotkey || ""; node.appendChild(document.createTextNode(prefix)); node.appendChild(hotkeyLink(hotkey, head, tail)); }
   function emptyRow(body, columns, message) { clear(body); var row = document.createElement("tr"); var td = cell(row, message, "empty-cell"); td.colSpan = columns; body.appendChild(row); }
   function historyDetailKey(item, index) { return String(item.challenge_id || item.upload_id || item.timestamp || "evaluation-" + index); }
-  function historySourceScores(item) {
-    var view = TeutonicDashboardV1.sourceScoresPresentation(item), section = document.createElement("section"), heading = document.createElement("h3"), wrap = document.createElement("div"), table = document.createElement("table"), head = document.createElement("thead"), headRow = document.createElement("tr"), body = document.createElement("tbody");
-    section.className = "history-source-scores"; heading.textContent = "LOSS BY DATASET · " + view.count; section.appendChild(heading);
-    if (!view.count) { var empty = document.createElement("p"); empty.className = "history-shards-empty"; empty.textContent = "PER-DATASET LOSS UNAVAILABLE FOR THIS EVALUATION"; section.appendChild(empty); return section; }
+  function historySourceScores(item, byCategory) {
+    var view = byCategory ? TeutonicDashboardV1.categoryScoresPresentation(item) : TeutonicDashboardV1.sourceScoresPresentation(item), section = document.createElement("section"), heading = document.createElement("h3"), wrap = document.createElement("div"), table = document.createElement("table"), head = document.createElement("thead"), headRow = document.createElement("tr"), body = document.createElement("tbody");
+    section.className = "history-source-scores"; section.dataset.breakdown = byCategory ? "category" : "dataset"; heading.textContent = (byCategory ? "LOSS BY CATEGORY · " : "LOSS BY DATASET · ") + view.count; section.appendChild(heading);
+    if (!view.count) { var empty = document.createElement("p"); empty.className = "history-shards-empty"; empty.textContent = byCategory ? item.category_scores_pending ? "CATEGORY LOSS IS BEING PREPARED" : "CATEGORY LOSS UNAVAILABLE FOR THIS EVALUATION" : "PER-DATASET LOSS UNAVAILABLE FOR THIS EVALUATION"; section.appendChild(empty); return section; }
     wrap.className = "history-source-score-wrap"; table.className = "history-source-score-table";
-    ["DATASET", "KING LOSS", "CHALL LOSS", "Δ", "N"].forEach(function(label) { var th = document.createElement("th"); th.textContent = label; headRow.appendChild(th); });
+    [byCategory ? "CATEGORY" : "DATASET", "KING LOSS", "CHALL LOSS", "Δ", byCategory ? "SAMPLES" : "N"].forEach(function(label) { var th = document.createElement("th"); th.textContent = label; if (label === "Δ") th.title = "King loss minus challenger loss; positive means lower challenger loss"; headRow.appendChild(th); });
     head.appendChild(headRow); table.appendChild(head);
     view.rows.forEach(function(score) { var row = document.createElement("tr"), delta = finite(score.muHat); cell(row, score.source, "history-source-name", score.source); cell(row, metric(score.kingLoss, 5), "mono"); cell(row, metric(score.challengerLoss, 5), "mono"); cell(row, delta == null ? "--" : (delta > 0 ? "+" : "") + delta.toFixed(5), "mono history-source-delta " + (delta > 0 ? "positive" : delta < 0 ? "negative" : "neutral")); cell(row, number(score.nSequences), "mono"); body.appendChild(row); });
     table.appendChild(body); wrap.appendChild(table); section.appendChild(wrap); return section;
@@ -69,6 +69,7 @@
     var evaluationMetadata = document.createElement("dl"); evaluationMetadata.className = "history-error-metadata history-eval-metadata";
     [["SAMPLES", run.samples, run.samplesTitle], ["EARLY STOP", run.earlyStopLabel, "Whether evaluation stopped before all planned samples"]].forEach(function(entry) { var group = document.createElement("div"), label = document.createElement("dt"), value = document.createElement("dd"); label.textContent = entry[0]; value.textContent = entry[1]; value.title = entry[2]; group.appendChild(label); group.appendChild(value); evaluationMetadata.appendChild(group); });
     panel.appendChild(evaluationMetadata);
+    panel.appendChild(historySourceScores(item, true));
     panel.appendChild(historySourceScores(item));
     var shardSummary = document.createElement("div"); shardSummary.className = "history-shards-summary";
     heading.className = "history-shards-heading"; heading.textContent = "SHARDS USED · " + number(view.count); shardSummary.appendChild(heading); panel.appendChild(shardSummary);

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 try:
     import psycopg
@@ -11,6 +14,7 @@ except ImportError:
     psycopg = None
     errors = None
 
+from teutonic.dashboard import projection
 from teutonic.dashboard.contracts import canonical_dashboard_json
 from teutonic.dashboard.projection import DashboardProjectionRepository
 
@@ -292,6 +296,19 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             self.assertNotIn(marker.lower(), text.lower())
 
     def test_privileged_dashboard_process_projects_sanitized_source_scores(self):
+        scores = self._project_as_owner()["history"][0]["source_scores"]
+        self.assertEqual(
+            scores,
+            [{
+                "source": "fixture",
+                "n_sequences": 64,
+                "avg_king_loss": 2.1,
+                "avg_challenger_loss": 2.09,
+                "mu_hat": 0.01,
+            }],
+        )
+
+    def _project_as_owner(self):
         self.repository.release_lock()
         privileged = DashboardProjectionRepository(
             self.owner,
@@ -305,20 +322,71 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         )
         try:
             self.assertTrue(privileged.acquire_lock())
-            scores = privileged.project(now=NOW)["history"][0]["source_scores"]
+            return privileged.project(now=NOW)
         finally:
             privileged.release_lock()
             self.assertTrue(self.repository.acquire_lock())
-        self.assertEqual(
-            scores,
-            [{
-                "source": "fixture",
-                "n_sequences": 64,
-                "avg_king_loss": 2.1,
-                "avg_challenger_loss": 2.09,
-                "mu_hat": 0.01,
-            }],
+
+    def test_saved_samples_backfill_sanitized_category_losses(self):
+        saved = {
+            "sample_results": {
+                "n_samples": 3, "king_loss": [2, 6, 8],
+                "challenger_loss": [1, 3, 5], "scored_tokens": [1, 3, 2],
+                "shard_group_index": [0, 0, 0], "shard_index": [0, 0, 1],
+            },
+            "dataset_identity": {"sources": [{"name": "mix06", "shards": [
+                {"url": "https://DO-NOT-LEAK/private/pretrain-behaviors__games--a.npy?secret=never"},
+                {"url": "https://DO-NOT-LEAK/private/math-reasoning__math-dialogue--b.npy"},
+            ]}]},
+            "n_sequences_evaluated": 3, "early_stopped": True,
+        }
+        self.owner.execute(
+            "UPDATE control_plane.evaluations SET verdict_summary = verdict_summary || %s::jsonb "
+            "WHERE evaluation_id = %s", (json.dumps(saved), self.ids["evaluation"]),
         )
+        payload = self._project_as_owner()
+        entry = payload["history"][0]
+        self.assertEqual(entry["category_scores"], [
+            {"source": "math-reasoning/math-dialogue", "n_sequences": 1,
+             "avg_king_loss": 8, "avg_challenger_loss": 5, "mu_hat": 3},
+            {"source": "pretrain-behaviors/games", "n_sequences": 2,
+             "avg_king_loss": 5, "avg_challenger_loss": 2.5, "mu_hat": 2.5},
+        ])
+        self.assertFalse(entry["category_scores_pending"])
+        self.assertEqual(entry["source_scores"][0]["source"], "fixture")
+        public = canonical_dashboard_json(payload).decode()
+        for private in ["DO-NOT-LEAK", "secret=never", "sample_results", "shard_group_index"]:
+            self.assertNotIn(private, public)
+        self.assertEqual(self.repository.project(now=NOW)["history"][0]["category_scores"], [])
+
+    def test_category_timeout_preserves_outer_transaction_and_timeout(self):
+        from psycopg.rows import dict_row
+
+        class SlowAuditCursor:
+            def __init__(self, cursor):
+                self.cursor = cursor
+                self.connection = cursor.connection
+
+            def execute(self, sql, params=None):
+                if "verdict_summary -> 'sample_results'" in sql:
+                    sql = sql.replace("FROM control_plane.evaluations",
+                                      "FROM control_plane.evaluations, "
+                                      "LATERAL (SELECT pg_sleep(0.3)) delay")
+                return self.cursor.execute(sql, params)
+
+        with self.owner.transaction(), self.owner.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("SET LOCAL statement_timeout = '7s'")
+            rows = cursor.execute(
+                "SELECT evaluation_id, result_artifact_sha256, updated_at, completed_at, "
+                "'test-attempt' AS challenge_id FROM control_plane.evaluations "
+                "WHERE evaluation_id = %s", (self.ids["evaluation"],),
+            ).fetchall()
+            started = time.monotonic()
+            with patch.object(projection, "_CATEGORY_QUERY_TIMEOUT_MS", 50):
+                self.assertEqual(projection._category_score_rows(SlowAuditCursor(cursor), rows), {})
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertEqual(cursor.execute("SELECT 1 AS ready").fetchone()["ready"], 1)
+            self.assertEqual(cursor.execute("SHOW statement_timeout").fetchone()["statement_timeout"], "7s")
 
     def test_reuse_limit_failure_is_projected_with_public_reason(self):
         self.owner.execute(

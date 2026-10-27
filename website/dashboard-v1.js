@@ -254,6 +254,10 @@
         return { rows: rows, count: rows.length };
     }
 
+    function categoryScoresPresentation(record) {
+        return sourceScoresPresentation({ source_scores: record && record.category_scores });
+    }
+
     function taoMarketCapHotkeyUrl(hotkey) {
         var address = String(hotkey || "").trim();
         if (!address) return "";
@@ -636,6 +640,7 @@
         verdictLabel: verdictLabel,
         evaluationHistoryMetricsPresentation: evaluationHistoryMetricsPresentation,
         sourceScoresPresentation: sourceScoresPresentation,
+        categoryScoresPresentation: categoryScoresPresentation,
         taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
         taoMarketCapColdkeyUrl: taoMarketCapColdkeyUrl,
         shardPresentation: shardPresentation,

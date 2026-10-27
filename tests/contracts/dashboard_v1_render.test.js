@@ -139,6 +139,15 @@ assert.deepStrictEqual(
         rows: [{ source: "finewebedu", nSequences: 600, kingLoss: 2.1, challengerLoss: 2.09, muHat: 0.01 }]
     }
 );
+assert.deepStrictEqual(dashboard.categoryScoresPresentation({ source_scores: [
+    { source: "mix06", n_sequences: 100, avg_king_loss: 1, avg_challenger_loss: .9, mu_hat: .1 }
+] }), { rows: [], count: 0 }, "A whole-mix score is not a category breakdown");
+assert.deepStrictEqual(dashboard.categoryScoresPresentation({ category_scores: [
+    { source: "pretrain-behaviors/games", n_sequences: 2, avg_king_loss: 5, avg_challenger_loss: 2.5, mu_hat: 2.5 },
+    { source: "broken", n_sequences: null, avg_king_loss: 1, avg_challenger_loss: 1, mu_hat: 0 }
+] }), { count: 1, rows: [
+    { source: "pretrain-behaviors/games", nSequences: 2, kingLoss: 5, challengerLoss: 2.5, muHat: 2.5 }
+] });
 
 assert.strictEqual(
     dashboard.taoMarketCapHotkeyUrl("5MinerHotkey"),
