@@ -77,7 +77,7 @@ def extend_with_long_documents(
         return sequences, metadata
     if req.max_document_tokens < MAX_DOCUMENT_TOKENS:
         raise ValueError(
-            "long-document sampling requires a checkpoint context limit of at least 8192"
+            f"document sampling requires a checkpoint context limit of at least {MAX_DOCUMENT_TOKENS}"
         )
     cap = config["max_document_tokens"]
     cache = document_index_cache_dir(sources.base.SHARD_CACHE_DIR)

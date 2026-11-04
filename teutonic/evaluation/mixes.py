@@ -21,10 +21,10 @@ _RULES = load_rules(DEFAULT_RULES_PATH)
 
 
 def validate_definitions():
-    from teutonic.competitions import ACTIVE_COMPETITIONS
+    from teutonic.competitions import CONFIGURED_COMPETITIONS
 
-    if set(chain_config.COMPETITION_DEFAULTS) != set(ACTIVE_COMPETITIONS):
-        raise ValueError("configure MAIN and MIX01–MIX06 before activation")
+    if set(chain_config.COMPETITION_DEFAULTS) != set(CONFIGURED_COMPETITIONS):
+        raise ValueError("configure MAIN and MIX01–MIX07, including retired MIX04 history")
     for key, spec in chain_config.COMPETITION_DEFAULTS.items():
         weights = spec["categories"]
         if not weights or set(weights) - set(chain_config.CATEGORY_REGISTRY):
@@ -123,6 +123,8 @@ def competition_snapshot(key, fetch=fetch_dataset_manifest, bundle_dir=None):
     if bundle_dir is not None:
         snapshot = load_bundle_snapshot(bundle_dir, key)
     else:
+        if not chain_config.COMPETITION_DEFAULTS[key]["manifest_url"]:
+            raise ValueError(f"{key} has no published manifest pin; provide --bundle-dir")
         snapshot = fetch(
             name=key,
             manifest_url=chain_config.COMPETITION_DEFAULTS[key]["manifest_url"],
@@ -141,7 +143,10 @@ def competition_snapshot(key, fetch=fetch_dataset_manifest, bundle_dir=None):
 
 
 def version_manifest_url(key, digest):
-    configured = chain_config.COMPETITION_DEFAULTS[key]["manifest_url"]
+    spec = chain_config.COMPETITION_DEFAULTS[key]
+    if spec.get("manifest_base_url"):
+        return spec["manifest_base_url"].rstrip("/") + f"/versions/{digest}.json"
+    configured = spec["manifest_url"]
     base = (
         configured.split("/versions/", 1)[0]
         if "/versions/" in configured

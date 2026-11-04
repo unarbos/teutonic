@@ -106,7 +106,7 @@ def test_competition_mix_uses_existing_source_and_category_weights(competition):
             for k, v in manifests.items()
         )
     config = build_long_document_config(sources, describe=descriptor)
-    assert config["max_document_tokens"] == 8192
+    assert config["max_document_tokens"] == 16384
     assert config["version"] == LONG_DOCUMENT_VERSION
     assert len(config["categories"]) == 24
     assert sum(c["weight"] for c in config["categories"]) == pytest.approx(1)
@@ -312,14 +312,15 @@ class MemoryLengths:
         return int(np.searchsorted(self.values, value, side="right" if right else "left"))
 
 
-def test_sampler_balances_document_counts_not_tokens_and_preserves_rare_bucket():
+@pytest.mark.parametrize("populations", [(5000, 500), (500, 5000)])
+def test_sampler_allocates_tokens_40_60_independently_of_bucket_population(populations):
     values = (
-        [2048] * 3
-        + [2049] * 1000
-        + [4096] * 1000
-        + [4097] * 50
-        + [8192] * 50
-        + [8193] * 1000
+        [0, 1, 512, 1024, 1536, 2048]
+        + [2049] * (populations[0] // 2)
+        + [4096] * (populations[0] // 2)
+        + [4097] * (populations[1] // 2)
+        + [16384] * (populations[1] // 2)
+        + [16385] * 1000
         + [99999] * 9
     )
     index = SimpleNamespace(tokens=MemoryLengths(values), locate=lambda row: [{"row": row}])
@@ -328,33 +329,75 @@ def test_sampler_balances_document_counts_not_tokens_and_preserves_rare_bucket()
         index, token_budget=1_000_000, seed=123, max_tokens=16384
     )
     assert len({d["document_row"] for d in rows}) == len(rows)
-    assert [b["population"] for b in meta["buckets"]] == [2000, 100]
-    assert all(2049 <= d["length"] <= 8192 for d in rows)
+    assert [b["population"] for b in meta["buckets"]] == list(populations)
+    assert [b["target_tokens"] for b in meta["buckets"]] == [400_000, 600_000]
+    assert [b["token_weight"] for b in meta["buckets"]] == [0.4, 0.6]
+    assert all(2049 <= d["length"] <= 16384 for d in rows)
+    assert meta["excluded_under_length_limit"] == 6
     assert meta["excluded_over_length_limit"] == 1009
-    assert meta["max_document_tokens"] == 8192
-    assert abs(meta["sampled_tokens"] - 1_000_000) <= 8192
-    for b in meta["buckets"]:
-        assert abs(b["sampled_documents"] - len(rows) * b["population"] / 2100) < 2
+    assert meta["max_document_tokens"] == 16384
+    assert abs(meta["sampled_tokens"] - 1_000_000) <= 4096 + 16384
+    for b, maximum in zip(meta["buckets"], [4096, 16384], strict=True):
+        assert abs(b["sampled_tokens"] - b["target_tokens"]) <= maximum
+        selected = [d for d in rows if d["length_bucket"] == b["bucket"]]
+        assert b["sampled_tokens"] == sum(d["length"] for d in selected)
+        assert b["sampled_documents"] == len(selected)
     tiny, tiny_meta = sample_category(index, token_budget=1, seed=123, max_tokens=16384)
-    assert {d["length_bucket"] for d in tiny} == {"2049-4096", "4097-8192"}
+    assert {d["length_bucket"] for d in tiny} == {
+        "2049-4096", "4097-16384"
+    }
     assert tiny_meta["sampled_tokens"] > tiny_meta["target_tokens"]
 
 
-def test_sampler_includes_exact_bucket_edges_and_never_draws_longer_documents():
-    lengths = [2048, 2049, 4096, 4097, 8192, 8193, 128974]
+@pytest.mark.parametrize("short", [2049, 4096])
+@pytest.mark.parametrize("long", [4097, 8192, 8193, 16384])
+def test_sampler_includes_exact_bucket_edges_and_excludes_outside_range(short, long):
+    eligible = [short, long]
+    lengths = [0, 1, 2048, *eligible, 16385, 128974]
     def locate(row):
-        assert 2049 <= lengths[row] <= 8192
+        assert 2049 <= lengths[row] <= 16384
         return [{"row": row}]
     index = SimpleNamespace(tokens=MemoryLengths(lengths), locate=locate)
-    rows, meta = sample_category(index, token_budget=18434, seed=15, max_tokens=1048576)
-    assert sorted(d["length"] for d in rows) == [2049, 4096, 4097, 8192]
-    assert meta["sampled_tokens"] == 18434
+    rows, meta = sample_category(index, token_budget=1, seed=15, max_tokens=1048576)
+    assert sorted(d["length"] for d in rows) == eligible
+    assert meta["sampled_tokens"] == sum(eligible)
     assert meta["excluded_over_length_limit"] == 2
+    assert meta["excluded_under_length_limit"] == 3
+
+
+@pytest.mark.parametrize("lengths", [[2049], [4097], [2048, 16385]])
+def test_sampler_rejects_missing_required_bucket(lengths):
+    index = SimpleNamespace(tokens=MemoryLengths(lengths), locate=lambda row: [{"row": row}])
+    with pytest.raises(ValueError, match="required bucket"):
+        sample_category(index, token_budget=100_000, seed=1, max_tokens=16384)
+
+
+def test_seventy_million_budget_allocates_28m_and_42m_input_tokens():
+    index = SimpleNamespace(
+        tokens=MemoryLengths([2500] * 20_000 + [10_000] * 20_000),
+        locate=lambda row: [{"row": row}],
+    )
+    rows, meta = sample_category(index, token_budget=70_000_000, seed=123, max_tokens=16384)
+    assert [b["sampled_tokens"] for b in meta["buckets"]] == [28_000_000, 42_000_000]
+    assert [b["sampled_documents"] for b in meta["buckets"]] == [11_200, 4_200]
+    assert meta["sampled_tokens"] == 70_000_000
+    assert len({d["document_row"] for d in rows}) == len(rows) == 15_400
+
+
+def test_sampler_rejects_insufficient_context_or_complete_documents():
+    index = SimpleNamespace(tokens=MemoryLengths([2049, 8193]), locate=lambda row: None)
+    with pytest.raises(ValueError, match="context limit"):
+        sample_category(index, token_budget=1, seed=1, max_tokens=8192)
+    with pytest.raises(ValueError, match="not enough complete documents"):
+        sample_category(index, token_budget=1, seed=1, max_tokens=16384)
+    index.locate = lambda row: [{"row": row}]
+    with pytest.raises(ValueError, match="not enough complete documents"):
+        sample_category(index, token_budget=1_000_000, seed=1, max_tokens=16384)
 
 
 def make_index_fixture(tmp_path):
     # Original shard rows are 2048 tokens; documents cross both rows and shards.
-    lengths = [2048, 2049, 4096, 4097, 8192, 8193, 12000]
+    lengths = [2, 512, 513, 1024, 1025, 1536, 1537, 2048, 2049, 4096, 16384, 16385, 20000]
     documents = [
         np.concatenate([np.full(n - 1, i + 1, dtype="<u4"), np.array([151645], dtype="<u4")])
         for i, n in enumerate(lengths)
@@ -411,7 +454,8 @@ def make_index_fixture(tmp_path):
 
 @pytest.mark.parametrize("flat_mix", [False, True])
 @pytest.mark.parametrize("local_files", [0, 2, 4])
-def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_path, monkeypatch, flat_mix, local_files):
+@pytest.mark.parametrize("documents_only", [False, True])
+def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_path, monkeypatch, flat_mix, local_files, documents_only):
     import teutonic.evaluator as evaluator_package
 
     config, snap, factory, documents, paths, _server = make_index_fixture(tmp_path)
@@ -435,7 +479,7 @@ def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_pa
     monkeypatch.setattr(evaluator_package, "sources", fake_sources, raising=False)
     req = SimpleNamespace(
         long_documents=config,
-        max_document_tokens=8192,
+        max_document_tokens=16384,
         vocab_size=160000,
         dataset_sources=[{"name": snap.name, "proportion": 1}],
     )
@@ -448,6 +492,10 @@ def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_pa
             {"shard_group_index": 0, "shard_index": 0, "shard_sequence_index": 0}
         ],
     }
+    windows = [] if documents_only else [[12, 13]]
+    if documents_only:
+        meta["_source_labels"] = []
+        meta["_sample_provenance"] = []
     kwargs = {
         "index_factory": factory,
         "manifest_loader": lambda *args: snap,
@@ -461,7 +509,8 @@ def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_pa
         for key, path in paths.items()
     })
     kwargs["shard_reader"] = lambda ref: NpyShard(ref, opener=server.open)
-    result, audit = extend_with_long_documents(req, [[12, 13]], meta, **kwargs)
+    result, audit = extend_with_long_documents(req, windows, meta, **kwargs)
+    first_transferred = server.transferred
     if local_files:
         from teutonic.evaluator.local_index import LocalIndexStore
 
@@ -484,22 +533,35 @@ def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_pa
             return reader
 
         kwargs["index_factory"] = lambda category, cache: DocumentIndex(category, cache, local_object)
-    second, again = extend_with_long_documents(req, [[12, 13]], meta, **kwargs)
+    second, again = extend_with_long_documents(req, windows, meta, **kwargs)
     assert result == second and audit == again
-    assert server.transferred < sum(path.stat().st_size for path in paths.values())
+    full_dataset_bytes = sum(path.stat().st_size for path in paths.values())
+    assert first_transferred < full_dataset_bytes
+    assert server.transferred - first_transferred < full_dataset_bytes
     assert audit["long_documents"]["n_documents"] >= 3
+    assert sum(p["component"] == "windows" for p in audit["_sample_provenance"]) == len(windows)
+    assert audit["n"] == len(result)
+    from teutonic.evaluation.masking import scored_token_counts
+    assert all(n > 0 for n in scored_token_counts(result))
     for tokens, p in zip(result, audit["_sample_provenance"], strict=True):
         if p["component"] == "windows":
             assert tokens == [12, 13]
         else:
             assert tokens == documents[p["document_row"]].tolist()
-            assert 2049 <= len(tokens) <= 8192
+            assert 2049 <= len(tokens) <= 16384
             assert p["shard_index"] == -1
     assert audit["digest"] == sequence_digest(result)
+    assert any(len(tokens) == 16384 for tokens in result)
+    buckets = audit["long_documents"]["categories"][0]["buckets"]
+    assert [b["target_tokens"] for b in buckets] == [6000, 9000]
+    req.max_document_tokens = 8192
+    with pytest.raises(ValueError, match="context limit"):
+        extend_with_long_documents(req, windows, meta, **kwargs)
+    req.max_document_tokens = 16384
     assert sequence_digest([[1, 2], [3, 4, 5]]) != sequence_digest([[1, 2, 3], [4, 5]])
     req.vocab_size = 100
     with pytest.raises(ValueError, match="vocabulary"):
-        extend_with_long_documents(req, [[12, 13]], meta, **kwargs)
+        extend_with_long_documents(req, windows, meta, **kwargs)
 
 
 def test_incomplete_documents_are_rejected_by_index(tmp_path):
@@ -535,6 +597,39 @@ def test_protocol_keeps_index_identity_in_request_hash():
         EvaluationRequestV2.from_mapping(payload)
 
 
+def test_documents_only_configuration_policy_and_request():
+    from test_evaluator_protocol_v2 import request_payload
+
+    from teutonic.evaluation import EvaluationRequestV2, ProtocolValidationError
+    from teutonic.evaluation.early_stopping import EarlyStoppingPolicy
+    from teutonic.validator.contracts import EvaluationPolicyConfig
+
+    sources = all_sources()
+    config = build_long_document_config(sources)
+    settings = EvaluationSettings("f" * 64, "fixture", 0, 0.003, sources, 4, config)
+    policy = EvaluationPolicyConfig(
+        policy_version="fixture", code_version="fixture", dataset_version=settings.config_version,
+        evaluator_version="fixture", sampling_seed=0, bootstrap_seed=0,
+        n=0, seq_len=2048, n_bootstrap=100, alpha=0.01, delta_threshold=0.003,
+        dataset_source="pretokenized_npy", dataset_label="fixture", shards_per_dataset=4,
+        dataset_manifests=sources, long_documents=config,
+        early_stopping=EarlyStoppingPolicy(enabled=True),
+    )
+    payload = request_payload()
+    payload["limits"] = policy.thresholds
+    payload["dataset"] = policy.dataset_request(block_hash="b", hotkey="h")
+    parsed = EvaluationRequestV2.from_mapping(payload)
+    assert parsed.limits["n"] == 0
+    assert all(s["target_sequences"] == 0 and s["shards"] == [] for s in parsed.dataset["sources"])
+    assert parsed.dataset["long_documents"] == config
+    for invalid in (None, {}):
+        payload["dataset"]["long_documents"] = invalid
+        with pytest.raises(ProtocolValidationError):
+            EvaluationRequestV2.from_mapping(payload)
+    with pytest.raises(ValueError, match="zero windows"):
+        EvaluationSettings("f" * 64, "fixture", 0, 0.003, sources, 4, None)
+
+
 @pytest.mark.parametrize("mutation", ["weak_etag", "weight", "duplicate", "context"])
 def test_configuration_rejects_ambiguous_or_invalid_pins(mutation):
     config = build_long_document_config(all_sources(), describe=descriptor)
@@ -550,17 +645,18 @@ def test_configuration_rejects_ambiguous_or_invalid_pins(mutation):
         validate_long_documents(config)
 
 
-@pytest.mark.parametrize("cap", [0, 2048, 4096, 8191, 8193, 128974, True])
+@pytest.mark.parametrize("cap", [0, 2048, 4096, 8192, 16383, 16385, 128974, True])
 def test_configuration_rejects_caps_outside_current_policy(cap):
     config = build_long_document_config(all_sources())
     config["max_document_tokens"] = cap
-    with pytest.raises(ValueError, match="8192"):
+    with pytest.raises(ValueError, match="16384"):
         validate_long_documents(config)
 
 
-def test_previous_unbounded_policy_is_not_silently_replayed():
+@pytest.mark.parametrize("version", ["long-documents-v1", "long-documents-2k-8k-v1", "whole-documents-0-8k-v2"])
+def test_previous_policy_is_not_silently_replayed(version):
     config = build_long_document_config(all_sources())
-    config.update(version="long-documents-v1", max_document_tokens=0)
+    config.update(version=version)
     with pytest.raises(ValueError, match="unsupported"):
         validate_long_documents(config)
 
@@ -588,6 +684,23 @@ def test_budget_changes_preserve_pins_and_threshold_updates_do_not_fetch(monkeyp
     )
     assert updated["long_documents"]["token_budget"] == 7000000
     assert updated["long_documents"]["categories"] == config["categories"]
+
+    previous = copy.deepcopy(current)
+    previous["long_documents"].update(version="whole-documents-0-8k-v2", max_document_tokens=8192)
+    documents_only, version = cli.prepare_configuration(
+        previous, "main", cli.parse_args(["--n", "0", "--long-document-tokens", "70000000"])
+    )
+    assert documents_only["n"] == 0
+    assert documents_only["long_documents"]["token_budget"] == 70_000_000
+    assert documents_only["long_documents"]["max_document_tokens"] == 16384
+    assert documents_only["long_documents"]["version"] == LONG_DOCUMENT_VERSION
+    assert documents_only["long_documents"]["index_manifest"] == config["index_manifest"]
+    assert documents_only["long_documents"]["categories"] == config["categories"]
+    assert version != evaluation_config_version(**current)
+    with pytest.raises(ValueError, match="zero windows"):
+        cli.prepare_configuration(
+            documents_only, "main", cli.parse_args(["--long-document-tokens", "0"])
+        )
     assert config["token_budget"] == 6000000
     unchanged, _ = cli.prepare_configuration(
         current, "main", cli.parse_args(["--delta-threshold", ".005"])
@@ -604,7 +717,7 @@ def test_budget_changes_preserve_pins_and_threshold_updates_do_not_fetch(monkeyp
         previous, "main", cli.parse_args(["--long-document-tokens", "6000000"])
     )
     assert updated["long_documents"]["version"] == LONG_DOCUMENT_VERSION
-    assert updated["long_documents"]["max_document_tokens"] == 8192
+    assert updated["long_documents"]["max_document_tokens"] == 16384
     assert updated["long_documents"]["index_manifest"] == config["index_manifest"]
     assert updated["long_documents"]["categories"] == config["categories"]
 

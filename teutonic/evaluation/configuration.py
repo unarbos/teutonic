@@ -196,8 +196,10 @@ class EvaluationSettings:
             raise ValueError("evaluation config version must be a SHA-256 digest")
         if not self.dataset_label:
             raise ValueError("dataset label is required")
-        if self.n < 1:
-            raise ValueError("evaluation sample count must be positive")
+        if type(self.n) is not int or self.n < 0:
+            raise ValueError("evaluation window count must be a non-negative integer")
+        if self.n == 0 and self.long_documents is None:
+            raise ValueError("zero windows requires document evaluation")
         if not math.isfinite(self.delta_threshold) or self.delta_threshold < 0:
             raise ValueError("evaluation delta threshold must be finite")
         if not self.manifests:

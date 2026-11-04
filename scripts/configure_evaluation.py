@@ -19,7 +19,12 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 import chain_config
-from teutonic.competitions import ACTIVE_COMPETITIONS, normalize_competition
+from teutonic.competitions import (
+    ACTIVE_COMPETITIONS,
+    BOOTSTRAP_COMPETITIONS,
+    CONFIGURED_COMPETITIONS,
+    normalize_competition,
+)
 from teutonic.evaluation.configuration import (
     DatasetManifestSnapshot,
     EvaluationSettings,
@@ -39,9 +44,9 @@ from teutonic.evaluation.long_documents import (
     build_long_document_config,
 )
 from teutonic.evaluation.mixes import competition_snapshot, validate_definitions
-from teutonic.weights.transition import snapshot_transition
+from teutonic.weights.transition import prepare_mix07_replacement, snapshot_transition
 
-COMPETITIONS = ACTIVE_COMPETITIONS
+COMPETITIONS = CONFIGURED_COMPETITIONS
 LEGACY_SPLITS = ("math", "code", "text")
 
 
@@ -57,7 +62,7 @@ def parse_args(argv=None):
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--competition", type=normalize_competition, choices=COMPETITIONS, default="main")
     group.add_argument(
-        "--all", action="store_true", help="atomically configure all seven competitions"
+        "--all", action="store_true", help="atomically configure all active competition definitions"
     )
     parser.add_argument(
         "--initialize",
@@ -66,9 +71,13 @@ def parse_args(argv=None):
     )
     parser.add_argument("--replace-definition", action="store_true", help="replace categories and policy defaults from chain.toml")
     parser.add_argument("--bundle-dir", type=Path, help="prepared immutable manifests from prepare_competition_mixes.py")
-    parser.add_argument("--cutover", action="store_true", help="snapshot rewards, activate MIXes and retire legacy competitions atomically")
+    parser.add_argument("--cutover", action="store_true", help="initial legacy migration: snapshot rewards and activate MAIN/MIX01–06")
+    parser.add_argument(
+        "--replace-mix04", action="store_true",
+        help="activate MIX07 from MIX05's king; retire MIX04 while retaining its reward slot until MIX07 wins",
+    )
     parser.add_argument("--delta-threshold", type=float)
-    parser.add_argument("--n", type=int)
+    parser.add_argument("--n", type=int, help="window sample count; 0 requires document evaluation")
     parser.add_argument("--shards-per-dataset", type=int)
     parser.add_argument("--manifest", action="append", default=[], metavar="NAME=HTTPS_URL")
     parser.add_argument(
@@ -76,12 +85,12 @@ def parse_args(argv=None):
         action="store_true",
         help="explicitly re-fetch all configured manifest URLs",
     )
-    parser.add_argument("--long-document-tokens", type=int, help="additional whole-document token budget; 0 disables")
+    parser.add_argument("--long-document-tokens", type=int, help="whole-document token budget; 0 disables documents")
     parser.add_argument("--doc-index-manifest-url", default=DEFAULT_INDEX_MANIFEST_URL)
     parser.add_argument("--doc-index-manifest-file", type=Path, help="use exact local manifest bytes before publication")
     parser.add_argument("--doc-index-manifest-sha256", help="require this exact manifest hash")
     parser.add_argument("--max-document-tokens", type=int, choices=(MAX_DOCUMENT_TOKENS,), default=None,
-                        help="whole-document selection cap (8192 for the current policy)")
+                        help=f"whole-document selection cap ({MAX_DOCUMENT_TOKENS} for the current policy)")
     parser.add_argument("--refresh-doc-index", action="store_true", help="fetch and pin the current index manifest")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
@@ -127,7 +136,7 @@ def initial_configuration(key, fetch, bundle_dir=None):
             "manifests": (competition_snapshot(key, fetch, bundle_dir),)}
 
 
-def prepare_configuration(current, key, args, fetch=None):
+def prepare_configuration(current, key, args, fetch=None, *, index_manifest=None):
     if fetch is None:
         fetch = fetch_dataset_manifest
     overrides = {}
@@ -214,7 +223,9 @@ def prepare_configuration(current, key, args, fetch=None):
                 result["manifests"], token_budget=budget or previous_long["token_budget"],
                 max_document_tokens=cap,
                 index_manifest=(pin_index_manifest(args.doc_index_manifest_file.read_bytes(), args.doc_index_manifest_url, args.doc_index_manifest_sha256)
-                                if args.doc_index_manifest_file else fetch_index_manifest(args.doc_index_manifest_url, args.doc_index_manifest_sha256)),
+                                if args.doc_index_manifest_file else index_manifest
+                                if index_manifest is not None and not args.refresh_doc_index
+                                else fetch_index_manifest(args.doc_index_manifest_url, args.doc_index_manifest_sha256)),
             )
     settings = EvaluationSettings(config_version=evaluation_config_version(**result), **result)
     # Validates actual category coverage, rounding and shard capacity before activation.
@@ -226,10 +237,15 @@ def prepare_configuration(current, key, args, fetch=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    keys = COMPETITIONS if args.all else (args.competition,)
+    keys = (BOOTSTRAP_COMPETITIONS if args.cutover else ACTIVE_COMPETITIONS) if args.all else (args.competition,)
     validate_definitions()
     if args.cutover and not (args.all and args.initialize and args.replace_definition):
         raise ValueError("--cutover requires --all --initialize --replace-definition")
+    if args.replace_mix04 and (
+        args.all or args.cutover or args.competition != "mix07" or not args.initialize
+        or args.n != 0 or not args.long_document_tokens or args.long_document_tokens < 0
+    ):
+        raise ValueError("--replace-mix04 requires --competition MIX07 --initialize --n 0 --long-document-tokens BUDGET")
     main_name = required("TEUTONIC_COMPETITION")
     netuid, generation = int(required("TEUTONIC_NETUID")), required("TEUTONIC_CHAIN_GENERATION")
     # One transaction makes --all atomic and serializes administrative updates.
@@ -246,6 +262,14 @@ def main(argv=None) -> int:
             print(json.dumps({"reward_transition": transition, "dry_run": args.dry_run}))
         elif not main["reward_transition"]:
             raise ValueError("initialize the category competitions with --cutover")
+        rotation = prepare_mix07_replacement(connection, main) if args.replace_mix04 else None
+        if rotation:
+            print(json.dumps({
+                "replacement": "mix04->mix07",
+                "starting_reign_id": str(rotation["starting_reign_id"]),
+                "starting_source": "mix05", "dry_run": args.dry_run,
+                "rewards": "MIX04 retains its slot until MIX07's first crown",
+            }))
         for key in keys:
             name = main_name if key == "main" else key
             row = connection.execute(
@@ -262,7 +286,12 @@ def main(argv=None) -> int:
             ):
                 raise ValueError(f"competition name already belongs to another scope: {name}")
             current = load_active(connection, row["competition_id"]) if row else None
-            config, version = prepare_configuration(current, key, args)
+            if key == "mix07" and row is None and rotation is None:
+                raise ValueError("create MIX07 with --replace-mix04 to pin MIX05 and preserve MIX04 rewards")
+            config, version = prepare_configuration(
+                current, key, args,
+                index_manifest=rotation["index_manifest"] if rotation else None,
+            )
             print(
                 json.dumps(
                     {
@@ -288,7 +317,7 @@ def main(argv=None) -> int:
             )
             if key.startswith("mix") and not (
                 row and (row["current_reign_id"] or row["starting_reign_id"])
-            ) and main["current_reign_id"] is None:
+            ) and not rotation and main["current_reign_id"] is None:
                 raise ValueError("a kingless MIX requires a MAIN king to pin its starting point")
             if args.dry_run:
                 del current, config
@@ -305,7 +334,7 @@ def main(argv=None) -> int:
                     """UPDATE control_plane.competitions SET starting_reign_id=%s
                        WHERE competition_id=%s AND starting_reign_id IS NULL
                          AND current_reign_id IS NULL""",
-                    (main["current_reign_id"], row["competition_id"]),
+                    (rotation["starting_reign_id"] if rotation else main["current_reign_id"], row["competition_id"]),
                 )
             connection.execute(
                 "INSERT INTO control_plane.evaluation_early_stopping_policies(competition_id) VALUES (%s) ON CONFLICT DO NOTHING",
@@ -326,7 +355,20 @@ def main(argv=None) -> int:
             connection.execute(
                 """UPDATE control_plane.competitions SET active=(competition_key=ANY(%s))
                    WHERE competition_id=%s OR main_competition_id=%s""",
-                (list(COMPETITIONS), main["competition_id"], main["competition_id"]),
+                (list(keys), main["competition_id"], main["competition_id"]),
+            )
+        if rotation:
+            connection.execute(
+                "UPDATE control_plane.competitions SET reward_transition=%s,updated_at=clock_timestamp() WHERE competition_id=%s",
+                (Jsonb(rotation["reward_transition"]), main["competition_id"]),
+            )
+            connection.execute(
+                "UPDATE control_plane.competitions SET active=false,updated_at=clock_timestamp() WHERE competition_id=%s",
+                (rotation["retired_competition_id"],),
+            )
+            connection.execute(
+                "UPDATE control_plane.competitions SET active=true,updated_at=clock_timestamp() WHERE competition_id=%s",
+                (row["competition_id"],),
             )
     return 0
 

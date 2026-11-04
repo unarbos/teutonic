@@ -100,6 +100,35 @@ def test_sampler_keeps_shard_provenance_aligned_through_shuffle(tmp_path) -> Non
     assert metadata["_source_labels"] == ["fixture"] * 4
 
 
+def test_zero_windows_initializes_document_metadata_without_shard_io(tmp_path):
+    import pytest
+
+    from teutonic.evaluator import long_documents
+
+    sources = load_sources_module(tmp_path)
+    request = SimpleNamespace(
+        n=0, seq_len=2048, block_hash="block", hotkey="hotkey",
+        dataset_source="pretokenized_npy", long_documents={"fixture": True},
+        dataset_sources=[{"name": "fixture", "proportion": 1, "target_sequences": 0, "shards": []}],
+    )
+
+    def document_sample(req, sequences, metadata, on_phase):
+        assert req is request
+        assert sequences == metadata["_source_labels"] == metadata["_sample_provenance"] == []
+        assert metadata["dataset_seed"] == 123
+        assert metadata["sources"][0]["used_shards"] == []
+        assert metadata["sources"][0]["name"] == "fixture"
+        return [[42, 151645]], {"n": 1}
+
+    with patch.object(sources, "open_shard", side_effect=AssertionError("window shard read")), patch.object(
+        long_documents, "extend_with_long_documents", side_effect=document_sample
+    ):
+        assert sources.sample_eval_sequences(request) == ([[42, 151645]], {"n": 1})
+    request.long_documents = None
+    with pytest.raises(ValueError, match="zero windows"):
+        sources.sample_eval_sequences(request)
+
+
 def test_parallel_sampling_matches_serial_local_files(tmp_path):
     import hashlib
     import random

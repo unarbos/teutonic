@@ -10,7 +10,7 @@
 > code and chain contract.
 
 This file describes the Teutonic-II protocol. Evaluation documentation
-updated 2026-10-21 for the MAIN/MIX01–MIX06 category-competition release.
+updated 2026-11-04 for MIX07's DCLM-only replacement of MIX04.
 These rules apply after cutover; check published active competitions and
 thresholds before submitting.
 Live state changes; always re-check the live sources in section 1 before
@@ -22,8 +22,9 @@ describe the RETIRED Teutonic-I protocol. Do not follow them.
 ## 0. TL;DR
 
 Teutonic is a king-of-the-hill LLM pretraining competition. Each competition
-has its own king once established; a kingless MIX uses a fixed starting MAIN
-king as its baseline. Later MAIN promotions do not move that starting point.
+has its own king once established; a kingless MIX uses a fixed starting king.
+MIX07 pins MIX05's current king at activation; original MIX01–06 pin MAIN.
+Later promotions in the source competition do not move that starting point.
 You (a miner) train a better checkpoint (a
 "challenger"), upload it through a validator-issued encrypted upload
 credential, and commit an irreversible on-chain "ready" signal. The
@@ -121,10 +122,11 @@ before proceeding.
    weights may differ.
 4. A GPU evaluator scores king and challenger on the SAME token sequences,
    using BF16 replicas on eight GPUs (four replicas per side, one per GPU).
-   The sample contains 20,000 windows of 2,048 tokens plus approximately
-   30M input tokens from complete documents of 2,049-8,192 tokens. Window
-   fragments are isolated at EOS boundaries; whole documents retain their
-   full context. The complete mixed sample is scored, without early stopping.
+   Window count and whole-document input-token budget come from the active
+   PostgreSQL configuration. Setting window count to zero selects documents
+   only. Complete documents of 2,049-16,384 tokens retain their full context;
+   optional 2,048-token windows isolate fragments at EOS boundaries.
+   Evaluations containing whole documents run without early stopping.
    See section 3.1 for masking, sampling and memory behavior.
 5. Sample selection is deterministic and tied to the finalized ready block:
    `dataset_seed = int.from_bytes(blake2b(f"block_hash={finalized_ready_block_hash}|hotkey={your_hotkey}".encode(), digest_size=8).digest(), "little")`.
@@ -149,12 +151,13 @@ Active manifests and thresholds are controlled by PostgreSQL. The public
 dataset summaries reflect those configurations; changing chain.toml alone
 does not change active evaluations.
 
-There are seven active competitions: MAIN and MIX01–MIX06. Select one with
+After the MIX07 cutover, the seven active competitions are MAIN, MIX01–03 and
+MIX05–07. Select one with
 `teutonic-miner ready --competition MIX02` or
 `teutonic-miner submit ... --competition MIX02`. Names are case-insensitive;
 omission means MAIN. Selection is fixed at the ready commitment. One ready
 submission per hotkey applies globally across all competitions. The wire format
-reserves MIX01–MIX99, but this release enables only MIX01–MIX06. MATH, CODE and
+reserves MIX01–MIX99; MIX04 is retired when MIX07 activates. MATH, CODE and
 TEXT are retired: their histories remain readable, but they accept no new submissions.
 
 Each mix is an explicit flat list of unique categories. The same sampler uses
@@ -164,11 +167,13 @@ categories, proportional to token inventory. MIX06 contains all 25, adding
 `dclm-baseline-1.0` as one category. Follow each MIX's published category list
 and percentages rather than expanding retired competition names. MIX02 has no
 special sampling path and overlapping categories receive no extra weight.
+MIX07 contains only `dclm-baseline-1.0`, with category weight 100%.
 
-All MIXes start kingless. Their first challengers face a FIXED starting MAIN king
-using the selected MIX's own categories and threshold. This king is pinned once
+All MIXes start kingless. MIX07's first challengers face the MIX05 king pinned at
+cutover. Original MIX01–06 use a FIXED starting MAIN king. Every MIX uses its own
+categories and threshold. This starting king is pinned once
 at initialization (or when the fixed-baseline migration is applied to an existing
-kingless MIX). MAIN promotions do not change this opponent, including during an
+kingless MIX). Later source-competition promotions do not change this opponent, including during an
 evaluation or retry. Read `starting_king` in `competitions.json` for the pinned
 model digest and public model reference. After its first crown, a MIX uses its
 own current king. All duels run sequentially. Merged models
@@ -178,13 +183,20 @@ Uploading or losing does not change incentives. Cutover preserves MAIN's king
 and snapshots existing reward positions and proportions without changing initial
 payouts. Current MATH/CODE/TEXT kings and rewarded past MAIN positions remain as
 legacy reward positions; they do not automatically become MIX kings.
-Each FIRST MIX winner receives 12.5% and removes the oldest remaining legacy
+Each FIRST original MIX01–06 winner receives 12.5% and removes the oldest remaining legacy
 position, ordered by crowned block (bootstrap positions without reigns come first).
 That removed position receives zero. MAIN is protected from these evictions.
 The remaining budget, `100% - 12.5% * established_MIX_count`, is distributed
 between MAIN and surviving legacy positions in their relative snapshot proportions.
 Once no legacy positions remain, MAIN receives the entire remaining budget.
 With all six MIXes established, MAIN receives 25% and each MIX receives 12.5%.
+
+MIX07 is a replacement for MIX04, not a seventh reward slot. At activation,
+MIX04 stops accepting submissions and evaluations but retains its current 12.5%
+incentive. MIX07's pinned MIX05 baseline receives no extra incentive. Only MIX07's
+first successful crown transfers MIX04's slot to the new winner; losing submissions
+and failed promotions do not. Other reward positions and any surviving legacy
+recipients stay unchanged. MIX04 history remains available after retirement.
 
 A later MIX winner takes that MIX's 12.5%, with no additional legacy eviction.
 A new MAIN winner takes MAIN's current allocation; the outgoing MAIN is not added
@@ -194,16 +206,16 @@ eligibility normalization and the existing 101-block publication cadence.
 
 Configured competitions: https://teutonic.ai/competitions.json
 MAIN: https://teutonic.ai/dashboard.json
-MIXes: https://teutonic.ai/competitions/<mix01..mix06>/dashboard.json
+MIXes: https://teutonic.ai/competitions/<mix01..mix07>/dashboard.json (MIX04 historical)
 Dataset policy: corresponding `datasets/manifest.json` under each prefix.
-Raw inventories use immutable `splits/<main|mix01..mix06>/versions/<sha256>.json`
+Raw inventories use immutable `splits/<main|mix01..mix07>/versions/<sha256>.json`
 paths under the public datasets bucket; release URLs are pinned in `chain.toml`.
 
 
 ### 3.1 Document-masked evaluation and complete documents
 
 Scoring policy: `category-mix-token-bootstrap-v2`.
-Whole-document sampling policy: `long-documents-2k-8k-v1`.
+Whole-document sampling policy: `whole-documents-2k-16k-40-60-v3`.
 
 - MASKING: EOS token 151645 ends a document fragment. Attention cannot
   cross EOS or original window boundaries, and positions restart at zero
@@ -215,21 +227,26 @@ Whole-document sampling policy: `long-documents-2k-8k-v1`.
   boundaries; eager scoring uses explicit causal document masks.
 - COMPLETE DOCUMENTS: the additional sample reconstructs original
   documents across stored rows and shards. Length includes terminal EOS.
-  Only 2,049-8,192-token documents are eligible: the two buckets are
-  2,049-4,096 and 4,097-8,192, inclusive. Documents of 8,193 tokens or more
-  are excluded; longer documents are never cropped into the eligible range.
+  Eligible documents have 2,049-16,384 tokens: the two inclusive buckets are
+  2,049-4,096 and 4,097-16,384. Documents outside those ranges are excluded.
+  Documents are scored whole, never cropped or split. Both checkpoints must
+  support at least 16,384 positions.
 - MIX: every competition uses its explicit category weights as sampling targets
   for windows and whole documents. MAIN and MIX06 use token-inventory proportions;
   the other MIXes use their declared flat category weights. Within each category,
-  document COUNTS follow eligible buckets' relative populations. Every nonempty
-  eligible bucket gets at least one complete document. Token quotas and resulting
-  percentages are approximate because documents are indivisible.
+  40% of the document INPUT-TOKEN budget targets 2,049-4,096-token documents
+  and 60% targets 4,097-16,384-token documents. Sampling within each bucket is
+  uniform by document, without replacement. Both buckets must contain enough
+  complete documents; otherwise evaluation fails rather than reallocating quotas.
+  Each bucket gets at least one complete document. Token quotas and resulting
+  percentages are approximate because documents are indivisible. A configured
+  70M document-token budget targets approximately 28M and 42M tokens respectively.
 
-- WEIGHT IN THE SCORE: with 20,000 x 2,048 window input tokens plus ~30M
-  document input tokens, documents contribute about 42.3% of the combined
-  mean's weight. The exact weight uses scored targets after masking.
-  This is not a fixed 42.3% share of the LCB: bootstrap uncertainty is
-  calculated from the combined sample. Bootstrap units are original
+- WEIGHT IN THE SCORE: weight uses scored targets after masking. With
+  windows disabled, all weight comes from whole documents. With both
+  components enabled, their shares depend on the configured budgets and
+  actual scored targets. Bootstrap uncertainty is calculated from the
+  complete sample. Bootstrap units are original
   windows or whole documents, not tokens or internal window fragments.
 - REPLAY: the request pins the index manifest's exact contents and SHA-256,
   source manifests, file ETags and sizes. Index reads check `If-Match`, returned
@@ -445,10 +462,10 @@ teutonic-miner ready --hotkey h0 --competition MIX02
    strictly above that competition's threshold: the release default is 0.0015
    nats per scored token for all seven competitions. For a kingless MIX, use
    its fixed `starting_king` from `competitions.json` as the baseline and the
-   selected MIX's evaluation mix. Do not substitute a newer MAIN king.
+   selected MIX's evaluation mix. MIX07 uses its pinned MIX05 king; do not substitute a newer source king.
 2. MATCH THE EVAL DISTRIBUTION. Use the source and category mix in section
-   6, the genesis tokenizer, masked 2,048-token windows and complete
-   2,049-8,192-token documents. Prevent attention across document boundaries
+   6, the genesis tokenizer, complete 2,049-16,384-token documents and, when
+   enabled, masked 2,048-token windows. Prevent attention across document boundaries
    in offline validation and use the same target-counting rules.
 3. VALIDATE OFFLINE FIRST — you get ONE shot per hotkey. Reproduce the
    scoring policy locally with the same samples for both models. Pass
@@ -623,10 +640,12 @@ the coldkey.
 - accept rule: paired-bootstrap LCB of token-weighted CE advantage > the
   competition's delta_threshold (release default: 0.0015 for all seven);
   no largest-source, own-source or category gate
-- sample: 20,000 masked 2,048-token windows + ~30M input tokens from
-  complete 2,049-8,192-token documents; alpha=0.001, B=10000, bootstrap seed 0
-- competitions: MAIN and MIX01–MIX06; explicit unique category lists and
-  sampling weights shared by windows and documents; kingless MIXes face their fixed starting MAIN king
+- sample: configurable whole-document token budget (2,049-16,384-token documents;
+  40% of input tokens in 2k-4k, 60% in 4k-16k)
+  and optional 2,048-token windows; alpha=0.001, B=10000, bootstrap seed 0
+- competitions: MAIN, MIX01–03 and MIX05–07 after replacement; MIX07 is 100% DCLM;
+  MIX04 retains its reward slot until MIX07's first crown. Kingless MIXes face their
+  pinned starting king (MIX05 for MIX07, MAIN for original MIX01–06).
 - submission: `teutonic-miner register` -> `auth` -> `upload` -> `ready`
   (one shot per hotkey, forever)
 - contract: six genesis files byte-locked; weights only; <=250 GB

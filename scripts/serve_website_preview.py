@@ -101,7 +101,7 @@ def public_data_url(path: str) -> str | None:
     if path == "/benchmarks/results.json":
         return PUBLIC_BENCHMARK_URL
     if re.fullmatch(
-        r"/benchmarks/(?:king-benchmark-daily|competitions/mix0[1-6])/"
+        r"/benchmarks/(?:king-benchmark-daily|competitions/mix0[1-7])/"
         r"(?:all-kings/(?:results|latest)|kings/[A-Za-z0-9_-]+/results)\.json", path
     ):
         return PUBLIC_BENCHMARK_ORIGIN + path.removeprefix("/benchmarks")
@@ -211,7 +211,7 @@ def preview_payloads(established: int) -> dict:
             "sources": sources,
         }
         index.append({
-            "competition": key, "active": True, "has_king": has_king,
+            "competition": key, "active": key != "mix04", "has_king": has_king,
             "reward_transition": transition if key == "main" else None,
             "eval_n": spec["n"], "document_tokens": spec["long_document_tokens"],
             "delta_threshold": spec["delta_threshold"], "dashboard": prefix + "dashboard.json",

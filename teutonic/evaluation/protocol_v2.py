@@ -219,7 +219,7 @@ class EvaluationRequestV2:
             "limits",
         )
         normalized_limits: dict[str, int | float] = {}
-        for key, minimum in (("n", 1), ("seq_len", 2), ("n_bootstrap", 1), ("batch_size", 1)):
+        for key, minimum in (("n", 0), ("seq_len", 2), ("n_bootstrap", 1), ("batch_size", 1)):
             number = limits.get(key)
             if isinstance(number, bool) or not isinstance(number, int) or number < minimum:
                 raise ProtocolValidationError(f"limits.{key} must be an integer >= {minimum}")
@@ -257,13 +257,6 @@ class EvaluationRequestV2:
                 early_stopping = EarlyStoppingPolicy.from_mapping(early_stopping_data)
             except ValueError as exc:
                 raise ProtocolValidationError(str(exc)) from exc
-            if (
-                early_stopping.enabled
-                and early_stopping.check_interval > normalized_limits["n"]
-            ):
-                raise ProtocolValidationError(
-                    "early stopping check_interval cannot exceed limits.n"
-                )
             normalized_early_stopping = early_stopping.request_dict()
 
         dataset = _required_mapping(data.get("dataset"), "dataset")
@@ -296,8 +289,8 @@ class EvaluationRequestV2:
             if isinstance(target, bool) or not isinstance(target, int) or target < 0:
                 raise ProtocolValidationError(f"{path}.target_sequences must be non-negative")
             raw_shards = source.get("shards")
-            if not isinstance(raw_shards, list) or not raw_shards:
-                raise ProtocolValidationError(f"{path}.shards must be a non-empty array")
+            if not isinstance(raw_shards, list) or (target > 0 and not raw_shards):
+                raise ProtocolValidationError(f"{path}.shards must be an array, non-empty for positive targets")
             normalized_shards: list[dict[str, Any]] = []
             for shard_index, shard_value in enumerate(raw_shards):
                 shard_path = f"{path}.shards[{shard_index}]"
@@ -375,6 +368,12 @@ class EvaluationRequestV2:
                 if {m["name"] for m in long_documents["manifests"]} != names:
                     raise ProtocolValidationError("long-document sources differ from window sources")
                 normalized_dataset["long_documents"] = deepcopy(long_documents)
+
+        if "long_documents" not in normalized_dataset:
+            if normalized_limits["n"] == 0:
+                raise ProtocolValidationError("zero windows requires document evaluation")
+            if early_stopping.enabled and early_stopping.check_interval > normalized_limits["n"]:
+                raise ProtocolValidationError("early stopping check_interval cannot exceed limits.n")
 
         normalized_payload = {
             "protocol_version": PROTOCOL_VERSION,

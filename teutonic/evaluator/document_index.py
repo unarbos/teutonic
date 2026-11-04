@@ -19,7 +19,9 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 
+from teutonic.evaluation.categories import apportion
 from teutonic.evaluation.long_documents import (
+    LENGTH_BUCKET_TOKEN_WEIGHTS,
     LENGTH_BUCKETS,
     MAX_DOCUMENT_TOKENS,
     validate_index_file,
@@ -293,15 +295,20 @@ class DocumentIndex:
 
 
 def sample_category(index, *, token_budget, seed, max_tokens):
-    """Balance document COUNTS by bucket prevalence, stopping near a token quota.
+    """Split input tokens 40/60 between 2k-4k and 4k-16k whole documents.
 
-    Every eligible nonempty bucket gets one document. Remaining draws go to the
-    most underrepresented bucket; the final whole document is included only if
-    it brings the total closer to the quota. No document is truncated.
+    Draw uniformly without replacement within each bucket. Include at least one
+    complete document per bucket, then stop near its token quota without cropping.
+    Missing or exhausted buckets fail rather than silently changing the mixture.
     """
+    if max_tokens < MAX_DOCUMENT_TOKENS:
+        raise ValueError(f"document sampling requires a context limit of at least {MAX_DOCUMENT_TOKENS}")
     rng = np.random.default_rng(seed)
+    quotas = apportion(token_budget, len(LENGTH_BUCKETS), LENGTH_BUCKET_TOKEN_WEIGHTS)
     buckets = []
-    for name, minimum, maximum in LENGTH_BUCKETS:
+    for (name, minimum, maximum), weight, quota in zip(
+        LENGTH_BUCKETS, LENGTH_BUCKET_TOKEN_WEIGHTS, quotas, strict=True
+    ):
         lo = index.tokens.search(minimum)
         natural_hi = (
             len(index.tokens) if maximum is None else index.tokens.search(maximum, right=True)
@@ -314,16 +321,17 @@ def sample_category(index, *, token_budget, seed, max_tokens):
                 "lo": lo,
                 "hi": hi,
                 "population": hi - lo,
+                "token_weight": weight,
+                "target_tokens": quota,
                 "excluded_over_context_limit": natural_hi - hi,
                 "sampled_documents": 0,
                 "sampled_tokens": 0,
                 "incomplete_skipped": 0,
             }
         )
-    active = [i for i, b in enumerate(buckets) if b["population"]]
-    if not active:
-        raise ValueError("category contains no eligible documents longer than 2048")
-    population = sum(b["population"] for b in buckets)
+    for bucket in buckets:
+        if not bucket["population"]:
+            raise ValueError(f"category contains no eligible documents in required bucket {bucket['bucket']}")
     used = [set() for _ in buckets]
     selected, total = [], 0
 
@@ -353,25 +361,20 @@ def sample_category(index, *, token_budget, seed, max_tokens):
         buckets[which]["sampled_documents"] += 1
         buckets[which]["sampled_tokens"] += document["length"]
 
-    for which in active:
+    for which, bucket in enumerate(buckets):
         take(which, draw(which))
-    while total < token_budget:
-        which = max(
-            active,
-            key=lambda i: (
-                buckets[i]["population"] / population * (len(selected) + 1)
-                - buckets[i]["sampled_documents"]
-            ),
-        )
-        document = draw(which)
-        if abs(total + document["length"] - token_budget) >= token_budget - total:
-            break
-        take(which, document)
+        while bucket["sampled_tokens"] < bucket["target_tokens"]:
+            document = draw(which)
+            remaining = bucket["target_tokens"] - bucket["sampled_tokens"]
+            if abs(document["length"] - remaining) >= remaining:
+                break
+            take(which, document)
     return selected, {
         "target_tokens": token_budget,
         "sampled_tokens": total,
         "n_documents": len(selected),
         "max_document_tokens": min(max_tokens, MAX_DOCUMENT_TOKENS),
+        "excluded_under_length_limit": index.tokens.search(LENGTH_BUCKETS[0][1]),
         "excluded_over_length_limit": len(index.tokens) - index.tokens.search(min(max_tokens, MAX_DOCUMENT_TOKENS), right=True),
         "buckets": buckets,
     }

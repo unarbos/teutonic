@@ -18,15 +18,15 @@ function publication(entries, generated = earlier) {
 }
 
 // Competition scopes distinguish equal reign IDs and identical models across mixes.
-const scopes = ["main", "mix01", "mix02", "mix03", "mix04", "mix05", "mix06"];
+const scopes = ["main", "mix01", "mix02", "mix03", "mix04", "mix05", "mix06", "mix07"];
 let combined = dashboard.mergeBenchmarkSources(scopes.map((competition, index) => ({ competition, results: publication([result("same-id", .5 + index / 100)]) })));
 let view = dashboard.benchmarkPresentation(combined);
-assert.equal(view.kingCount, 7);
-assert.equal(new Set(view.kings.map(king => king.key)).size, 7);
-assert.equal(view.best.competition, "mix06");
-assert.ok(Math.abs(view.best.average - .56) < 1e-12);
-assert.equal(view.benchmarkResultCount, 84);
-assert.equal(view.series[0].points.length, 7);
+assert.equal(view.kingCount, 8);
+assert.equal(new Set(view.kings.map(king => king.key)).size, 8);
+assert.equal(view.best.competition, "mix07");
+assert.ok(Math.abs(view.best.average - .57) < 1e-12);
+assert.equal(view.benchmarkResultCount, 96);
+assert.equal(view.series[0].points.length, 8);
 
 // MAIN and MIX reign numbers share one timeline ordered by date, not by reign.
 const datedKing = (id, reign, crowned, generated) => result(id, .5, 12, {
@@ -105,4 +105,4 @@ assert.equal(dashboard.benchmarkDetailsKey("main", "king"), "king-benchmark-dail
 assert.throws(() => dashboard.mergeBenchmarkSources([{ competition: "mix01", details: [{ king_id: "wrong", result: result("other", .5) }] }]), /does not match/);
 assert.throws(() => dashboard.mergeBenchmarkSources([{ competition: "mix01", results: { schema_version: "invalid", kings: [] } }]), /unsupported benchmark/);
 
-console.log("Benchmark sources: seven scopes, complete averages, running updates, stale publications, and detail identities passed.");
+console.log("Benchmark sources: eight historical scopes, complete averages, running updates, stale publications, and detail identities passed.");

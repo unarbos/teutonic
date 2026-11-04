@@ -54,7 +54,15 @@ class EvaluationPolicyConfig:
             raise ValueError("max_attempts must be positive")
         if not 1 <= self.batch_size <= MAX_BATCH_SIZE:
             raise ValueError(f"batch_size must be in [1, {MAX_BATCH_SIZE}]")
-        if self.early_stopping.enabled and self.early_stopping.check_interval > self.n:
+        if type(self.n) is not int or self.n < 0:
+            raise ValueError("evaluation window count must be a non-negative integer")
+        if self.n == 0 and self.long_documents is None:
+            raise ValueError("zero windows requires document evaluation")
+        if (
+            self.long_documents is None
+            and self.early_stopping.enabled
+            and self.early_stopping.check_interval > self.n
+        ):
             raise ValueError("early stopping check_interval cannot exceed evaluation n")
         if self.dataset_source != "pretokenized_npy" or not self.dataset_manifests:
             raise ValueError("evaluation needs database-backed pre-tokenized manifests")

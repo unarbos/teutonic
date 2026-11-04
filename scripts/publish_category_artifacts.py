@@ -58,8 +58,8 @@ def publish_bundle(directory, bucket, index_file=None):
     validate_definitions()
     directory = Path(directory)
     entries = json.loads((directory / "bundle.json").read_text())["competitions"]
-    if set(entries) != set(chain_config.COMPETITION_DEFAULTS):
-        raise ValueError("publication needs all seven competitions")
+    if not entries or set(entries) - set(chain_config.COMPETITION_DEFAULTS):
+        raise ValueError("publication needs a nonempty bundle of configured competitions")
     index_artifact = None
     if index_file:
         raw = Path(index_file).read_bytes()

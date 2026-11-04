@@ -3,7 +3,7 @@
   var ENDPOINT = "/dashboard.json";
   var DATASET_MANIFEST_URL = "/competitions/mix06/datasets/manifest.json";
   var BENCHMARK_STORAGE_BASE = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev/";
-  var BENCHMARK_COMPETITIONS = ["main", "mix01", "mix02", "mix03", "mix04", "mix05", "mix06"];
+  var BENCHMARK_COMPETITIONS = ["main", "mix01", "mix02", "mix03", "mix04", "mix05", "mix06", "mix07"];
   var MODEL_STORAGE_BASE = "https://pub-0821d4e196224864af220294345fd141.r2.dev/";
   var POLL_MS = 15000;
   var DATASET_POLL_MS = 60000;
@@ -411,7 +411,8 @@
   function renderReigns() {
     var body = el("reigns-body"), rows = [];
     competitionSources().forEach(function (source) {
-      if (source.active === false) return;
+      var rewardMixes = (mainMixState && mainMixState.rewardTransition || {}).mixes || {};
+      if (source.active === false && !rewardMixes[source.key]) return;
       var d = source.dashboard;
       if (!d) return;
       if (source.key === "main" && !(mainMixState && mainMixState.rewardTransition)) {
@@ -610,7 +611,7 @@
     }
     cell(row, view ? number(view.evalN) : "--");
     cell(row, number(state.documentTokens));
-    cell(row, state.hasKing ? "OWN KING" : "LATEST MAIN KING");
+    cell(row, state.hasKing ? "OWN KING" : state.key === "mix07" ? "PINNED MIX05 KING" : "PINNED MAIN KING");
     cell(row, manifest ? "> " + metric(manifest.delta_threshold, 4) : "--");
     datasetCell(row, "MANIFEST", "", state.prefix + "datasets/manifest.json");
   }

@@ -22,7 +22,7 @@ function node(key, entries) {
 // of the old containment tree. Source dataset and category jointly identify data.
 const nodes = Object.entries(config).map(([key, entries]) => node(key, entries));
 const links = buildGraph(nodes);
-assert.equal(links.length, 21);
+assert.equal(links.length, 24);
 const byKey = new Map(nodes.map(value => [value.key, value]));
 const seen = new Set();
 for (const link of links) {
@@ -48,6 +48,9 @@ for (const [key, shared, added, missing] of [["mix06", 24, 1, 0], ["mix01", 18, 
 }
 assert.ok(Math.abs(byKey.get("mix01").weights.get("dclm-baseline-1.0\0dclm-baseline-1.0") - 0.1) < 1e-12);
 assert.ok(Math.abs(byKey.get("mix05").weights.get("dclm-baseline-1.0\0dclm-baseline-1.0") - 0.4) < 1e-12);
+assert.equal(byKey.get("mix07").categories.size, 1);
+assert.equal(byKey.get("mix07").weights.get("dclm-baseline-1.0\0dclm-baseline-1.0"), 1);
+assert.equal(compareMixes(byKey.get("mix07"), main).shared.length, 0);
 const mix05mix06 = compareMixes(byKey.get("mix05"), byKey.get("mix06"));
 assert.equal(mix05mix06.shared.length, 8);
 assert.ok(Math.abs(mix05mix06.weight - 0.46359867374521413) < 1e-12);
@@ -73,4 +76,4 @@ assert.deepEqual(buildGraph([
 ]), []);
 assert.deepEqual(buildGraph([]), []);
 assert.deepEqual(buildGraph([node("a", entries("one"))]), []);
-console.log("Competition graph: 21 real overlaps, MAIN/DCLM relationships, unique categories, and exact source identities passed.");
+console.log("Competition graph: 24 real overlaps, MAIN/DCLM relationships, unique categories, and exact source identities passed.");

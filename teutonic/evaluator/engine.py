@@ -34,7 +34,7 @@ import traceback
 import types
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -2246,6 +2246,47 @@ def get_model_worker_pool(gpu_ids: list[int]) -> PersistentModelWorkerPool:
     return _model_worker_pool
 
 
+@contextmanager
+def loading_model_workers(
+    req: EvalRequest,
+    king_snapshot: str,
+    challenger_snapshot: str,
+    gpu_ids: list[int],
+    on_progress,
+):
+    """Load verified models while the caller prepares and validates the corpus."""
+    global _model_worker_pool
+    pool = get_model_worker_pool(gpu_ids)
+    cancelled = threading.Event()
+
+    def loading_progress(info):
+        # The loading thread owns worker shutdown. Check between load events
+        # (including the loader's periodic heartbeat) if corpus preparation failed.
+        if cancelled.is_set():
+            raise RuntimeError("model loading cancelled after evaluation setup failed")
+        on_progress(info)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="eval-model-load") as executor:
+            loading = executor.submit(
+                pool.load_models,
+                req.model_copy(deep=True),
+                king_snapshot,
+                challenger_snapshot,
+                loading_progress,
+            )
+            try:
+                yield pool, loading
+            finally:
+                # Join the loader before releasing the evaluation's cache locks.
+                cancelled.set()
+    except BaseException:
+        pool.close(force=True)
+        if _model_worker_pool is pool:
+            _model_worker_pool = None
+        raise
+
+
 def score_with_model_workers(
     sequences: list[list[int]],
     req: EvalRequest,
@@ -2639,50 +2680,6 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             ),
         }
 
-        on_phase({
-            "phase": "dataset_sample_start",
-            "source": req.dataset_source,
-            "n": req.n,
-            "seq_len": req.seq_len,
-        })
-        sequences, dataset_meta = sample_eval_sequences(req, on_phase=on_phase)
-        if not sequences:
-            raise RuntimeError("pretokenized evaluation corpus is empty")
-        corpus_lengths = [len(sequence) for sequence in sequences]
-        corpus_max_seq_len = max(corpus_lengths)
-        corpus_min_seq_len = min(corpus_lengths)
-        if corpus_max_seq_len > int(king_config.max_position_embeddings):
-            raise RuntimeError(
-                f"corpus max sequence length {corpus_max_seq_len} exceeds checkpoint limit "
-                f"{king_config.max_position_embeddings}"
-            )
-        king_config._eval_max_model_len = corpus_max_seq_len
-        challenger_config._eval_max_model_len = corpus_max_seq_len
-        dataset_meta.update({
-            "min_seq_len": corpus_min_seq_len,
-            "max_seq_len": corpus_max_seq_len,
-            "max_model_len": corpus_max_seq_len,
-            "length_source": "tokenized_corpus",
-        })
-        # Pop private key so it never reaches the verdict JSON or disk record.
-        source_labels: list[str] | None = dataset_meta.pop("_source_labels", None)
-        sample_provenance: list[dict[str, Any]] | None = dataset_meta.pop(
-            "_sample_provenance", None
-        )
-        if sample_provenance is None or len(sample_provenance) != len(sequences):
-            raise RuntimeError(
-                "evaluation sampler returned incomplete sample provenance"
-            )
-        public_dataset_meta = _public_dataset_meta(dataset_meta)
-        check_eval_runtime(t0)
-        on_phase({
-            "phase": "dataset_sample_done",
-            "digest": dataset_meta["digest"][:16],
-            "min_seq_len": corpus_min_seq_len,
-            "max_seq_len": corpus_max_seq_len,
-            "max_model_len": corpus_max_seq_len,
-        })
-
         worker_specs = model_worker_specs(_gpu_ids)
         on_phase({
             "phase": "parallel_models_setup",
@@ -2700,14 +2697,64 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             f"cuda:{spec['gpu_ids'][0]}" for spec in worker_specs if spec["role"] == "challenger"
         )
         use_parallel = True
-        king_losses, challenger_losses, worker_meta = score_with_model_workers(
-            sequences,
-            req,
-            king_snapshot,
-            challenger_snapshot,
-            _gpu_ids,
-            on_phase,
-        )
+        with loading_model_workers(
+            req, king_snapshot, challenger_snapshot, _gpu_ids, on_phase,
+        ) as (pool, model_loading):
+            def sampling_progress(info):
+                # Surface model failures at the next sampling progress event.
+                if model_loading.done():
+                    model_loading.result()
+                on_phase(info)
+
+            on_phase({
+                "phase": "dataset_sample_start",
+                "source": req.dataset_source,
+                "n": req.n,
+                "seq_len": req.seq_len,
+            })
+            sequences, dataset_meta = sample_eval_sequences(req, on_phase=sampling_progress)
+            if not sequences:
+                raise RuntimeError("pretokenized evaluation corpus is empty")
+            corpus_lengths = [len(sequence) for sequence in sequences]
+            corpus_max_seq_len = max(corpus_lengths)
+            corpus_min_seq_len = min(corpus_lengths)
+            if corpus_max_seq_len > int(king_config.max_position_embeddings):
+                raise RuntimeError(
+                    f"corpus max sequence length {corpus_max_seq_len} exceeds checkpoint limit "
+                    f"{king_config.max_position_embeddings}"
+                )
+            king_config._eval_max_model_len = corpus_max_seq_len
+            challenger_config._eval_max_model_len = corpus_max_seq_len
+            dataset_meta.update({
+                "min_seq_len": corpus_min_seq_len,
+                "max_seq_len": corpus_max_seq_len,
+                "max_model_len": corpus_max_seq_len,
+                "length_source": "tokenized_corpus",
+            })
+            # Pop private key so it never reaches the verdict JSON or disk record.
+            source_labels: list[str] | None = dataset_meta.pop("_source_labels", None)
+            sample_provenance: list[dict[str, Any]] | None = dataset_meta.pop(
+                "_sample_provenance", None
+            )
+            if sample_provenance is None or len(sample_provenance) != len(sequences):
+                raise RuntimeError(
+                    "evaluation sampler returned incomplete sample provenance"
+                )
+            public_dataset_meta = _public_dataset_meta(dataset_meta)
+            check_eval_runtime(t0)
+            on_phase({
+                "phase": "dataset_sample_done",
+                "digest": dataset_meta["digest"][:16],
+                "min_seq_len": corpus_min_seq_len,
+                "max_seq_len": corpus_max_seq_len,
+                "max_model_len": corpus_max_seq_len,
+            })
+
+            generation = model_loading.result()
+            check_eval_runtime(t0)
+            king_losses, challenger_losses, worker_meta = pool.score(
+                sequences, generation, req, on_phase,
+            )
 
         counts = worker_meta["scored_tokens"]
         verdict = bootstrap_verdict(

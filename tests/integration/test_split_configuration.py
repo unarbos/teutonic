@@ -207,7 +207,7 @@ def test_initialize_dry_run_targeted_update_and_atomic_all(database, tmp_path):
     assert all("shards" not in r["manifest_json"] and "_shards_zlib_base64" not in r["manifest_json"] for r in summaries)
     assert all(r["delta_threshold"] == chain_config.COMPETITION_DEFAULTS[r["competition_key"]]["delta_threshold"] for r in rows)
     states = database.execute("SELECT competition_key,active,current_reign_id,starting_reign_id,reward_transition FROM control_plane.competitions WHERE netuid=998").fetchall()
-    assert {r["competition_key"] for r in states if r["active"]} == set(admin.COMPETITIONS)
+    assert {r["competition_key"] for r in states if r["active"]} == set(admin.BOOTSTRAP_COMPETITIONS)
     assert all(r["current_reign_id"] is None for r in states if r["competition_key"].startswith("mix"))
     starting_king = next(r["current_reign_id"] for r in states if r["competition_key"] == "main")
     assert all(r["starting_reign_id"] == starting_king for r in states if r["competition_key"].startswith("mix"))
@@ -261,6 +261,68 @@ def test_reward_snapshot_orders_reigns_by_position_when_hotkeys_overlap(database
     assert [entry["crowned_block"] for entry in state["legacy"]] == [10, 50, 70, 200]
 
 
+def test_mix07_cutover_is_atomic_preserves_rewards_and_never_repins(database, tmp_path):
+    from psycopg.types.json import Jsonb
+
+    from teutonic.evaluation.mixes import write_bundle
+    from teutonic.weights.policy import replacement_after_win, replacement_rewards
+
+    seed_main(database)
+    seed_rewards(database)
+    outputs, index = category_fixtures()
+    write_bundle(outputs, tmp_path)
+    with patch.object(admin, "fetch_index_manifest", return_value=index):
+        run_admin("--all", "--initialize", "--replace-definition", "--cutover", "--bundle-dir", str(tmp_path))
+    main = database.execute("SELECT * FROM control_plane.competitions WHERE netuid=998 AND competition_key='main'").fetchone()
+    state = main["reward_transition"]
+    reigns = {}
+    for key, digest in (("mix04", "d"), ("mix05", "e")):
+        cid = database.execute("SELECT competition_id FROM control_plane.competitions WHERE netuid=998 AND competition_key=%s", (key,)).fetchone()["competition_id"]
+        reigns[key] = database.execute(
+            """INSERT INTO control_plane.king_reigns(competition_id,reign_number,model_digest,public_bucket,public_prefix,
+                   hotkey,uid,crowned_at,crowned_finalized_block,operator_provenance)
+               VALUES (%s,1,%s,'public',%s,%s,5,now(),200,'test') RETURNING reign_id""",
+            (cid, digest * 64, f"models/sha256/{digest * 64}/", key + "-king"),
+        ).fetchone()["reign_id"]
+        database.execute("UPDATE control_plane.competitions SET current_reign_id=%s,next_reign_number=2 WHERE competition_id=%s", (reigns[key], cid))
+        state = replacement_after_win(state, key, key + "-king")
+    database.execute("UPDATE control_plane.competitions SET reward_transition=%s WHERE competition_id=%s", (Jsonb(state), main["competition_id"]))
+    original_rewards = replacement_rewards(state)
+    original_policies = policies(database)
+    arguments = ("--competition", "MIX07", "--initialize", "--replace-mix04", "--n", "0",
+                 "--long-document-tokens", "70000000", "--bundle-dir", str(tmp_path))
+    with patch.object(admin, "fetch_index_manifest", side_effect=AssertionError("must reuse MIX05 index pin")):
+        assert run_admin(*arguments, "--dry-run") == 0
+        assert policies(database) == original_policies
+        with patch.object(admin, "store_evaluation_configuration", side_effect=RuntimeError("write failure")), pytest.raises(RuntimeError, match="write failure"):
+            run_admin(*arguments)
+        assert policies(database) == original_policies
+        assert database.execute("SELECT active FROM control_plane.competitions WHERE netuid=998 AND competition_key='mix04'").fetchone()["active"]
+        assert run_admin(*arguments) == 0
+        rows = {r["competition_key"]: r for r in database.execute("SELECT * FROM control_plane.competitions WHERE netuid=998").fetchall()}
+        assert not rows["mix04"]["active"] and rows["mix07"]["active"]
+        assert rows["mix07"]["starting_reign_id"] == reigns["mix05"]
+        assert rows["mix07"]["current_reign_id"] is None
+        assert replacement_rewards(rows["main"]["reward_transition"]) == original_rewards
+        configured = admin.load_active(database, rows["mix07"]["competition_id"])
+        assert configured["n"] == 0
+        assert configured["long_documents"]["token_budget"] == 70_000_000
+        assert configured["long_documents"]["index_manifest"] == index
+        assert configured["manifests"][0].manifest["category_weights"] == {"dclm-baseline-1.0": 1.0}
+        assert len(configured["long_documents"]["categories"]) == 1
+        assert configured["long_documents"]["categories"][0]["category"] == "dclm-baseline-1.0"
+        # A later MIX05 crown must not move MIX07's initial baseline on rerun.
+        database.execute("UPDATE control_plane.king_reigns SET ended_at=now(),replacement_reason='test' WHERE reign_id=%s", (reigns["mix05"],))
+        later = database.execute(
+            """INSERT INTO control_plane.king_reigns(competition_id,reign_number,model_digest,public_bucket,public_prefix,
+                   hotkey,uid,crowned_at,crowned_finalized_block,operator_provenance)
+               VALUES (%s,2,%s,'public',%s,'later-mix05',6,now(),300,'test') RETURNING reign_id""",
+            (rows["mix05"]["competition_id"], "f" * 64, f"models/sha256/{'f' * 64}/"),
+        ).fetchone()["reign_id"]
+        database.execute("UPDATE control_plane.competitions SET current_reign_id=%s,next_reign_number=3 WHERE competition_id=%s", (later, rows["mix05"]["competition_id"]))
+        assert run_admin(*arguments) == 0
+        after = database.execute("SELECT starting_reign_id FROM control_plane.competitions WHERE competition_id=%s", (rows["mix07"]["competition_id"],)).fetchone()
+        assert after["starting_reign_id"] == reigns["mix05"]
 def test_cutover_refuses_running_intake_before_configuration_writes(database):
     from teutonic.access.repository import CONTROLLER_ADVISORY_LOCK_ID
     seed_rewards(database)

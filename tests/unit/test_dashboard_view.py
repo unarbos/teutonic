@@ -235,6 +235,9 @@ class DashboardContractTests(unittest.TestCase):
         }]
         parsed = json.loads(canonical_dashboard_json(fixture))
         self.assertEqual(parsed["dataset_versions"][0]["sources"][0]["name"], "fixture")
+        fixture["dataset_versions"][0]["eval_n"] = 0
+        parsed = json.loads(canonical_dashboard_json(fixture))
+        self.assertEqual(parsed["dataset_versions"][0]["eval_n"], 0)
         source = fixture["dataset_versions"][0]["sources"][0]
         source["dataset"] = "dclm-baseline-1.0"
         parsed = json.loads(canonical_dashboard_json(fixture))

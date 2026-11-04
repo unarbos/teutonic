@@ -34,7 +34,9 @@ def competition_rewards(main_history: Sequence[str], split_kings: Mapping[str, s
 
 def validate_transition(state):
     from teutonic.competitions import MIX_COMPETITIONS
-    if not isinstance(state, dict) or state.get("version") != "mix-replacement-v1":
+    if not isinstance(state, dict) or state.get("version") not in {
+        "mix-replacement-v1", "mix-successor-v2"
+    }:
         raise ValueError("invalid reward transition")
     entries = [state["main"], *state["legacy"]]
     if len({e["id"] for e in entries}) != len(entries) or len(state["legacy"]) > 6:
@@ -43,6 +45,15 @@ def validate_transition(state):
         raise ValueError("invalid incumbent reward allocation")
     if set(state["mixes"]) - set(MIX_COMPETITIONS) or any(not h for h in state["mixes"].values()):
         raise ValueError("invalid MIX reward roster")
+    if len(state["mixes"]) > 6 or {"mix04", "mix07"} <= set(state["mixes"]):
+        raise ValueError("MIX04 and MIX07 share one reward slot")
+    if state["version"] == "mix-replacement-v1" and "mix07" in state["mixes"]:
+        raise ValueError("MIX07 requires the successor transition")
+    if state["version"] == "mix-successor-v2" and (
+        state.get("successors") != {"mix07": "mix04"}
+        or not {"mix04", "mix07"} & set(state["mixes"])
+    ):
+        raise ValueError("invalid MIX07 successor transition")
     if len(state["mixes"]) == 6 and state["legacy"]:
         raise ValueError("all MIX winners must displace the legacy roster")
 
@@ -70,12 +81,34 @@ def replacement_after_win(state, competition, hotkey):
     if competition == "main":
         result["main"]["hotkey"] = hotkey
     elif competition in MIX_COMPETITIONS:
-        if competition not in result["mixes"] and result["legacy"]:
+        if result["version"] == "mix-successor-v2" and competition == "mix04":
+            raise ValueError("retired MIX04 cannot crown another king")
+        predecessor = result.get("successors", {}).get(competition)
+        if predecessor in result["mixes"]:
+            incumbent = result["mixes"].pop(predecessor)
+            result["evictions"].append({
+                "competition": competition,
+                "entry": {"id": predecessor, "hotkey": incumbent, "weight": 0.125},
+            })
+        elif competition not in result["mixes"] and result["legacy"]:
             removed = result["legacy"].pop(0)
             result["evictions"].append({"competition": competition, "entry": removed})
         result["mixes"][competition] = hotkey
     else:
         raise ValueError("retired or unknown competition cannot receive rewards")
+    validate_transition(result)
+    return result
+
+
+def begin_mix07_replacement(state):
+    """Retain MIX04's full reward slot until MIX07 is actually crowned."""
+    validate_transition(state)
+    result = deepcopy(state)
+    if result["version"] == "mix-successor-v2":
+        return result
+    if "mix04" not in result["mixes"]:
+        raise ValueError("MIX04 must have a rewarded king before replacement")
+    result.update(version="mix-successor-v2", successors={"mix07": "mix04"})
     validate_transition(result)
     return result
 

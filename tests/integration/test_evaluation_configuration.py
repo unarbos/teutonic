@@ -82,6 +82,24 @@ class EvaluationConfigurationIntegrationTests(unittest.TestCase):
         assert repository.load_evaluation_settings().long_documents == config
         row = self.connection.execute("SELECT competition_id FROM control_plane.competitions WHERE netuid=999 AND chain_generation='evaluation-config-test' AND name='fixture'").fetchone()
         assert load_active(self.connection, row["competition_id"])["long_documents"] == config
+        documents_only_config = {**config, "token_budget": 70_000_000}
+        documents_only = store_evaluation_configuration(
+            self.connection, **{**args, "n": 0}, long_documents=documents_only_config
+        )
+        assert documents_only.config_version != added.config_version
+        settings = repository.load_evaluation_settings()
+        assert settings.n == 0
+        assert settings.long_documents["token_budget"] == 70_000_000
+        assert settings.long_documents["index_manifest"] == config["index_manifest"]
+        active = load_active(self.connection, row["competition_id"])
+        assert active["n"] == 0
+        assert active["long_documents"] == documents_only_config
+        for empty_document_config in (None, "null", "{}", '{"token_budget":0}'):
+            with self.assertRaises(psycopg.errors.CheckViolation), self.connection.transaction():
+                self.connection.execute(
+                    "UPDATE control_plane.evaluation_configs SET long_documents=%s::jsonb WHERE evaluation_config_id=%s",
+                    (empty_document_config, documents_only.evaluation_config_id),
+                )
         disabled = store_evaluation_configuration(self.connection, **args, long_documents=None)
         assert disabled.config_version == initial.config_version
         assert repository.load_evaluation_settings().long_documents is None

@@ -9,7 +9,7 @@ import pytest
 import chain_config
 from scripts.configure_evaluation import parse_args, prepare_configuration
 from teutonic.access.contracts import ReadySignal, ready_signal_payload
-from teutonic.competitions import ACTIVE_COMPETITIONS, normalize_competition
+from teutonic.competitions import ACTIVE_COMPETITIONS, BOOTSTRAP_COMPETITIONS, normalize_competition
 from teutonic.dashboard.projection import _dataset_sources
 from teutonic.evaluation.configuration import (
     DatasetManifestSnapshot,
@@ -193,12 +193,12 @@ def test_reward_transition_displaces_one_position_only_on_first_win():
     assert len(newer["legacy"]) == 3
     assert len(newer["evictions"]) == 1
     assert "winner" not in dict(zip(*replacement_rewards(newer)))
-    for key in ACTIVE_COMPETITIONS[1:]:
+    for key in BOOTSTRAP_COMPETITIONS[1:]:
         newer = replacement_after_win(newer, key, key)
     assert not newer["legacy"]
     assert dict(zip(*replacement_rewards(newer))) == {
         "main": 0.25,
-        **{key: 0.125 for key in ACTIVE_COMPETITIONS[1:]},
+        **{key: 0.125 for key in BOOTSTRAP_COMPETITIONS[1:]},
     }
 
 

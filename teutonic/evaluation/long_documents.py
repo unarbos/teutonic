@@ -8,11 +8,16 @@ from urllib.request import Request, urlopen
 
 from .categories import DEFAULT_RULES_PATH, category_of, load_rules
 
-LONG_DOCUMENT_VERSION = "long-documents-2k-8k-v1"
+LONG_DOCUMENT_VERSION = "whole-documents-2k-16k-40-60-v3"
 DEFAULT_INDEX_BASE = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index"
 DEFAULT_LONG_DOCUMENT_TOKENS = 6_000_000
-MAX_DOCUMENT_TOKENS = 8192
-LENGTH_BUCKETS = (("2049-4096", 2049, 4096), ("4097-8192", 4097, 8192))
+MAX_DOCUMENT_TOKENS = 16384
+# Length includes terminal EOS. Shares are input-token budgets within each category.
+LENGTH_BUCKETS = (
+    ("2049-4096", 2049, 4096),
+    ("4097-16384", 4097, 16384),
+)
+LENGTH_BUCKET_TOKEN_WEIGHTS = (0.4, 0.6)
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 
@@ -118,7 +123,7 @@ def validate_long_documents(value):
         raise ValueError("long-document token budget must be in [1, 100000000]")
     cap = value["max_document_tokens"]
     if type(cap) is not int or cap != MAX_DOCUMENT_TOKENS:
-        raise ValueError("long-document maximum must be 8192 for the 2k-8k sampling policy")
+        raise ValueError("document maximum must be 16384 for the 2k-16k sampling policy")
     from .index_manifest import inventory_files, validate_index_manifest_pin
 
     validate_index_manifest_pin(value["index_manifest"])

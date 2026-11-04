@@ -363,3 +363,16 @@ socratic-math-dialogue = 0.008679426408189134
 txt360-qa = 0.07019273675554584
 web-high-medium = 0.049512953271372305
 web-high-nltk-qa = 0.05218087169792589
+
+[competitions.mix07]
+n = 20000
+long_document_tokens = 30000000
+delta_threshold = 0.0015
+incentive = 0.125
+# Prepare/publish a bundle before activation; no published immutable URL yet.
+manifest_url = ""
+manifest_base_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix07"
+starting_king_competition = "mix05"
+
+[competitions.mix07.categories]
+"dclm-baseline-1.0" = 1.0

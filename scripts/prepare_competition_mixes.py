@@ -12,6 +12,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import chain_config
+from teutonic.competitions import CONFIGURED_COMPETITIONS, normalize_competition
 from teutonic.evaluation.configuration import (
     DatasetManifestSnapshot,
     canonical_manifest_bytes,
@@ -26,12 +27,24 @@ def main(argv=None):
         "--source-dir", type=Path, help="read DATASET.json locally instead of fetching"
     )
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--competition", type=normalize_competition, choices=CONFIGURED_COMPETITIONS,
+                        help="prepare only this competition and its source inventories")
     parser.add_argument("--publish", action="store_true", help="upload immutable version URLs only")
     parser.add_argument("--bucket", default=os.environ.get("TEUTONIC_DATASETS_BUCKET", "datasets"))
     args = parser.parse_args(argv)
     validate_definitions()
+    definitions = (
+        {args.competition: chain_config.COMPETITION_DEFAULTS[args.competition]}
+        if args.competition else chain_config.COMPETITION_DEFAULTS
+    )
+    datasets = {
+        chain_config.CATEGORY_REGISTRY[c]["dataset"]
+        for spec in definitions.values() for c in spec["categories"]
+    }
     sources = []
     for name, spec in chain_config.CATEGORY_DATASETS.items():
+        if name not in datasets:
+            continue
         if args.source_dir:
             manifest = json.loads((args.source_dir / f"{name}.json").read_text())
             source = DatasetManifestSnapshot(
@@ -46,7 +59,7 @@ def main(argv=None):
                 name=name, manifest_url=spec["manifest_url"], proportion=1.0
             )
         sources.append(source)
-    entries = write_bundle(build_mix_manifests(sources), args.output_dir)
+    entries = write_bundle(build_mix_manifests(sources, definitions), args.output_dir)
     # Inventory input is independent of any competition mix, including MAIN.
     inventory = {
         "datasets": {

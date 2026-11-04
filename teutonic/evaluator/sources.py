@@ -87,6 +87,16 @@ def sample_pretokenized_sequences(
     for shard_group_index, source in enumerate(sources):
         name = str(source["name"])
         target = int(source["target_sequences"])
+        if target == 0:
+            source_meta.append({
+                "name": name,
+                "proportion": float(source["proportion"]),
+                "target_sequences": 0,
+                "n_sequences": 0,
+                "used_shards": [],
+                "used_refs": [],
+            })
+            continue
         rng = np.random.default_rng(_source_seed(dataset_seed, name))
         refs = [
             ShardRef(
@@ -241,6 +251,8 @@ def sample_pretokenized_sequences(
 def sample_eval_sequences(req: base.EvalRequest, on_phase=None):
     if req.dataset_source != "pretokenized_npy":
         raise ValueError("GPU evaluator accepts only validator-provided pre-tokenized NPY shards")
+    if req.n == 0 and req.long_documents is None:
+        raise ValueError("zero windows requires document evaluation")
     sequences, metadata = sample_pretokenized_sequences(req, on_phase=on_phase)
     if req.long_documents is not None:
         from teutonic.evaluator.long_documents import extend_with_long_documents

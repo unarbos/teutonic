@@ -3,10 +3,8 @@
 from .policy import MAIN_SHARES, replacement_rewards
 
 
-def snapshot_transition(connection, main):
-    """Called under the MAIN row lock after all pending work has drained."""
-    if main["reward_transition"] is not None:
-        raise ValueError("reward transition is already initialized")
+def lock_drained_services(connection, main):
+    """Hold maintenance locks until commit; reject any pending scoped work."""
     from teutonic.access.repository import CONTROLLER_ADVISORY_LOCK_ID
     from teutonic.promotion.repository import promotion_worker_lock_key
     from teutonic.validator.repository import scheduler_lock_key
@@ -34,6 +32,13 @@ def snapshot_transition(connection, main):
     ).fetchone()["n"]
     if pending:
         raise ValueError("drain all submissions and promotions before cutover")
+
+
+def snapshot_transition(connection, main):
+    """Called under the MAIN row lock after all pending work has drained."""
+    if main["reward_transition"] is not None:
+        raise ValueError("reward transition is already initialized")
+    lock_drained_services(connection, main)
     kings = connection.execute(
         """SELECT c.competition_key, k.* FROM control_plane.competitions c
            JOIN control_plane.king_reigns k ON k.reign_id=c.current_reign_id
@@ -116,3 +121,57 @@ def snapshot_transition(connection, main):
     if any(abs(dict(zip(hotkeys, weights)).get(h, 0) - w) > 1e-9 for h, w in current.items()):
         raise ValueError("cutover would change the current reward distribution")
     return result
+
+
+def prepare_mix07_replacement(connection, main):
+    """Read/validate a repeatable cutover under MAIN and service locks; no writes."""
+    from .policy import begin_mix07_replacement, validate_transition
+
+    lock_drained_services(connection, main)
+    state = main["reward_transition"]
+    validate_transition(state)
+    rows = connection.execute(
+        """SELECT c.*, k.hotkey AS king_hotkey
+             FROM control_plane.competitions c
+             LEFT JOIN control_plane.king_reigns k ON k.reign_id=c.current_reign_id
+            WHERE c.main_competition_id=%s AND c.competition_key IN ('mix04','mix05','mix07')
+            ORDER BY c.competition_key FOR UPDATE OF c""",
+        (main["competition_id"],),
+    ).fetchall()
+    by_key = {row["competition_key"]: row for row in rows}
+    if any(row["name"] != key for key, row in by_key.items()):
+        raise ValueError("replacement competition names differ from their keys")
+    old, source, new = (by_key.get(k) for k in ("mix04", "mix05", "mix07"))
+    if old is None or source is None:
+        raise ValueError("replacement requires existing MIX04 and MIX05")
+    if state["version"] == "mix-successor-v2":
+        if new is None or new["starting_reign_id"] is None or old["active"] or not new["active"]:
+            raise ValueError("inconsistent existing MIX07 replacement")
+        starting = new["starting_reign_id"]
+        index_owner = new
+    else:
+        if new is not None:
+            raise ValueError("MIX07 already exists without a successor transition")
+        if not old["active"] or not old["current_reign_id"]:
+            raise ValueError("MIX04 must have an active king before replacement")
+        if state["mixes"].get("mix04") != old["king_hotkey"]:
+            raise ValueError("MIX04 king differs from its reward recipient")
+        if not source["active"] or source["current_reign_id"] is None:
+            raise ValueError("MIX07 requires MIX05's current king; starting fallback is insufficient")
+        starting = source["current_reign_id"]
+        index_owner = source
+    config = connection.execute(
+        "SELECT long_documents FROM control_plane.evaluation_configs WHERE competition_id=%s AND active",
+        (index_owner["competition_id"],),
+    ).fetchone()
+    if not config or not config["long_documents"]:
+        raise ValueError("replacement requires a pinned document configuration")
+    result = begin_mix07_replacement(state)
+    if replacement_rewards(state) != replacement_rewards(result):
+        raise ValueError("replacement would change rewards before MIX07 is crowned")
+    return {
+        "starting_reign_id": starting,
+        "reward_transition": result,
+        "index_manifest": config["long_documents"]["index_manifest"],
+        "retired_competition_id": old["competition_id"],
+    }

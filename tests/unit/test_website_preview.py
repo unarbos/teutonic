@@ -80,6 +80,7 @@ def test_origin_gzip_and_manifest_freshness(monkeypatch, clock):
     ("main", "king-benchmark-daily"),
     ("mix01", "competitions/mix01"),
     ("mix06", "competitions/mix06"),
+    ("mix07", "competitions/mix07"),
 ])
 @pytest.mark.parametrize("suffix,ttl", [
     ("all-kings/results.json", 60),
@@ -93,7 +94,7 @@ def test_public_benchmark_paths_and_running_refresh(competition, prefix, suffix,
 
 
 @pytest.mark.parametrize("path", [
-    "/benchmarks/competitions/mix07/all-kings/results.json",
+    "/benchmarks/competitions/mix08/all-kings/results.json",
     "/benchmarks/competitions/mix01/kings/../private/results.json",
     "/benchmarks/competitions/mix01/kings/king/model.bin",
     "/benchmarks/https://other.example/results.json",

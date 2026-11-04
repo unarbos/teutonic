@@ -228,6 +228,11 @@ fallback to unmasked attention or another backend.
 
 The evaluator loads each checkpoint on the first GPU in its four-replica group,
 then broadcasts all parameters and buffers to the other three GPUs with NCCL.
+After both snapshots pass integrity, duplicate/reuse, configuration, and attention
+checks, model loading runs concurrently with dataset sampling and downloads.
+Scoring starts only after both model loading and corpus validation finish. If
+either setup phase fails, the loader is joined and the worker pool is closed
+before the evaluation releases its cache locks.
 The king and challenger groups load independently. Receivers allocate BF16 model
 storage without reading checkpoint shards; transfers use chunks of at most 256 MiB.
 Workers wait on CPU queues until their group is prepared, and loading communicators
@@ -253,18 +258,43 @@ to the exact remaining token count. Audit output uses `columnar-masked-v1` with
 `scored_tokens` alongside each pair of window losses; verdicts also record the
 scoring policy, EOS ID, total scored tokens, and aggregation/bootstrap units.
 
-### Additional long-document evaluation
+### Whole-document evaluation
 
-The `long-documents-2k-8k-v1` extension adds whole-document **input tokens** from
-complete documents of **2049–8192 tokens** to the window sample. The category release
-uses a 30,000,000-token budget and the same explicit category weights for windows
-and documents in every competition. Within each category, document counts follow the index's relative
-populations in 2049–4096 and 4097–8192 (inclusive boundaries), normalized
-over those two eligible buckets. Documents of 8193 tokens or more are excluded.
-Every eligible nonempty bucket gets
-at least one complete document. Quotas are approximate because documents are
-never truncated; this minimum can exceed a small category's token allocation.
-The audit reports both planned and actual allocations.
+The `whole-documents-2k-16k-40-60-v3` policy samples complete documents of
+**2049–16384 tokens**, including terminal EOS. Each competition's category weights
+divide the document input-token budget first. Within every category, **40% of
+input tokens target 2049–4096-token documents** and **60% target 4097–16384-token
+documents**, with inclusive boundaries. Documents of 2048 tokens or fewer and
+16385 tokens or more are excluded. The 4k–16k range is one bucket, sampled
+uniformly by document without replacement; it is not split into smaller buckets.
+Both ranges must contain enough complete documents: missing or exhausted ranges
+fail evaluation rather than reallocating their budget. Each range contributes at
+least one document. Quotas are approximate because documents are never truncated
+or split; this minimum can exceed a small category's token allocation. The audit
+reports each bucket's token weight, target tokens, actual tokens and document count.
+
+Window count and document token budget are PostgreSQL configuration values.
+`--n 0` disables window sampling and requires an enabled document configuration.
+It does not download any window shards; document reconstruction still reads the
+shards referenced by sampled documents. Scores and bootstrap use whole documents,
+and progress reports their actual count, which is not the configured window count.
+
+Before activating documents-only evaluation, apply the schema migration with the
+schema-owner database connection. Drain outstanding evaluations and deploy the new
+validator and evaluator together: the previous document policy cannot be replayed
+under the new bucket definitions. With the deployment environment loaded:
+
+```bash
+psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/allow_document_only_evaluation.sql
+.venv/bin/python scripts/configure_evaluation.py --all --n 0 --long-document-tokens 70000000 --dry-run
+.venv/bin/python scripts/configure_evaluation.py --all --n 0 --long-document-tokens 70000000
+```
+
+The existing configuration script stores the 70M budget and zero windows in new
+versioned PostgreSQL configurations, atomically across competitions. It preserves
+the pinned manifests/indexes and thresholds; 70M is not a code or chain default.
+The target allocation is approximately 28M input tokens in 2k–4k and 42M in
+4k–16k. These are input-token shares, not document-count or exact scored-token shares.
 
 The index is read from the public datasets bucket's `doc_index/<dataset>/` prefix.
 Configuration fetches `doc_index/manifest.json` once and stores its URL, exact
@@ -394,15 +424,15 @@ select the public location and optionally require an expected hash.
 
 Documents are reconstructed in fragment order across rows/shards. Incomplete
 source documents are skipped deterministically and counted. The selection cap is
-8192 tokens, including terminal EOS; larger source documents are excluded and
-counted, never cropped. The checkpoint must support at least 8192 positions.
+16384 tokens, including terminal EOS; larger source documents are excluded and
+counted, never cropped. Both checkpoints must support at least 16384 positions.
 Out-of-vocabulary tokens, missing shards, invalid fragments and missing
 terminal EOS fail evaluation.
 
 FA4 packs unequal-length samples with explicit attention boundaries and reset
 positions. Original window boundaries remain isolated even when a window ends
 without EOS. Scheduling limits batch token count and sum of squared lengths.
-The current 8192-token selection cap uses the normal single-GPU path for every
+The current 16384-token selection cap uses the normal single-GPU path for every
 sample. Sequence-parallel groups are never initialized under this policy.
 The tested two-GPU path above 128,974 tokens remains implemented for a future
 sampling policy; it is inactive with the current selection range.
@@ -440,15 +470,17 @@ python scripts/configure_evaluation.py --competition main --long-document-tokens
 python scripts/configure_evaluation.py --competition main --long-document-tokens 6000000
 ```
 
-For current releases, perform the [category cutover](#main-and-mix01mix06-category-competitions)
+For current releases, perform the [category cutover](#main-and-mix-category-competitions)
 first. Then use `--competition MIX01` through `MIX06`, or `--all` for all seven. The current policy fixes `--max-document-tokens` at
-8192; zero and larger caps are rejected. Existing configurations remain window-only
-until enabled. `--long-document-tokens 0` disables the additional sample. Budget
+16384; other caps are rejected. Window-only configurations remain supported.
+`--long-document-tokens 0` disables documents and requires a positive `--n`. Budget
 and threshold edits preserve index pins; `--refresh-doc-index` explicitly selects
 new versions. Rebuilding an index requires the corresponding tokenization snapshot.
-The former `long-documents-v1` configuration is rejected rather than silently
-reinterpreted. Applying `--long-document-tokens 6000000` upgrades that configuration
-to the new bounded policy while preserving its pinned index and source manifests.
+The former `long-documents-v1`, `long-documents-2k-8k-v1` and
+`whole-documents-0-8k-v2` configurations are
+rejected rather than silently reinterpreted. Applying `--long-document-tokens`
+with the desired budget upgrades to the 40/60 token-budget policy while preserving the
+pinned index and source manifests.
 
 For an isolated test, prepare a configuration and optional CPU-only sample plan
 without touching PostgreSQL, services or model weights:
@@ -473,7 +505,7 @@ python scripts/replay_cached_evaluation.py --record /path/to/cached-main-record.
 This explicitly adds a new sample and scores it fully; its comparison against
 the saved verdict therefore includes the dataset change. `--verify-packing`
 compares real-model losses in mixed batches against one-sample batches, covering
-both current length buckets and an ordinary window. `--prepare-only` samples and
+each sampled length bucket and a window when present. `--prepare-only` samples and
 downloads data without loading weights or using GPUs. Replay never promotes
 models or publishes evaluation artifacts to R2.
 
@@ -737,12 +769,15 @@ pm2 logs teutonic-mock-evaluator --lines 100
 
 Do not add the mock evaluator to either production ecosystem file.
 
-## MAIN and MIX01–MIX06 category competitions
+## MAIN and MIX category competitions
 
 PostgreSQL remains the runtime source of truth. `chain.toml` defines the category
 registry and seven explicit category-weight tables under `[competitions.*]`.
-Every competition uses the same sampler: **20,000 windows plus 30,000,000 whole-document
-input tokens**, with the existing 8,192-token document cap. Percentages are sampling
+The initialization defaults remain **20,000 windows plus 30,000,000 whole-document
+input tokens**. The current document policy caps lengths at 16,384 tokens and uses
+the 40/60 token split. Runtime budgets are set through
+`configure_evaluation.py`; the documents-only configuration above uses zero windows
+and a 70M document-token budget. Percentages are sampling
 targets. The verdict remains the paired, scored-token-weighted bootstrap over the
 whole mix, with **LCB strictly greater than the threshold**. There is no additional
 largest-source or category gate.
@@ -753,9 +788,86 @@ largest-source or category gate.
 | MIX01 | Former MATH categories 45%, former CODE categories 45%, DCLM 10% | 12.5% | 0.0015 |
 | MIX02 | Former CODE category set 50%; remaining PretBeh categories 50%; token-proportional inside both sets | 12.5% | 0.0015 |
 | MIX03 | Former MATH categories 60%, former CODE categories 40% | 12.5% | 0.0015 |
-| MIX04 | TXT360-V2 categories 70%, PretBeh categories 30%; token-proportional inside each | 12.5% | 0.0015 |
+| MIX04 (retired at MIX07 activation) | Historical TXT360-V2 70%, PretBeh 30% | Retains 12.5% until MIX07's first crown | — |
 | MIX05 | DCLM 40%, PretBeh categories 60%; token-proportional inside PretBeh | 12.5% | 0.0015 |
 | MIX06 | All 25 categories including DCLM, proportional to token inventory | 12.5% | 0.0015 |
+| MIX07 | 100% `dclm-baseline-1.0` | Takes MIX04's 12.5% on first crown | 0.0015 |
+
+### Replace MIX04 with MIX07
+
+MIX07 starts from **MIX05's current king at cutover**, pinned once in
+`starting_reign_id`. Later MIX05 promotions and configuration reruns do not move
+that starting point. MIX07 initially has no king or reward recipient of its own.
+MIX04 becomes inactive for submissions/evaluations but keeps its existing king,
+history and 12.5% reward slot. The first successful MIX07 crown transfers only that
+slot to its winner, atomically with the normal reward publication. MAIN, MIX05 and
+all other reward positions are unchanged. A failed evaluation or promotion does
+not transfer the slot. This also works before the older legacy roster is exhausted:
+MIX07 replaces MIX04, rather than evicting another legacy recipient.
+
+Prepare and publish only the new DCLM mix before downtime, using the dataset
+publication credentials. Existing manifests are not rewritten:
+
+```bash
+.venv/bin/python scripts/prepare_competition_mixes.py \
+  --competition MIX07 --output-dir artifacts/mix07
+.venv/bin/python scripts/publish_category_artifacts.py \
+  --bundle-dir artifacts/mix07 --bucket datasets
+```
+
+The new immutable URL/hash lives in `artifacts/mix07/bundle.json`; MIX07 deliberately
+has no invented published URL in `chain.toml`. Keep the bundle for activation.
+The cutover reuses MIX05's pinned document index and validates the new manifest's
+DCLM source against it. If the source manifest has changed, prepare from the pinned
+source snapshot with `--source-dir` instead of repinning evaluation data implicitly.
+
+Pause intake and drain evaluations, retries and promotions. Stop the access
+controller only after outstanding verification/snapshot jobs finish; then let the
+remaining evaluations/promotions drain. Stop these services before cutover:
+
+```bash
+pm2 stop teutonic-access-controller teutonic-validator teutonic-promotion-worker teutonic-weight-publisher
+```
+
+Deploy the updated control-plane code and, for the 16k document policy, the GPU
+evaluator code. Apply `allow_document_only_evaluation.sql` if not already applied.
+Use the loaded deployment environment with database-owner credentials:
+
+```bash
+.venv/bin/python scripts/configure_evaluation.py \
+  --competition MIX07 --initialize --replace-mix04 \
+  --bundle-dir artifacts/mix07 --n 0 --long-document-tokens 70000000 --dry-run
+.venv/bin/python scripts/configure_evaluation.py \
+  --competition MIX07 --initialize --replace-mix04 \
+  --bundle-dir artifacts/mix07 --n 0 --long-document-tokens 70000000
+```
+
+The dry run prints the pinned MIX05 reign and performs no writes. Both runs require
+the services stopped and all pending work drained. The script requires a rewarded
+MIX04 king and an actual current MIX05 king; it never substitutes MIX05's starting
+baseline. Config creation, MIX04 retirement, MIX07 activation and reward-transition
+metadata commit together. Rerunning preserves the original pin and reward state,
+including after MIX07 has crowned a king. Cutover changes no published weights.
+
+After MIX07 exists, the earlier `--all --n 0 --long-document-tokens 70000000`
+command updates the seven active definitions (MAIN, MIX01–03, MIX05–07), preserving
+their pinned indexes and thresholds. MIX04's old configuration stays archived.
+Do not rerun the historical `--cutover`: it bootstraps MIX01–06 from legacy
+competitions and cannot replace an initialized reward transition.
+
+Check GPU `/health` and matching deployment versions, then restart the control
+services and dashboard publisher:
+
+```bash
+pm2 restart ecosystem.config.js --only teutonic-access-controller,teutonic-validator,teutonic-promotion-worker,teutonic-weight-publisher,teutonic-dashboard-view --update-env
+```
+
+Verify `competitions.json` shows MIX04 inactive, MIX07 active with the printed
+starting reign, zero windows and a 70M document budget. MIX04 must still receive
+its reward share until MIX07's first crown. Deploy the updated website assets so
+the baseline label, retired reward recipient and MIX07 benchmarks display correctly.
+Deploy the updated Cloudflare proxy with `scripts/cloudflare/deploy.sh` so MIX07's
+benchmark routes resolve to the benchmark bucket.
 
 The former MATH/CODE labels above explain the migration only. Published manifests
 contain unique flat category lists, original dataset identities, and source hashes.
@@ -768,10 +880,11 @@ and MIX02 has no special sampling path. DCLM is the single category `dclm-baseli
 
 Keep `TEUTONIC_COMPETITION` set to the existing MAIN database name on every control
 plane service. One validator, promotion worker, and weight publisher serve all seven.
-MIXes start without kings. A kingless MIX challenges a **fixed starting MAIN king**
+MIXes start without kings. Original MIX01–06 challenge a **fixed starting MAIN king**
 using that MIX's categories and threshold. `starting_reign_id` is pinned once at
 initialization; later MAIN promotions do not change claims, retries, or coronation
-checks for that MIX. After its first win, a MIX uses its own current king.
+checks for that MIX. MIX07 instead pins MIX05's king as described above.
+After its first win, a MIX uses its own current king.
 Configuration refreshes preserve the pin. `competitions.json` includes a
 `starting_king` object with the pinned reign ID, model digest, public model reference,
 name, UID, and hotkey; a starting king does not count as a MIX king or receive MIX rewards.
@@ -800,7 +913,7 @@ normal website documentation deployment so miners see the new rule.
 
 The cutover snapshots all currently rewarded positions and their durable shares;
 cutover itself changes no payouts. Legacy recipients are ordered by crowned block
-(oldest first; bootstrap recipients without reigns come first). Each **first** MIX
+(oldest first; bootstrap recipients without reigns come first). Each **first** original MIX01–06
 winner gets 12.5% and removes one oldest legacy position immediately. That position
 receives zero; its share is not split with the challenger. The remaining budget is
 normalized over the MAIN position and surviving legacy positions, retaining their
@@ -819,7 +932,7 @@ normalization, burn fallback and 101-block publication cadence are retained.
 Miners use `teutonic-miner ready --competition MIX02` or
 `teutonic-miner submit ... --competition MIX02`. MAIN is the default. Uppercase names
 normalize to lowercase wire keys. The wire format recognizes MIX01–MIX99, but this
-release enables only MIX01–MIX06. New ready signals must target a configured, active
+release enables MIX01–03 and MIX05–07 after replacement. New ready signals must target a configured, active
 competition. Historical math/code/text commitments and results remain readable;
 those competitions stop accepting new submissions after cutover. One submission
 per hotkey and existing model ownership/reuse limits remain global.
@@ -914,7 +1027,7 @@ for competition in main mix01 mix02 mix03 mix04 mix05 mix06; do
     --competition "$competition" --bundle-dir artifacts/category-mixes \
     --token-budget 30000000 --index-manifest-url "$INDEX_URL" \
     --index-manifest-file artifacts/category-mixes/document-index.json \
-    --index-manifest-sha256 "$INDEX_SHA" --plan-context-limit 8192 \
+    --index-manifest-sha256 "$INDEX_SHA" --plan-context-limit 16384 \
     --index-cache artifacts/category-mixes/index-cache \
     --output "artifacts/category-mixes/$competition.documents.json" || break
 done

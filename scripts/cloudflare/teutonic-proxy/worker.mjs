@@ -17,7 +17,7 @@ const DATASET_MANIFEST_PATH = "/datasets/manifest.json";
 const BENCHMARK_ORIGIN = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev";
 const BENCHMARK_RESULTS_PATH = "/benchmarks/results.json";
 const BENCHMARK_SOURCE_PATH = "/king-benchmark-daily/all-kings/results.json";
-const BENCHMARK_FEED_PATH = /^\/benchmarks\/((?:king-benchmark-daily|competitions\/mix0[1-6])\/(?:all-kings\/(?:results|latest)|kings\/[A-Za-z0-9_-]+\/results)\.json)$/;
+const BENCHMARK_FEED_PATH = /^\/benchmarks\/((?:king-benchmark-daily|competitions\/mix0[1-7])\/(?:all-kings\/(?:results|latest)|kings\/[A-Za-z0-9_-]+\/results)\.json)$/;
 
 // Content types that drive the live dashboard. These must always reflect
 // the current bytes in the bucket, so we disable every layer of caching.

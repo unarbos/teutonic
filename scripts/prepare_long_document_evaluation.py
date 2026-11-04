@@ -10,7 +10,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from teutonic.competitions import ACTIVE_COMPETITIONS, normalize_competition
+from teutonic.competitions import CONFIGURED_COMPETITIONS, normalize_competition
 from teutonic.evaluation.categories import apportion, category_seed
 from teutonic.evaluation.index_manifest import (
     DEFAULT_INDEX_MANIFEST_URL,
@@ -26,7 +26,7 @@ from teutonic.evaluator.document_index import DocumentIndex, sample_category
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main")
+    parser.add_argument("--competition", type=normalize_competition, choices=CONFIGURED_COMPETITIONS, default="main")
     parser.add_argument("--token-budget", type=int, default=30_000_000)
     parser.add_argument("--bundle-dir", type=Path)
     parser.add_argument("--index-manifest-url", default=DEFAULT_INDEX_MANIFEST_URL)
