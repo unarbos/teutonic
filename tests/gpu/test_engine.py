@@ -119,7 +119,7 @@ def test_mixed_sample_audit_and_component_scores_preserve_document_identity():
         {"shard_group_index": 0, "shard_index": 0, "shard_sequence_index": 7, "component": "windows"},
         {"shard_group_index": 0, "shard_index": -1, "shard_sequence_index": -1,
          "component": "long_documents", "dataset": "math-reasoning", "category": "math-dialogue",
-         "length_bucket": "2049-4096", "document_row": 123, "length": 3001,
+         "length_bucket": "2-4096", "document_row": 123, "length": 3001,
          "fragments": [{"shard_id": 4, "seq_index": 2, "seq_offset": 0, "frag_len": 2048}]},
     ]
     result = eval_server._build_sample_results([2, 4], [1, 2], provenance, [2000, 3000])
@@ -127,7 +127,7 @@ def test_mixed_sample_audit_and_component_scores_preserve_document_identity():
     assert result["document_row"] == [None, 123]
     assert result["component"] == ["windows", "long_documents"]
     scores = eval_server.long_document_scores([2, 4], [1, 2], provenance, [2000, 3000])
-    assert scores["by_bucket"]["2049-4096"]["n_scored_tokens"] == 3000
+    assert scores["by_bucket"]["2-4096"]["n_scored_tokens"] == 3000
     assert scores["by_category"]["math-reasoning/math-dialogue"]["mu_hat"] == 2
 
 

@@ -295,7 +295,7 @@ class DocumentIndex:
 
 
 def sample_category(index, *, token_budget, seed, max_tokens):
-    """Split input tokens 40/60 between 2k-4k and 4k-16k whole documents.
+    """Split input tokens 40/60 between 2-4096 and 4097-16384 tokens in whole documents.
 
     Draw uniformly without replacement within each bucket. Include at least one
     complete document per bucket, then stop near its token quota without cropping.

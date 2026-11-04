@@ -260,11 +260,11 @@ scoring policy, EOS ID, total scored tokens, and aggregation/bootstrap units.
 
 ### Whole-document evaluation
 
-The `whole-documents-2k-16k-40-60-v3` policy samples complete documents of
-**2049–16384 tokens**, including terminal EOS. Each competition's category weights
+The `whole-documents-2-16384-40-60-v4` policy samples complete documents of
+**2–16384 tokens**, including terminal EOS. Each competition's category weights
 divide the document input-token budget first. Within every category, **40% of
-input tokens target 2049–4096-token documents** and **60% target 4097–16384-token
-documents**, with inclusive boundaries. Documents of 2048 tokens or fewer and
+input tokens target 2–4096-token documents** and **60% target 4097–16384-token
+documents**, with inclusive boundaries. Documents of fewer than 2 tokens and
 16385 tokens or more are excluded. The 4k–16k range is one bucket, sampled
 uniformly by document without replacement; it is not split into smaller buckets.
 Both ranges must contain enough complete documents: missing or exhausted ranges
@@ -293,8 +293,16 @@ psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/allow_document_on
 The existing configuration script stores the 70M budget and zero windows in new
 versioned PostgreSQL configurations, atomically across competitions. It preserves
 the pinned manifests/indexes and thresholds; 70M is not a code or chain default.
-The target allocation is approximately 28M input tokens in 2k–4k and 42M in
+The target allocation is approximately 28M input tokens in 2–4096 and 42M in
 4k–16k. These are input-token shares, not document-count or exact scored-token shares.
+
+If upgrading from `whole-documents-2k-16k-40-60-v3`, the lower bound changes from
+2049 to **2 tokens**. Drain pending work before updating both hosts, stop the
+control services, and run the two configuration commands above with the updated
+code to store the v4 policy. The already-applied schema migration and MIX07
+replacement do not need repeating. Existing index pins, MIX07's starting king and
+the MIX04 reward transition are preserved. Restart the updated GPU evaluator and
+verify health before restarting the control services.
 
 The index is read from the public datasets bucket's `doc_index/<dataset>/` prefix.
 Configuration fetches `doc_index/manifest.json` once and stores its URL, exact

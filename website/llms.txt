@@ -124,7 +124,7 @@ before proceeding.
    using BF16 replicas on eight GPUs (four replicas per side, one per GPU).
    Window count and whole-document input-token budget come from the active
    PostgreSQL configuration. Setting window count to zero selects documents
-   only. Complete documents of 2,049-16,384 tokens retain their full context;
+   only. Complete documents of 2-16,384 tokens retain their full context;
    optional 2,048-token windows isolate fragments at EOS boundaries.
    Evaluations containing whole documents run without early stopping.
    See section 3.1 for masking, sampling and memory behavior.
@@ -215,7 +215,7 @@ paths under the public datasets bucket; release URLs are pinned in `chain.toml`.
 ### 3.1 Document-masked evaluation and complete documents
 
 Scoring policy: `category-mix-token-bootstrap-v2`.
-Whole-document sampling policy: `whole-documents-2k-16k-40-60-v3`.
+Whole-document sampling policy: `whole-documents-2-16384-40-60-v4`.
 
 - MASKING: EOS token 151645 ends a document fragment. Attention cannot
   cross EOS or original window boundaries, and positions restart at zero
@@ -227,14 +227,14 @@ Whole-document sampling policy: `whole-documents-2k-16k-40-60-v3`.
   boundaries; eager scoring uses explicit causal document masks.
 - COMPLETE DOCUMENTS: the additional sample reconstructs original
   documents across stored rows and shards. Length includes terminal EOS.
-  Eligible documents have 2,049-16,384 tokens: the two inclusive buckets are
-  2,049-4,096 and 4,097-16,384. Documents outside those ranges are excluded.
+  Eligible documents have 2-16,384 tokens: the two inclusive buckets are
+  2-4,096 and 4,097-16,384. Documents outside those ranges are excluded.
   Documents are scored whole, never cropped or split. Both checkpoints must
   support at least 16,384 positions.
 - MIX: every competition uses its explicit category weights as sampling targets
   for windows and whole documents. MAIN and MIX06 use token-inventory proportions;
   the other MIXes use their declared flat category weights. Within each category,
-  40% of the document INPUT-TOKEN budget targets 2,049-4,096-token documents
+  40% of the document INPUT-TOKEN budget targets 2-4,096-token documents
   and 60% targets 4,097-16,384-token documents. Sampling within each bucket is
   uniform by document, without replacement. Both buckets must contain enough
   complete documents; otherwise evaluation fails rather than reallocating quotas.
@@ -464,7 +464,7 @@ teutonic-miner ready --hotkey h0 --competition MIX02
    its fixed `starting_king` from `competitions.json` as the baseline and the
    selected MIX's evaluation mix. MIX07 uses its pinned MIX05 king; do not substitute a newer source king.
 2. MATCH THE EVAL DISTRIBUTION. Use the source and category mix in section
-   6, the genesis tokenizer, complete 2,049-16,384-token documents and, when
+   6, the genesis tokenizer, complete 2-16,384-token documents and, when
    enabled, masked 2,048-token windows. Prevent attention across document boundaries
    in offline validation and use the same target-counting rules.
 3. VALIDATE OFFLINE FIRST — you get ONE shot per hotkey. Reproduce the
@@ -640,8 +640,8 @@ the coldkey.
 - accept rule: paired-bootstrap LCB of token-weighted CE advantage > the
   competition's delta_threshold (release default: 0.0015 for all seven);
   no largest-source, own-source or category gate
-- sample: configurable whole-document token budget (2,049-16,384-token documents;
-  40% of input tokens in 2k-4k, 60% in 4k-16k)
+- sample: configurable whole-document token budget (2-16,384-token documents;
+  40% of input tokens in 2-4096, 60% in 4k-16k)
   and optional 2,048-token windows; alpha=0.001, B=10000, bootstrap seed 0
 - competitions: MAIN, MIX01–03 and MIX05–07 after replacement; MIX07 is 100% DCLM;
   MIX04 retains its reward slot until MIX07's first crown. Kingless MIXes face their

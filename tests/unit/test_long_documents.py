@@ -315,8 +315,8 @@ class MemoryLengths:
 @pytest.mark.parametrize("populations", [(5000, 500), (500, 5000)])
 def test_sampler_allocates_tokens_40_60_independently_of_bucket_population(populations):
     values = (
-        [0, 1, 512, 1024, 1536, 2048]
-        + [2049] * (populations[0] // 2)
+        [0, 1]
+        + [512] * (populations[0] // 2)
         + [4096] * (populations[0] // 2)
         + [4097] * (populations[1] // 2)
         + [16384] * (populations[1] // 2)
@@ -332,8 +332,8 @@ def test_sampler_allocates_tokens_40_60_independently_of_bucket_population(popul
     assert [b["population"] for b in meta["buckets"]] == list(populations)
     assert [b["target_tokens"] for b in meta["buckets"]] == [400_000, 600_000]
     assert [b["token_weight"] for b in meta["buckets"]] == [0.4, 0.6]
-    assert all(2049 <= d["length"] <= 16384 for d in rows)
-    assert meta["excluded_under_length_limit"] == 6
+    assert all(2 <= d["length"] <= 16384 for d in rows)
+    assert meta["excluded_under_length_limit"] == 2
     assert meta["excluded_over_length_limit"] == 1009
     assert meta["max_document_tokens"] == 16384
     assert abs(meta["sampled_tokens"] - 1_000_000) <= 4096 + 16384
@@ -344,28 +344,28 @@ def test_sampler_allocates_tokens_40_60_independently_of_bucket_population(popul
         assert b["sampled_documents"] == len(selected)
     tiny, tiny_meta = sample_category(index, token_budget=1, seed=123, max_tokens=16384)
     assert {d["length_bucket"] for d in tiny} == {
-        "2049-4096", "4097-16384"
+        "2-4096", "4097-16384"
     }
     assert tiny_meta["sampled_tokens"] > tiny_meta["target_tokens"]
 
 
-@pytest.mark.parametrize("short", [2049, 4096])
+@pytest.mark.parametrize("short", [2, 512, 1024, 1536, 2048, 2049, 4096])
 @pytest.mark.parametrize("long", [4097, 8192, 8193, 16384])
 def test_sampler_includes_exact_bucket_edges_and_excludes_outside_range(short, long):
     eligible = [short, long]
-    lengths = [0, 1, 2048, *eligible, 16385, 128974]
+    lengths = [0, 1, *eligible, 16385, 128974]
     def locate(row):
-        assert 2049 <= lengths[row] <= 16384
+        assert 2 <= lengths[row] <= 16384
         return [{"row": row}]
     index = SimpleNamespace(tokens=MemoryLengths(lengths), locate=locate)
     rows, meta = sample_category(index, token_budget=1, seed=15, max_tokens=1048576)
     assert sorted(d["length"] for d in rows) == eligible
     assert meta["sampled_tokens"] == sum(eligible)
     assert meta["excluded_over_length_limit"] == 2
-    assert meta["excluded_under_length_limit"] == 3
+    assert meta["excluded_under_length_limit"] == 2
 
 
-@pytest.mark.parametrize("lengths", [[2049], [4097], [2048, 16385]])
+@pytest.mark.parametrize("lengths", [[2], [4097], [1, 16385]])
 def test_sampler_rejects_missing_required_bucket(lengths):
     index = SimpleNamespace(tokens=MemoryLengths(lengths), locate=lambda row: [{"row": row}])
     with pytest.raises(ValueError, match="required bucket"):
@@ -548,7 +548,7 @@ def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_pa
             assert tokens == [12, 13]
         else:
             assert tokens == documents[p["document_row"]].tolist()
-            assert 2049 <= len(tokens) <= 16384
+            assert 2 <= len(tokens) <= 16384
             assert p["shard_index"] == -1
     assert audit["digest"] == sequence_digest(result)
     assert any(len(tokens) == 16384 for tokens in result)
@@ -653,7 +653,7 @@ def test_configuration_rejects_caps_outside_current_policy(cap):
         validate_long_documents(config)
 
 
-@pytest.mark.parametrize("version", ["long-documents-v1", "long-documents-2k-8k-v1", "whole-documents-0-8k-v2"])
+@pytest.mark.parametrize("version", ["long-documents-v1", "long-documents-2k-8k-v1", "whole-documents-0-8k-v2", "whole-documents-2k-16k-40-60-v3"])
 def test_previous_policy_is_not_silently_replayed(version):
     config = build_long_document_config(all_sources())
     config.update(version=version)
@@ -686,7 +686,7 @@ def test_budget_changes_preserve_pins_and_threshold_updates_do_not_fetch(monkeyp
     assert updated["long_documents"]["categories"] == config["categories"]
 
     previous = copy.deepcopy(current)
-    previous["long_documents"].update(version="whole-documents-0-8k-v2", max_document_tokens=8192)
+    previous["long_documents"].update(version="whole-documents-2k-16k-40-60-v3", max_document_tokens=16384)
     documents_only, version = cli.prepare_configuration(
         previous, "main", cli.parse_args(["--n", "0", "--long-document-tokens", "70000000"])
     )
