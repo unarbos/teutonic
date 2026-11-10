@@ -292,7 +292,9 @@ psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/allow_document_on
 
 The existing configuration script stores the 70M budget and zero windows in new
 versioned PostgreSQL configurations, atomically across competitions. It preserves
-the pinned manifests/indexes and thresholds; 70M is not a code or chain default.
+the pinned manifests/indexes and thresholds. The current active configuration and
+`chain.toml` initialization defaults both use zero windows and a 70M document budget.
+Changing repository defaults does not update existing PostgreSQL configurations.
 The target allocation is approximately 28M input tokens in 2–4096 and 42M in
 4k–16k. These are input-token shares, not document-count or exact scored-token shares.
 
@@ -781,13 +783,13 @@ Do not add the mock evaluator to either production ecosystem file.
 
 PostgreSQL remains the runtime source of truth. `chain.toml` defines the category
 registry and seven explicit category-weight tables under `[competitions.*]`.
-The initialization defaults remain **20,000 windows plus 30,000,000 whole-document
-input tokens**. The current document policy caps lengths at 16,384 tokens and uses
-the 40/60 token split. Runtime budgets are set through
-`configure_evaluation.py`; the documents-only configuration above uses zero windows
-and a 70M document-token budget. Percentages are sampling
-targets. The verdict remains the paired, scored-token-weighted bootstrap over the
-whole mix, with **LCB strictly greater than the threshold**. There is no additional
+The active configuration and initialization defaults use **zero windows and a
+70,000,000 whole-document input-token budget**. The current document policy caps
+lengths at 16,384 tokens and uses the 40/60 token split. Runtime budgets are set
+through `configure_evaluation.py`; repository defaults apply to initialization or
+explicit definition replacement. Percentages are sampling targets. The verdict
+remains the paired, scored-token-weighted bootstrap over the whole mix, with
+**LCB strictly greater than the threshold**. There is no additional
 largest-source or category gate.
 
 | Competition | Category allocation | Final incentive | LCB threshold |
@@ -1033,7 +1035,7 @@ This uses separate local caches, reads public indexes, and does not touch Postgr
 for competition in main mix01 mix02 mix03 mix04 mix05 mix06; do
   .venv/bin/python scripts/prepare_long_document_evaluation.py \
     --competition "$competition" --bundle-dir artifacts/category-mixes \
-    --token-budget 30000000 --index-manifest-url "$INDEX_URL" \
+    --token-budget 70000000 --index-manifest-url "$INDEX_URL" \
     --index-manifest-file artifacts/category-mixes/document-index.json \
     --index-manifest-sha256 "$INDEX_SHA" --plan-context-limit 16384 \
     --index-cache artifacts/category-mixes/index-cache \
@@ -1062,6 +1064,7 @@ mkdir -p /srv/teutonic-backups
 export TEUTONIC_BACKUP_FILE="/srv/teutonic-backups/pre-category-mixes-$(date +%Y%m%d-%H%M%S).dump"
 scripts/db/backup_control_plane.sh
 psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/add_category_competitions.sql
+psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/allow_document_only_evaluation.sql
 psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/pin_mix_starting_kings.sql
 ```
 
@@ -1078,7 +1081,7 @@ bundle and the final published index pin:
 ```bash
 .venv/bin/python scripts/configure_evaluation.py \
   --all --initialize --replace-definition --cutover \
-  --bundle-dir artifacts/category-mixes --n 20000 --long-document-tokens 30000000 \
+  --bundle-dir artifacts/category-mixes --n 0 --long-document-tokens 70000000 \
   --delta-threshold 0.0015 \
   --doc-index-manifest-url "$INDEX_URL" \
   --doc-index-manifest-file artifacts/category-mixes/document-index.json \
@@ -1122,8 +1125,9 @@ pm2 restart ecosystem.config.js --only teutonic-validator,teutonic-promotion-wor
 
 Deploy the updated `website/` assets through the existing static-site deployment.
 Check `competitions.json`, MAIN's `datasets/manifest.json`, and every
-`competitions/mixNN/datasets/manifest.json`: seven active competitions, 20k/30M
-budgets, correct thresholds, all MIXes kingless, and unchanged initial weights.
+`competitions/mixNN/datasets/manifest.json`: seven active competitions, zero windows
+and 70M document-token budgets, correct thresholds, all MIXes kingless, and
+unchanged initial weights.
 The page shows the six-dataset inventory (including DCLM), category percentages,
 king/fallback state, and retired history. The reward transition stays in the
 backend and is not displayed as a separate section. Upload `dashboard-v1.js`,
@@ -1149,7 +1153,7 @@ After cutover, unspecified settings retain their database values. For example:
 
 ```bash
 .venv/bin/python scripts/configure_evaluation.py --competition MIX02 --delta-threshold .0015 --dry-run
-.venv/bin/python scripts/configure_evaluation.py --all --n 20000 --long-document-tokens 30000000 --dry-run
+.venv/bin/python scripts/configure_evaluation.py --all --n 0 --long-document-tokens 70000000 --dry-run
 ```
 
 Budget-only changes preserve source and index pins. Category changes require a new

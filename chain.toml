@@ -184,8 +184,8 @@ manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/sft-reasonin
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/dclm-baseline-1.0/manifest.json"
 
 [competitions.main]
-n = 20000
-long_document_tokens = 30000000
+n = 0
+long_document_tokens = 70000000
 delta_threshold = 0.0015
 incentive = 0.25
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/main/versions/44383013ef3b8c1fbaaf54ece816af899bb55727d18f842249931e56cf09e99d.json"
@@ -217,8 +217,8 @@ web-high-medium = 0.06230692644822899
 web-high-nltk-qa = 0.0656642256232968
 
 [competitions.mix01]
-n = 20000
-long_document_tokens = 30000000
+n = 0
+long_document_tokens = 70000000
 delta_threshold = 0.0015
 incentive = 0.125
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix01/versions/406f640bf0946c50625c54aa80334b9032ca2001bd5175ab18fed4f2e71ae94d.json"
@@ -245,8 +245,8 @@ reasoning = 0.1413
 socratic-math-dialogue = 0.015300000000000001
 
 [competitions.mix02]
-n = 20000
-long_document_tokens = 30000000
+n = 0
+long_document_tokens = 70000000
 delta_threshold = 0.0015
 incentive = 0.125
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix02/versions/2893ef85b15b2288e72fd6441bca7ff0059a15e0575130a5dfd48e4f4691d930.json"
@@ -268,8 +268,8 @@ planning = 0.21643464356737158
 reasoning = 0.15645799016148235
 
 [competitions.mix03]
-n = 20000
-long_document_tokens = 30000000
+n = 0
+long_document_tokens = 70000000
 delta_threshold = 0.0015
 incentive = 0.125
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix03/versions/5cca8513c719454e0d961f1d8d4b9b40a749e94e638f4e9e27cf861e495ecca2.json"
@@ -295,8 +295,8 @@ reasoning = 0.12560000000000002
 socratic-math-dialogue = 0.0204
 
 [competitions.mix04]
-n = 20000
-long_document_tokens = 30000000
+n = 0
+long_document_tokens = 70000000
 delta_threshold = 0.0015
 incentive = 0.125
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix04/versions/97fa3df9158724931d5bd24c3c8bbfd44e0fab69b3fdc535f4f7ebdc5776a2b4.json"
@@ -314,8 +314,8 @@ web-high-medium = 0.20163919123266216
 web-high-nltk-qa = 0.21250416450251594
 
 [competitions.mix05]
-n = 20000
-long_document_tokens = 30000000
+n = 0
+long_document_tokens = 70000000
 delta_threshold = 0.0015
 incentive = 0.125
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix05/versions/49c4198f6602b29505c01b931db0a9a3d877f2c51a36c8341e7a770d58691fee.json"
@@ -331,8 +331,8 @@ planning = 0.11993256499376025
 reasoning = 0.19917344489800715
 
 [competitions.mix06]
-n = 20000
-long_document_tokens = 30000000
+n = 0
+long_document_tokens = 70000000
 delta_threshold = 0.0015
 incentive = 0.125
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix06/versions/23aa16564c225ef8212d82eeefe74cb47b0cae1daa8532ed05f0307104b92c29.json"
@@ -365,8 +365,8 @@ web-high-medium = 0.049512953271372305
 web-high-nltk-qa = 0.05218087169792589
 
 [competitions.mix07]
-n = 20000
-long_document_tokens = 30000000
+n = 0
+long_document_tokens = 70000000
 delta_threshold = 0.0015
 incentive = 0.125
 # Prepare/publish a bundle before activation; no published immutable URL yet.

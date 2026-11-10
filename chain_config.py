@@ -113,8 +113,10 @@ if any(
     for path, digest in GENESIS_CONTRACT_FILES.items()
 ):
     raise RuntimeError("chain.toml contains an invalid genesis contract file lock")
-if EVALUATION_N < 1:
-    raise RuntimeError("chain.toml [competitions.main].n must be positive")
+if EVALUATION_N < 0:
+    raise RuntimeError("chain.toml [competitions.main].n must be non-negative")
+if EVALUATION_N == 0 and not 1 <= int(_main_evaluation.get("long_document_tokens") or 0) <= 100_000_000:
+    raise RuntimeError("zero windows requires a document token budget in [1, 100000000]")
 if not math.isfinite(EVALUATION_DELTA_THRESHOLD) or EVALUATION_DELTA_THRESHOLD < 0:
     raise RuntimeError("chain.toml [competitions.main].delta_threshold must be finite and non-negative")
 if EVALUATION_SHARDS_PER_DATASET < 1:

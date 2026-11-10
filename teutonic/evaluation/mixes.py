@@ -36,7 +36,7 @@ def validate_definitions():
         identities = [(chain_config.CATEGORY_REGISTRY[c]["dataset"], c) for c in weights]
         if len(identities) != len(set(identities)):
             raise ValueError(f"duplicate category: {key}")
-        if spec["n"] < 1 or not 1 <= spec["long_document_tokens"] <= 100_000_000:
+        if spec["n"] < 0 or not 1 <= spec["long_document_tokens"] <= 100_000_000:
             raise ValueError(f"invalid evaluation budgets: {key}")
         if spec["incentive"] != (0.25 if key == "main" else 0.125):
             raise ValueError(f"unsupported incentive allocation: {key}")

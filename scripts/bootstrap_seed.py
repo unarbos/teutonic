@@ -25,6 +25,7 @@ from teutonic.evaluation.configuration import (
     fetch_dataset_manifest,
     store_evaluation_configuration,
 )
+from teutonic.evaluation.long_documents import build_long_document_config
 
 
 log = logging.getLogger("teutonic.seed-bootstrap")
@@ -192,6 +193,10 @@ def main() -> int:
         )
         for item in chain_config.EVALUATION_DATASETS
     )
+    long_documents = build_long_document_config(
+        dataset_manifests,
+        token_budget=chain_config.COMPETITION_DEFAULTS["main"]["long_document_tokens"],
+    )
     with psycopg.connect(required("TEUTONIC_DATABASE_URL"), row_factory=dict_row) as connection:
         record = bootstrap_genesis(
             connection,
@@ -220,6 +225,7 @@ def main() -> int:
             delta_threshold=chain_config.EVALUATION_DELTA_THRESHOLD,
             manifests=dataset_manifests,
             shards_per_dataset=chain_config.EVALUATION_SHARDS_PER_DATASET,
+            long_documents=long_documents,
         )
     action = "created" if record.created else "verified existing"
     log.info(

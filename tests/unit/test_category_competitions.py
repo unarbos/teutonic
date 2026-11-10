@@ -60,7 +60,7 @@ def bundle(tmp_path):
 def test_every_competition_uses_identical_flat_planning(key, bundle):
     directory, outputs = bundle
     args = parse_args(
-        ["--initialize", "--bundle-dir", str(directory), "--long-document-tokens", "0"]
+        ["--initialize", "--bundle-dir", str(directory), "--n", "20000", "--long-document-tokens", "0"]
     )
     config, version = prepare_configuration(None, key, args)
     settings = EvaluationSettings(config_version=version, **config)
@@ -111,7 +111,7 @@ def test_changed_bundle_weights_rejected(bundle):
             None,
             "mix02",
             parse_args(
-                ["--initialize", "--bundle-dir", str(directory), "--long-document-tokens", "0"]
+                ["--initialize", "--bundle-dir", str(directory), "--n", "20000", "--long-document-tokens", "0"]
             ),
         )
 
