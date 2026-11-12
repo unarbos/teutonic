@@ -440,6 +440,7 @@
             totalTokens: totalTokens,
             totalShards: totalShards,
             totalSequences: totalSequences,
+            tokenCountBasis: manifest.token_count_basis || "",
             sequenceLength: sharedSequenceLength,
             evalTokens: rows.reduce(function(total, row) { return total + row.evalTokens; }, 0),
             tokenizer: sharedTokenizer

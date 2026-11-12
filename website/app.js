@@ -1,7 +1,7 @@
 (function () {
   "use strict";
   var ENDPOINT = "/dashboard.json";
-  var DATASET_MANIFEST_URL = "/competitions/mix06/datasets/manifest.json";
+  var DATASET_MANIFEST_URL = "/datasets/inventory.json";
   var BENCHMARK_STORAGE_BASE = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev/";
   var BENCHMARK_COMPETITIONS = ["main", "mix01", "mix02", "mix03", "mix04", "mix05", "mix06", "mix07"];
   var MODEL_STORAGE_BASE = "https://pub-0821d4e196224864af220294345fd141.r2.dev/";
@@ -243,6 +243,7 @@
   function renderDatasetManifest(manifest) {
     var view = TeutonicDashboardV1.mainDatasetPresentation(manifest), summary = [view.rows.length + (view.rows.length === 1 ? " DATASET" : " DATASETS")];
     if (view.totalTokens) summary.push(compactNumber(view.totalTokens) + " TOKENS");
+    if (view.tokenCountBasis === "original_mimo_token_count") summary.push("TOKEN COUNTS: ORIGINAL MIMO");
     if (view.sequenceLength) summary.push("SEQ LEN " + number(view.sequenceLength));
     text("dataset-summary", summary.join(" · "));
     if (view.tokenizer) {
@@ -250,12 +251,11 @@
       el("dataset-summary").appendChild(tokenizer);
     }
     var body = el("dataset-sources"); clear(body);
-    if (!view.rows.length) return emptyRow(body, 5, "NO DATASETS IN MANIFEST");
+    if (!view.rows.length) return emptyRow(body, 4, "NO DATASETS IN MANIFEST");
     view.rows.forEach(function (source) {
       var tr = document.createElement("tr");
       datasetCell(tr, source.name, source.metadataLoaded ? source.tokenizationMode : "METADATA UNAVAILABLE", source.manifestUrl);
       datasetCell(tr, source.totalTokens ? compactNumber(source.totalTokens) : "--", "");
-      datasetCell(tr, source.sequences ? compactNumber(source.sequences) : "--", source.sequenceLength ? "LEN " + number(source.sequenceLength) : "");
       datasetCell(tr, source.totalShards ? number(source.totalShards) : "--", "");
       datasetCell(tr, source.totalShards && source.totalTokens ? compactNumber(source.totalTokens / source.totalShards) : "--", "");
       body.appendChild(tr);
@@ -268,7 +268,7 @@
       renderDatasetManifest(manifest);
     } catch (error) {
       text("dataset-summary", "MANIFEST UNAVAILABLE · USE THE MANIFEST LINK");
-      emptyRow(el("dataset-sources"), 5, "DATASET MANIFEST COULD NOT BE LOADED");
+      emptyRow(el("dataset-sources"), 4, "DATASET MANIFEST COULD NOT BE LOADED");
     }
   }
 

@@ -252,6 +252,18 @@ assert.strictEqual(dataset.rows[0].source, "owner/dataset");
 assert.strictEqual(dataset.rows[0].metadataLoaded, true);
 assert.throws(() => dashboard.datasetPresentation({}, {}), /sources must be an array/);
 
+// The corpus panel uses the verified inventory, not a competition sampling mix.
+const packedInventory = require("../../website/datasets/inventory.json");
+const packedCorpus = dashboard.mainDatasetPresentation(packedInventory);
+assert.strictEqual(packedCorpus.rows.length, 6);
+assert.strictEqual(packedCorpus.totalTokens, 18175749974177);
+assert.strictEqual(packedCorpus.totalShards, 560169);
+assert.strictEqual(packedCorpus.tokenCountBasis, "original_mimo_token_count");
+const packedCode = packedCorpus.rows.find(row => row.name === "code-reasoning");
+assert.strictEqual(packedCode.totalTokens, 2453219624332);
+assert.strictEqual(packedCode.totalShards, 72466);
+assert.ok(packedCorpus.rows.every(row => row.metadataLoaded && row.totalTokens > 0 && row.totalShards > 0));
+
 const benchmarkResults = dashboard.benchmarkPresentation({
     schema_version: "teutonic-king-benchmark-all-results.v2",
     generated_at: "2026-08-26T10:30:39Z",
