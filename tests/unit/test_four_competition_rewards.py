@@ -75,6 +75,7 @@ def database_fixture():
 
 def test_migration_plans_both_activation_and_durable_weight_payload():
     rows, publication = database_fixture()
+    rows[0]["name"] = "Teutonic-II-110B"
     plan = prepare(rows, publication)
     assert set(plan["retired_ids"]) == {"mix02", "mix03", "mix05"}
     assert plan["policy_weights"] == [.4, .2, .2, .2]

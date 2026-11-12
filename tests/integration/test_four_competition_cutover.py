@@ -26,7 +26,8 @@ def test_read_only_preview_atomic_apply_and_idempotence(tmp_path, monkeypatch):
                 """INSERT INTO control_plane.competitions
                    (netuid,chain_generation,name,competition_key,main_competition_id,reward_transition)
                    VALUES (999,'reward-test',%s,%s,%s,%s) RETURNING competition_id""",
-                (key, key, main_id, Jsonb(state) if key == "main" else None),
+                ("Teutonic-II-110B" if key == "main" else key,
+                 key, main_id, Jsonb(state) if key == "main" else None),
             ).fetchone()["competition_id"]
             digest = f"{i + 1:064x}"
             reign = db.execute(
@@ -66,7 +67,7 @@ def test_read_only_preview_atomic_apply_and_idempotence(tmp_path, monkeypatch):
         assert db.execute("SELECT * FROM control_plane.weight_publications").fetchone() == before
         assert db.execute("SELECT count(*) AS n FROM control_plane.competitions WHERE active").fetchone()["n"] == 7
         run("backup.json", True)
-        active = db.execute("SELECT name FROM control_plane.competitions WHERE active ORDER BY name").fetchall()
+        active = db.execute("SELECT competition_key AS name FROM control_plane.competitions WHERE active ORDER BY name").fetchall()
         assert [r["name"] for r in active] == ["main", "mix01", "mix06", "mix07"]
         after = db.execute("SELECT * FROM control_plane.weight_publications").fetchone()
         assert after["policy_weights"] == after["normalized_weights"] == [.4, .2, .2, .2]

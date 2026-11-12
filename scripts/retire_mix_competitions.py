@@ -28,7 +28,9 @@ from teutonic.weights.transition import lock_drained_services
 def prepare(rows, publication):
     """Build a guarded plan from locked rows; no I/O or mutations."""
     by_key = {r["competition_key"]: r for r in rows}
-    if len(by_key) != len(rows) or any(r["name"] != k for k, r in by_key.items()):
+    # MAIN retains the chain's display name (e.g. Teutonic-II-110B).
+    if len(by_key) != len(rows) or any(not r["name"] or (k != "main" and r["name"] != k)
+                                     for k, r in by_key.items()):
         raise ValueError("ambiguous competition identities")
     if not set(ACTIVE_COMPETITIONS) <= set(by_key):
         raise ValueError("missing active competition")

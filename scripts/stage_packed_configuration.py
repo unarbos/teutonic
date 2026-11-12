@@ -56,9 +56,16 @@ DECLARE cid uuid; previous uuid; eid uuid;
 BEGIN
  SELECT competition_id INTO STRICT cid FROM control_plane.competitions
  WHERE netuid={int(netuid)} AND chain_generation={literal(generation)}
- AND name={literal(mix['competition'])} AND active FOR UPDATE;
- IF EXISTS (SELECT 1 FROM control_plane.evaluations WHERE competition_id=cid
-            AND state IN ('claimed','evaluating','retryable_failure')) THEN
+ AND competition_key={literal(mix['competition'])} AND active FOR UPDATE;
+ IF EXISTS (SELECT 1 FROM control_plane.evaluations e WHERE e.competition_id=cid
+            AND (e.state IN ('claimed','evaluating') OR
+                 (e.state='retryable_failure' AND NOT EXISTS (
+                    SELECT 1 FROM control_plane.uploads u WHERE u.upload_id=e.upload_id
+                    AND u.state IN ('accepted','rejected','evaluation_failed')
+                    AND EXISTS (SELECT 1 FROM control_plane.evaluations newer
+                                WHERE newer.upload_id=e.upload_id
+                                AND newer.attempt_number>e.attempt_number
+                                AND newer.state IN ('completed','terminal_failure')))))) THEN
    RAISE EXCEPTION 'Drain active evaluations and resolve pending retries before cutover';
  END IF;
  SELECT evaluation_config_id INTO STRICT previous FROM control_plane.evaluation_configs
