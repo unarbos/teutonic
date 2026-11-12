@@ -11,6 +11,8 @@ build/
 .venv-fix/
 venv/
 env/
+.venv-horizon/
+.venv-vllm/
 
 # Environment / secrets
 .env
