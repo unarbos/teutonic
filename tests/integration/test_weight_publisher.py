@@ -28,6 +28,7 @@ class FakeChain:
         self.last_update = 0
         self.last_payload = None
         self.submit_calls = 0
+        self.inclusion_delay = 1
 
     def current_block(self) -> int:
         return self.block
@@ -47,7 +48,7 @@ class FakeChain:
 
     def submit(self, plan):
         self.submit_calls += 1
-        self.block += 1
+        self.block += self.inclusion_delay
         self.last_update = self.block
         self.last_payload = plan.payload_sha256
         identity = f"0xfake{self.submit_calls}"
@@ -204,17 +205,19 @@ class WeightPublisherIntegrationTests(unittest.TestCase):
               JOIN control_plane.weight_submission_attempts a USING (weight_publication_id)
             """
         ).fetchone()
-        self.assertEqual(row, ("finalized", 1101, "finalized", "0xfake1", 1001, 1001))
+        self.assertEqual(row, ("finalized", 1102, "finalized", "0xfake1", 1001, 1001))
         self.assertEqual(
             stages,
             ["submitting", "external_returned", "submitted", "included", "finalized"],
         )
         self.assertEqual(self.chain.submit_calls, 1)
 
-    def test_current_plan_is_attempted_again_at_exactly_101_blocks(self) -> None:
+    def test_current_plan_is_attempted_101_blocks_after_inclusion(self) -> None:
         worker = self.worker()
         worker.run_one(propagate=True)
         self.chain.advance(99)
+        self.assertFalse(worker.run_one(propagate=True))
+        self.chain.advance(1)
         self.assertFalse(worker.run_one(propagate=True))
         self.chain.advance(1)
         self.assertTrue(worker.run_one(propagate=True))
@@ -224,7 +227,18 @@ class WeightPublisherIntegrationTests(unittest.TestCase):
               FROM control_plane.weight_submission_attempts ORDER BY sequence
             """
         ).fetchall()
-        self.assertEqual(attempts, [(1, 1000, "finalized"), (2, 1101, "finalized")])
+        self.assertEqual(attempts, [(1, 1000, "finalized"), (2, 1102, "finalized")])
+        self.assertEqual(self.chain.submit_calls, 2)
+
+    def test_inclusion_latency_does_not_schedule_inside_chain_rate_limit(self) -> None:
+        self.chain.inclusion_delay = 3
+        worker = self.worker()
+        self.assertTrue(worker.run_one(propagate=True))
+        self.chain.advance(100)
+        self.assertFalse(worker.run_one(propagate=True))
+        self.assertEqual(self.chain.submit_calls, 1)
+        self.chain.advance(1)
+        self.assertTrue(worker.run_one(propagate=True))
         self.assertEqual(self.chain.submit_calls, 2)
 
     def test_uid_remap_revision_keeps_prior_attempt_payload_immutable(self) -> None:

@@ -455,6 +455,7 @@ class WeightPublicationRepository:
             ).fetchone()
             if row is None:
                 raise WeightLeaseLostError("weight finality acknowledgement lost its attempt")
+            # The chain rate limit starts at inclusion, not submission start.
             self.connection.execute(
                 """
                 UPDATE control_plane.weight_publications
@@ -465,6 +466,7 @@ class WeightPublicationRepository:
                        submitted_at = COALESCE(submitted_at, %s),
                        included_at = COALESCE(included_at, %s), finalized_at = %s,
                        next_retry_at = NULL, last_error_code = NULL,
+                       next_due_block = GREATEST(next_due_block, %s + cadence_blocks),
                        updated_at = clock_timestamp()
                  WHERE weight_publication_id = %s AND owner_instance_id = %s
                 """,
@@ -475,6 +477,7 @@ class WeightPublicationRepository:
                     now,
                     now,
                     now,
+                    receipt.included_block or receipt.finalized_block,
                     plan.publication_id,
                     self.instance_id,
                 ),

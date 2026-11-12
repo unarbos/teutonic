@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 import psycopg
 
 from teutonic.config import BucketNames
-from teutonic.evaluation import EvaluationRequestV2, HttpEvaluatorClient
+from teutonic.evaluation import HttpEvaluatorClient
+from teutonic.evaluation.protocol_v3 import EvaluationRequestV3
 from teutonic.validator import (
     BittensorFinalizedMetagraphReader,
     CrownCoordinator,
@@ -42,7 +43,7 @@ def stop(_signum, _frame) -> None:
 
 
 async def contract_preflight(request):
-    EvaluationRequestV2.from_mapping(request)
+    EvaluationRequestV3.from_mapping(request)
     return None
 
 
