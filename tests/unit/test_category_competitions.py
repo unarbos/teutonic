@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import chain_config
-from scripts.configure_evaluation import parse_args, prepare_configuration
+from scripts.legacy.configure_evaluation import parse_args, prepare_configuration
 from teutonic.access.contracts import ReadySignal, ready_signal_payload
 from teutonic.competitions import ACTIVE_COMPETITIONS, BOOTSTRAP_COMPETITIONS, normalize_competition
 from teutonic.dashboard.projection import _dataset_sources

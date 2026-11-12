@@ -376,3 +376,23 @@ assert.ok(datasetChanges[0].changes.some((change) => change.includes("EVAL SAMPL
 assert.ok(datasetChanges[0].changes.some((change) => change.includes("fixture CONTENT")));
 require("./benchmark_sources.test.js");
 console.log("dashboard-v1 representative render states passed");
+
+// History stays in ordinary token NLL across reward-policy changes.
+const mixedUnits = dashboard.lossChartPresentation([
+    { timestamp: "2026-11-11", avg_king_loss: 2, avg_challenger_loss: 1.9 },
+    { timestamp: "2026-11-12", policy_version: "horizon-deficit-bpb", avg_king_loss: .4, avg_challenger_loss: .39,
+      avg_king_token_loss: 1.9, avg_challenger_token_loss: 1.8 },
+    { timestamp: "2026-11-13", policy_version: "horizon-deficit-bpb", avg_king_loss: .3, avg_challenger_loss: .29 }
+]);
+assert.deepStrictEqual(mixedUnits.points.map(p => p.avg_challenger_loss), [1.9, 1.8]);
+assert.strictEqual(mixedUnits.unit, "nats/token");
+assert.strictEqual(mixedUnits.points[1].avg_king_loss, 1.9);
+assert.strictEqual(dashboard.lossUnit({}), "nats/token");
+assert.strictEqual(dashboard.lossUnit({policy_version:"token-weighted-observed-quantile-v1"}), "nats/token");
+assert.strictEqual(dashboard.lossUnit({policy_version:"horizon-deficit-bpb"}), "bits/byte");
+assert.match(dashboard.decisionPresentation({accepted:true, policy_version:"horizon-deficit-bpb"}).detail, /Horizon/);
+const packedCategory = dashboard.categoryScoresPresentation({category_scores:[{
+    source:"codeio",n_sequences:2,avg_king_loss:.4,avg_challenger_loss:.39,mu_hat:.002,avg_reference_loss:.3
+}]}).rows[0];
+assert.strictEqual(packedCategory.referenceLoss,.3);
+assert.strictEqual(packedCategory.muHat,.002); // Reward is not raw loss subtraction.

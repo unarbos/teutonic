@@ -1,10 +1,7 @@
-import ast
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from teutonic.evaluation.masking import DOCUMENT_EOS_TOKEN_ID, MASKED_POLICY_VERSION
 from teutonic.evaluation.policy import apply_specialist_source_gate, paired_bootstrap_verdict
 
 
@@ -16,26 +13,14 @@ def sources(own):
 
 
 def engine_verdict(own, differences, labels, counts, threshold=0.0014, legacy=True):
-    # Exercise the production verdict adapter without importing CUDA dependencies.
-    path = Path(__file__).parents[2] / "teutonic/evaluator/engine.py"
-    tree = ast.parse(path.read_text())
-    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
-                and n.name == "bootstrap_verdict")
-    namespace = {
-        "EvalRequest": SimpleNamespace,
-        "paired_bootstrap_verdict": paired_bootstrap_verdict,
-        "apply_specialist_source_gate": apply_specialist_source_gate,
-        "MASKED_POLICY_VERSION": MASKED_POLICY_VERSION,
-        "DOCUMENT_EOS_TOKEN_ID": DOCUMENT_EOS_TOKEN_ID,
-    }
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
     request = SimpleNamespace(
         bootstrap_seed=0, n_bootstrap=200, alpha=0.1,
         delta_threshold=threshold, long_documents={"enabled": True},
         dataset_sources=sources(own) if own else [{"name": "main-data", "proportion": 1}],
     )
-    result = namespace["bootstrap_verdict"](
-        differences, [0.0] * len(differences), request, counts, labels,
+    result = paired_bootstrap_verdict(
+        differences, [0.0] * len(differences), bootstrap_seed=0, n_bootstrap=200,
+        alpha=.1, delta_threshold=threshold, scored_tokens=counts,
     )
     if legacy:
         apply_specialist_source_gate(result, differences, [0.0] * len(differences), counts,

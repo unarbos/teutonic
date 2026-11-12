@@ -58,7 +58,9 @@ initial_weight_uids = [110, 115, 143, 224, 226]
 "tokenizer.json" = "71e1168ef6233c01973f3b8b90abcd86236e146f7aee8da59655d2ca51afdb20"
 "tokenizer_config.json" = "2cb1d781e7d20a1386d6a6c2c89fdc9b18a9c6f277071488f39dbfc02829589e"
 
-# Shared sampling settings for the category competitions below.
+# Legacy initialization settings retained for historical source recovery.
+# Packed-text runtime pins come from PostgreSQL after the staged migration.
+# Prepare new dataset/teutonic-text splits with scripts/prepare_competition_mixes.py.
 [evaluation]
 shards_per_dataset = 4
 
@@ -185,9 +187,9 @@ manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/dclm-baselin
 
 [competitions.main]
 n = 0
-long_document_tokens = 70000000
-delta_threshold = 0.0015
-incentive = 0.25
+long_document_tokens = 35000000
+delta_threshold = 0.00075
+incentive = 0.4
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/main/versions/44383013ef3b8c1fbaaf54ece816af899bb55727d18f842249931e56cf09e99d.json"
 
 [competitions.main.categories]
@@ -218,9 +220,9 @@ web-high-nltk-qa = 0.0656642256232968
 
 [competitions.mix01]
 n = 0
-long_document_tokens = 70000000
-delta_threshold = 0.0015
-incentive = 0.125
+long_document_tokens = 35000000
+delta_threshold = 0.00075
+incentive = 0.2
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix01/versions/406f640bf0946c50625c54aa80334b9032ca2001bd5175ab18fed4f2e71ae94d.json"
 
 [competitions.mix01.categories]
@@ -246,9 +248,9 @@ socratic-math-dialogue = 0.015300000000000001
 
 [competitions.mix02]
 n = 0
-long_document_tokens = 70000000
+long_document_tokens = 35000000
 delta_threshold = 0.0015
-incentive = 0.125
+incentive = 0.0
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix02/versions/2893ef85b15b2288e72fd6441bca7ff0059a15e0575130a5dfd48e4f4691d930.json"
 
 [competitions.mix02.categories]
@@ -269,9 +271,9 @@ reasoning = 0.15645799016148235
 
 [competitions.mix03]
 n = 0
-long_document_tokens = 70000000
+long_document_tokens = 35000000
 delta_threshold = 0.0015
-incentive = 0.125
+incentive = 0.0
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix03/versions/5cca8513c719454e0d961f1d8d4b9b40a749e94e638f4e9e27cf861e495ecca2.json"
 
 [competitions.mix03.categories]
@@ -296,9 +298,9 @@ socratic-math-dialogue = 0.0204
 
 [competitions.mix04]
 n = 0
-long_document_tokens = 70000000
+long_document_tokens = 35000000
 delta_threshold = 0.0015
-incentive = 0.125
+incentive = 0.0
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix04/versions/97fa3df9158724931d5bd24c3c8bbfd44e0fab69b3fdc535f4f7ebdc5776a2b4.json"
 
 [competitions.mix04.categories]
@@ -315,9 +317,9 @@ web-high-nltk-qa = 0.21250416450251594
 
 [competitions.mix05]
 n = 0
-long_document_tokens = 70000000
+long_document_tokens = 35000000
 delta_threshold = 0.0015
-incentive = 0.125
+incentive = 0.0
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix05/versions/49c4198f6602b29505c01b931db0a9a3d877f2c51a36c8341e7a770d58691fee.json"
 
 [competitions.mix05.categories]
@@ -332,9 +334,9 @@ reasoning = 0.19917344489800715
 
 [competitions.mix06]
 n = 0
-long_document_tokens = 70000000
-delta_threshold = 0.0015
-incentive = 0.125
+long_document_tokens = 35000000
+delta_threshold = 0.00075
+incentive = 0.2
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix06/versions/23aa16564c225ef8212d82eeefe74cb47b0cae1daa8532ed05f0307104b92c29.json"
 
 [competitions.mix06.categories]
@@ -366,9 +368,9 @@ web-high-nltk-qa = 0.05218087169792589
 
 [competitions.mix07]
 n = 0
-long_document_tokens = 70000000
-delta_threshold = 0.0015
-incentive = 0.125
+long_document_tokens = 35000000
+delta_threshold = 0.00075
+incentive = 0.2
 # Prepare/publish a bundle before activation; no published immutable URL yet.
 manifest_url = ""
 manifest_base_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix07"

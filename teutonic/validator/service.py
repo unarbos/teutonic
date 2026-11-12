@@ -9,10 +9,12 @@ from teutonic.evaluation import (
     EvaluatorBusyError,
     EvaluatorConflictError,
     EvaluatorJobNotFoundError,
-    EvaluationRequestV2,
-    ProtocolValidationError,
     classify_eval_error,
-    validate_result_v2,
+)
+
+from teutonic.evaluation.protocol_v3 import (
+    EvaluationRequestV3, ProtocolValidationError,
+    validate_result_v3,
 )
 
 from .contracts import ClaimedEvaluation, EvaluationPolicyConfig
@@ -233,8 +235,8 @@ class ValidatorScheduler:
         raise RuntimeError("evaluator stream closed before a terminal result")
 
     def _persist_terminal(self, claim: ClaimedEvaluation, result: Mapping[str, Any]) -> None:
-        request = EvaluationRequestV2.from_mapping(claim.request)
-        validate_result_v2(result, request)
+        request = EvaluationRequestV3.from_mapping(claim.request)
+        validate_result_v3(result, request)
         persisted = dict(result)
         persisted.setdefault("delta", persisted["delta_threshold"])
         disposition = self.repository.complete_verdict(

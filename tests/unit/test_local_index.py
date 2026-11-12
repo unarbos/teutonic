@@ -1,5 +1,4 @@
 import ast
-import asyncio
 import fcntl
 import gzip
 import io
@@ -377,52 +376,8 @@ def engine_function(name, namespace):
     return namespace[name]
 
 
-@pytest.mark.parametrize("fails", [False, True])
-def test_evaluation_resumes_download_after_success_or_failure(fails):
-    prefetcher = Mock()
-    request = SimpleNamespace(dataset={"long_documents": {"index_manifest": pin()}})
-    run = Mock(side_effect=RuntimeError("failed") if fails else None)
-    fn = engine_function("run_eval_with_prefetch", {"run_eval": run, "log": Mock()})
-    if fails:
-        with pytest.raises(RuntimeError):
-            fn("eval", request, prefetcher)
-    else:
-        fn("eval", request, prefetcher)
-    prefetcher.enqueue_pin.assert_called_once()
-    prefetcher.resume.assert_called_once()
 
 
-@pytest.mark.parametrize("duplicate, thread_failure", [(False, False), (True, False), (False, True)])
-def test_admission_pauses_before_launch_and_recovers_launch_failure(duplicate, thread_failure):
-    prefetcher = Mock()
-    record, request = Mock(), SimpleNamespace(eval_id="eval")
-
-    def start():
-        prefetcher.pause.assert_called_once()
-        if thread_failure:
-            raise RuntimeError("cannot start thread")
-
-    namespace = {
-        "EvaluationRequestV2": SimpleNamespace(from_mapping=lambda _: request),
-        "validate_protocol_versions": Mock(), "ProtocolValidationError": ValueError,
-        "AttemptBusyError": type("Busy", (Exception,), {}),
-        "AttemptConflictError": type("Conflict", (Exception,), {}),
-        "_attempts": SimpleNamespace(start=Mock(return_value=(record, duplicate))),
-        "_eval_lock": Mock(), "_index_prefetcher": prefetcher, "time": time,
-        "threading": SimpleNamespace(Thread=Mock(return_value=SimpleNamespace(start=start))),
-        "run_eval_with_prefetch": Mock(),
-    }
-    fn = engine_function("start_eval", namespace)
-    if thread_failure:
-        with pytest.raises(RuntimeError):
-            asyncio.run(fn({}))
-        prefetcher.resume.assert_called_once()
-        namespace["_eval_lock"].release.assert_called_once()
-        assert record.state == "failed"
-    else:
-        asyncio.run(fn({}))
-        assert prefetcher.pause.call_count == (0 if duplicate else 1)
-        prefetcher.resume.assert_not_called()
 
 
 def test_cleanup_preserves_store_without_env_even_when_nested(store, monkeypatch):

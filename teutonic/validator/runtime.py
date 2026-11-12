@@ -8,8 +8,8 @@ from typing import Any
 
 from teutonic.evaluation.configuration import EvaluationSettings
 from teutonic.evaluation.early_stopping import EarlyStoppingPolicy
-from teutonic.evaluation.masking import MASKED_POLICY_VERSION
 from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE
+from teutonic.evaluation.reference_policy import POLICY_VERSION as MASKED_POLICY_VERSION
 from teutonic.weights.policy import mapped_weight_plan
 
 from .contracts import EvaluationPolicyConfig
@@ -44,6 +44,9 @@ def evaluation_policy_from_env(
     env = os.environ if source is None else source
     if settings is None:
         raise RuntimeError("active PostgreSQL evaluation configuration is required")
+    from teutonic.evaluation.packed_text import MIX_FORMAT
+    if len(settings.manifests) != 1 or settings.manifests[0].manifest.get("format") != MIX_FORMAT:
+        raise RuntimeError("activate migrated packed-text configuration before starting this validator")
     policy_version = _required(env, "TEUTONIC_EVALUATION_POLICY_VERSION")
     if policy_version != MASKED_POLICY_VERSION:
         raise RuntimeError(f"this validator requires evaluation policy {MASKED_POLICY_VERSION!r}")
@@ -59,7 +62,7 @@ def evaluation_policy_from_env(
         n_bootstrap=int(env.get("TEUTONIC_EVAL_BOOTSTRAP_B", "10000")),
         alpha=float(env.get("TEUTONIC_EVAL_ALPHA", "0.001")),
         delta_threshold=settings.delta_threshold,
-        dataset_source="pretokenized_npy",
+        dataset_source="packed_text",
         dataset_label=settings.dataset_label,
         shards_per_dataset=settings.shards_per_dataset,
         batch_size=int(env.get("TEUTONIC_EVAL_BATCH_SIZE", str(DEFAULT_EVAL_BATCH_SIZE))),

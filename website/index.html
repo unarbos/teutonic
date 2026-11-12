@@ -47,12 +47,12 @@
           <h2 id="competition-dataset-heading">COMPETITION DATASET MIX</h2>
           <span class="dataset-help" id="competition-dataset-help">
             <button type="button" aria-label="About the competition dataset mix" aria-describedby="competition-dataset-tooltip">(?)</button>
-            <span id="competition-dataset-tooltip" class="dataset-help-tooltip" role="tooltip" hidden>Each competition uses an explicit category list. Weights are sampling targets for windows and whole documents. Acceptance requires the whole-mix LCB to exceed the threshold. A kingless MIX challenges its pinned starting king; MIX07 starts from the MIX05 king pinned at activation.</span>
+            <span id="competition-dataset-tooltip" class="dataset-help-tooltip" role="tooltip" hidden>Each competition uses an explicit category list. Weights are sampling targets for whole documents. The rollout budget is 35M original MiMo tokens. Reward is the byte-weighted reduction in max(model loss − Horizon loss, 0); losses and thresholds are in bits/byte. Acceptance requires the bootstrap LCB to exceed the threshold. A kingless MIX challenges its pinned starting king; MIX07 starts from the MIX05 king pinned at activation.</span>
           </span>
         </div>
         <div class="dataset-table-wrap">
           <table class="dataset-table competition-dataset-table">
-            <thead><tr><th scope="col">COMPETITION</th><th scope="col">CATEGORY WEIGHTS</th><th scope="col">WINDOWS</th><th scope="col">DOCUMENT TOKENS</th><th scope="col">STATUS</th><th scope="col">REQUIRED LCB</th><th scope="col">SOURCE</th></tr></thead>
+            <thead><tr><th scope="col">COMPETITION</th><th scope="col">CATEGORY WEIGHTS</th><th scope="col">DOCUMENT TOKENS</th><th scope="col">STATUS</th><th scope="col">REQUIRED LCB</th><th scope="col">SOURCE</th></tr></thead>
             <tbody id="competition-datasets"></tbody>
           </table>
         </div>
@@ -71,7 +71,7 @@
         </div>
       </div>
       <div class="chart-shell">
-        <svg id="loss-chart" role="img" aria-label="King and challenger average loss over completed evaluations"></svg>
+        <svg id="loss-chart" role="img" aria-label="King and challenger average loss in nats per token over completed evaluations"></svg>
         <p id="chart-empty" class="empty-state" hidden>NO COMPLETED LOSS DATA</p>
         <div id="dataset-change-tooltip" class="dataset-change-tooltip" role="tooltip" hidden></div>
       </div>
@@ -154,7 +154,7 @@
       </div>
       <p id="history-status" class="queue-status muted" role="status" hidden></p>
       <div class="table-wrap history-wrap"><table class="history-table">
-        <thead><tr><th>COMPETITION</th><th>UID</th><th>REPO</th><th>HOTKEY</th><th>COLDKEY</th><th>VERDICT</th><th>MU_HAT</th><th>LCB</th><th>KING LOSS</th><th>CHALL LOSS</th><th>WHEN</th></tr></thead>
+        <thead><tr><th>COMPETITION</th><th>UID</th><th>REPO</th><th>HOTKEY</th><th>COLDKEY</th><th>VERDICT</th><th>REWARD / UNIT</th><th>LCB</th><th>KING LOSS</th><th>CHALL LOSS</th><th>WHEN</th></tr></thead>
         <tbody id="history-body"><tr><td colspan="11" class="empty-cell">NO EVALUATIONS YET</td></tr></tbody>
       </table></div>
     </section>

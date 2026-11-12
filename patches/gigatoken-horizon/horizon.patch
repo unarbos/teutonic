@@ -1,0 +1,352 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "gigatoken"
+-version = "0.11.0"
++version = "0.11.0+teutonic.horizon.1"
+ edition = "2024"
+ license = "MIT"
+ readme = "README.md"
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -697,7 +697,7 @@
+ 
+ [[package]]
+ name = "gigatoken"
+-version = "0.11.0"
++version = "0.11.0+teutonic.horizon.1"
+ dependencies = [
+  "aho-corasick",
+  "arrow-array",
+--- a/src/pretokenize/fast/mod.rs
++++ b/src/pretokenize/fast/mod.rs
+@@ -16,6 +16,7 @@
+ pub mod nemotron;
+ pub mod o200k;
+ pub mod olmo3;
++pub mod horizon;
+ pub mod qwen2;
+ pub mod qwen3_5;
+ pub mod r50k;
+@@ -26,6 +27,7 @@
+ pub use nemotron::{FastNemotronPretokenizer, FastNemotronRightAlignedPretokenizer};
+ pub use o200k::FastO200kPretokenizer;
+ pub use olmo3::FastOlmo3Pretokenizer;
++pub use horizon::FastHorizonPretokenizer;
+ pub use qwen2::FastQwen2Pretokenizer;
+ pub use qwen3_5::FastQwen35Pretokenizer;
+ pub use r50k::FastR50kPretokenizer;
+--- a/src/pretokenize/options.rs
++++ b/src/pretokenize/options.rs
+@@ -2,7 +2,7 @@
+ use crate::pretokenize::fast::{
+     FastCl100kPretokenizer, FastDeepSeekV3Pretokenizer, FastKimiPretokenizer,
+     FastNemotronPretokenizer, FastNemotronRightAlignedPretokenizer, FastO200kPretokenizer,
+-    FastOlmo3Pretokenizer, FastQwen2Pretokenizer, FastQwen35Pretokenizer, FastR50kPretokenizer,
++    FastHorizonPretokenizer, FastOlmo3Pretokenizer, FastQwen2Pretokenizer, FastQwen35Pretokenizer, FastR50kPretokenizer,
+ };
+ 
+ /// Which pretokenization scheme (regex) a tokenizer uses.
+@@ -12,6 +12,7 @@
+     GPT4, // cl100k
+     Qwen2,      // Slightly adapted from GPT4, also used by Qwen3
+     Qwen35,     // Qwen2 with `[\p{L}\p{M}]+` letter runs, marks excluded from punct runs
++    Horizon, // IFM K2-Horizon: L/M/ZWNJ/ZWJ words, original punctuation class
+     Olmo3,      // dolma2: Qwen2 scheme with cl100k's \p{N}{1,3}; used by Olmo 2/3
+     DeepSeekV3, // Sequence of three Splits (digits, CJK, main); used by DeepSeek V3/V3.1/V4
+     O200k,      // o200k_base: case-structured letter runs; GPT-4o, gpt-oss
+@@ -49,6 +50,9 @@
+             PretokenizerType::Qwen35 => {
+                 FastPretokenizerDispatch::Qwen35(FastQwen35Pretokenizer::new(bytes))
+             }
++            PretokenizerType::Horizon => {
++                FastPretokenizerDispatch::Horizon(FastHorizonPretokenizer::new(bytes))
++            }
+             PretokenizerType::Olmo3 => {
+                 FastPretokenizerDispatch::Olmo3(FastOlmo3Pretokenizer::new(bytes))
+             }
+@@ -73,12 +77,13 @@
+     /// The canonical name of each variant, in variant order — the
+     /// identifiers `from_name` accepts (plus the aliases listed there).
+     /// Error messages naming the valid schemes derive from this list.
+-    pub const NAMES: [&'static str; 10] = [
++    pub const NAMES: [&'static str; 11] = [
+         "gpt2",
+         "gpt4",
+         "qwen2",
+         "qwen35",
+         "olmo3",
++        "horizon",
+         "deepseek_v3",
+         "o200k",
+         "nemotron",
+@@ -96,6 +101,7 @@
+             "gpt4" | "cl100k" => PretokenizerType::GPT4,
+             "qwen2" => PretokenizerType::Qwen2,
+             "qwen35" => PretokenizerType::Qwen35,
++            "horizon" => PretokenizerType::Horizon,
+             "olmo3" => PretokenizerType::Olmo3,
+             "deepseek_v3" => PretokenizerType::DeepSeekV3,
+             "o200k" => PretokenizerType::O200k,
+@@ -121,6 +127,7 @@
+     /// `tokenizer.json` pre_tokenizer. Returns `None` for unknown patterns.
+     pub fn from_split_regex(pattern: &str) -> Option<Self> {
+         match pattern {
++            r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?(?:\p{L}|\p{M}|\u200C|\u200D)+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+" => Some(PretokenizerType::Horizon),
+             r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+" => {
+                 Some(PretokenizerType::GPT2)
+             }
+@@ -158,6 +165,7 @@
+     Cl100k(FastCl100kPretokenizer<'a>),
+     Qwen2(FastQwen2Pretokenizer<'a>),
+     Qwen35(FastQwen35Pretokenizer<'a>),
++    Horizon(FastHorizonPretokenizer<'a>),
+     Olmo3(FastOlmo3Pretokenizer<'a>),
+     DeepSeekV3(FastDeepSeekV3Pretokenizer<'a>),
+     O200k(FastO200kPretokenizer<'a>),
+@@ -176,6 +184,7 @@
+             FastPretokenizerDispatch::Cl100k(it) => it.next(),
+             FastPretokenizerDispatch::Qwen2(it) => it.next(),
+             FastPretokenizerDispatch::Qwen35(it) => it.next(),
++            FastPretokenizerDispatch::Horizon(it) => it.next(),
+             FastPretokenizerDispatch::Olmo3(it) => it.next(),
+             FastPretokenizerDispatch::DeepSeekV3(it) => it.next(),
+             FastPretokenizerDispatch::O200k(it) => it.next(),
+@@ -203,6 +212,7 @@
+             FastPretokenizerDispatch::Cl100k(it) => it.fill_spans_keyed(batch, prefetch),
+             FastPretokenizerDispatch::Qwen2(it) => it.fill_spans_keyed(batch, prefetch),
+             FastPretokenizerDispatch::Qwen35(it) => it.fill_spans_keyed(batch, prefetch),
++            FastPretokenizerDispatch::Horizon(it) => it.fill_spans_keyed(batch, prefetch),
+             FastPretokenizerDispatch::Olmo3(it) => it.fill_spans_keyed(batch, prefetch),
+             FastPretokenizerDispatch::DeepSeekV3(it) => it.fill_spans_keyed(batch, prefetch),
+             FastPretokenizerDispatch::O200k(it) => it.fill_spans_keyed(batch, prefetch),
+--- /dev/null
++++ b/src/pretokenize/fast/horizon.rs
+@@ -0,0 +1,226 @@
++//! IFM Horizon's exact extended-letter regex. Marks and ZWNJ/ZWJ join
++//! letter runs but remain eligible inside punctuation runs; those two
++//! classes intentionally overlap. Number groups contain at most 3 digits.
++//! Based on the upstream Olmo3 scalar scanner (MIT); ASCII uses its SIMD path.
++use super::{decode_cp, is_ascii_ws, is_digit, is_letter, scan_newlines,
++            scan_numbers_max3, scan_other_from, swar_scan_letters, FastOlmo3Pretokenizer};
++use crate::pretokenize::Pretoken;
++use crate::pretokenize::unicode::{self, CharClass};
++
++pub struct FastHorizonPretokenizer<'a> {
++    bytes: &'a [u8],
++    pos: usize,
++    ascii: Option<FastOlmo3Pretokenizer<'a>>,
++}
++impl<'a> FastHorizonPretokenizer<'a> {
++    pub fn new(bytes: &'a [u8]) -> Self {
++        Self { bytes, pos: 0, ascii: if bytes.is_ascii() { Some(FastOlmo3Pretokenizer::new(bytes)) } else { None } }
++    }
++}
++impl<'a> Iterator for FastHorizonPretokenizer<'a> {
++    type Item = Pretoken<'a>;
++    #[inline]
++    fn next(&mut self) -> Option<Self::Item> {
++        if let Some(ascii) = &mut self.ascii { return ascii.next(); }
++        if self.pos >= self.bytes.len() { return None; }
++        let start = self.pos;
++        self.pos = advance_pos(self.bytes, start);
++        Some(Pretoken(&self.bytes[start..self.pos]))
++    }
++}
++// SAFETY: upstream fill helper accepts only the nonempty in-bounds slices
++// produced by this iterator; the ASCII path delegates to upstream Olmo3.
++unsafe impl<'a> crate::pretokenize::PretokenSpans<'a> for FastHorizonPretokenizer<'a> {
++    fn fill_spans_keyed(&mut self, batch: &mut crate::pretokenize::SpanBatch<'a>, prefetch: &impl Fn(u64)) -> usize {
++        use crate::pretokenize::PretokenSpans;
++        if let Some(ascii) = &mut self.ascii { return ascii.fill_spans_keyed(batch, prefetch); }
++        crate::pretokenize::fill_spans_keyed_with(|| self.next().map(|p| p.0), batch, prefetch)
++    }
++}
++#[inline(always)]
++fn is_horizon_letter(cp: u32) -> bool {
++    cp == 0x200c || cp == 0x200d || unicode::class_of_marks_join(cp) == CharClass::Letter
++}
++#[inline(always)]
++fn letter_end_at(bytes: &[u8], pos: usize) -> Option<usize> {
++    let &b = bytes.get(pos)?;
++    if is_letter(b) { return Some(pos + 1); }
++    if b >= 0x80 {
++        let (cp, len) = unsafe { decode_cp(bytes, pos) };
++        if is_horizon_letter(cp) { return Some(pos + len); }
++    }
++    None
++}
++#[inline(always)]
++fn scan_letters_from(bytes: &[u8], mut pos: usize) -> usize {
++    loop {
++        pos = swar_scan_letters(bytes, pos);
++        if pos < bytes.len() && bytes[pos] >= 0x80 {
++            let (cp, len) = unsafe { decode_cp(bytes, pos) };
++            if is_horizon_letter(cp) { pos += len; continue; }
++        }
++        return pos;
++    }
++}
++/// Whitespace-led token starting at `start`, i.e. the alternatives
++/// `\s*[\r\n]+` | `\s+(?!\S)` | `\s+`, in that priority.
++/// Precondition: the letter-prefix (`[^\r\n\p{L}\p{N}]?\p{L}+`) and
++/// space+punct (` ?[^\s\p{L}\p{N}]+...`) alternatives were ruled out.
++#[inline(always)]
++fn ws_token_end(bytes: &[u8], start: usize) -> usize {
++    let len = bytes.len();
++    let mut p = start;
++    let mut last_nl_end = 0usize; // 0 = run contains no \r\n
++    let mut last_char_start = start;
++    while p < len {
++        let b = unsafe { *bytes.get_unchecked(p) };
++        if b == b'\r' || b == b'\n' {
++            last_char_start = p;
++            p += 1;
++            last_nl_end = p;
++        } else if is_ascii_ws(b) {
++            last_char_start = p;
++            p += 1;
++        } else if b >= 0x80 {
++            let (cp, l) = unsafe { decode_cp(bytes, p) };
++            if unicode::class_of(cp) == CharClass::Whitespace {
++                last_char_start = p;
++                p += l;
++            } else {
++                break;
++            }
++        } else {
++            break;
++        }
++    }
++    if last_nl_end != 0 {
++        return last_nl_end; // `\s*[\r\n]+`: through the last newline, even at EOS
++    }
++    if p >= len {
++        return p; // `\s+(?!\S)`: lookahead succeeds at EOS
++    }
++    if last_char_start > start {
++        return last_char_start; // `\s+(?!\S)`: all but the last ws char
++    }
++    p // `\s+`: single whitespace char before content
++}
++
++/// Advance past one token starting at `pos`. Returns the new position.
++/// `pos` must be < `bytes.len()`.
++#[inline(always)]
++fn advance_pos(bytes: &[u8], pos: usize) -> usize {
++    let b0 = unsafe { *bytes.get_unchecked(pos) };
++
++    // Hot path 1: ASCII letter — `\p{L}+` with empty prefix
++    if is_letter(b0) {
++        return scan_letters_from(bytes, pos + 1);
++    }
++
++    // Hot path 2: space prefix
++    if b0 == b' ' {
++        let Some(&b1) = bytes.get(pos + 1) else {
++            return pos + 1; // trailing lone space (`\s+(?!\S)` at EOS)
++        };
++        if is_letter(b1) {
++            return scan_letters_from(bytes, pos + 2); // " word"
++        }
++        if b1 < 0x80 {
++            if is_digit(b1) {
++                return pos + 1; // numbers never absorb the space
++            }
++            if is_ascii_ws(b1) {
++                return ws_token_end(bytes, pos);
++            }
++            // ` ?[^\s\p{L}\p{N}]+[\r\n]*`
++            let p = scan_other_from(bytes, pos + 2);
++            return scan_newlines(bytes, p);
++        }
++        let (cp, l) = unsafe { decode_cp(bytes, pos + 1) };
++        let p1 = pos + 1 + l;
++        if is_horizon_letter(cp) { return scan_letters_from(bytes, p1); }
++        match unicode::class_of(cp) {
++            CharClass::Letter => return scan_letters_from(bytes, p1),
++            CharClass::Whitespace => return ws_token_end(bytes, pos),
++            CharClass::Number => return pos + 1,
++            CharClass::Other => {
++                let p = scan_other_from(bytes, p1);
++                return scan_newlines(bytes, p);
++            }
++        }
++    }
++
++    // Non-ASCII
++    if b0 >= 0x80 {
++        let (cp, l) = unsafe { decode_cp(bytes, pos) };
++        let p0 = pos + l;
++        let class = unicode::class_of(cp);
++        if is_horizon_letter(cp) {
++            return scan_letters_from(bytes, p0);
++        }
++        if class == CharClass::Number {
++            return scan_numbers_max3(bytes, p0, 1);
++        }
++        // Any non-letter/number char except \r\n may prefix a letter run
++        if let Some(p) = letter_end_at(bytes, p0) {
++            return scan_letters_from(bytes, p);
++        }
++        if class == CharClass::Whitespace {
++            return ws_token_end(bytes, pos);
++        }
++        let p = scan_other_from(bytes, p0);
++        return scan_newlines(bytes, p);
++    }
++
++    // ASCII digit: `\p{N}{1,3}`
++    if is_digit(b0) {
++        return scan_numbers_max3(bytes, pos + 1, 1);
++    }
++
++    // Apostrophe: case-insensitive contractions
++    if b0 == b'\'' {
++        match bytes.get(pos + 1).map(u8::to_ascii_lowercase) {
++            Some(b's' | b'd' | b'm' | b't') => return pos + 2,
++            Some(b'l') if bytes.get(pos + 2).map(u8::to_ascii_lowercase) == Some(b'l') => {
++                return pos + 3;
++            }
++            Some(b'v') if bytes.get(pos + 2).map(u8::to_ascii_lowercase) == Some(b'e') => {
++                return pos + 3;
++            }
++            Some(b'r') if bytes.get(pos + 2).map(u8::to_ascii_lowercase) == Some(b'e') => {
++                return pos + 3;
++            }
++            _ => {}
++        }
++        // U+017F LATIN SMALL LETTER LONG S case-folds to 's' under `(?i)`
++        if bytes.get(pos + 1) == Some(&0xC5) && bytes.get(pos + 2) == Some(&0xBF) {
++            return pos + 3;
++        }
++        // Not a contraction: `'` can still prefix a letter run
++        if let Some(p) = letter_end_at(bytes, pos + 1) {
++            return scan_letters_from(bytes, p);
++        }
++        let p = scan_other_from(bytes, pos + 1);
++        return scan_newlines(bytes, p);
++    }
++
++    // \r and \n are excluded from the letter-run prefix
++    if b0 == b'\r' || b0 == b'\n' {
++        return ws_token_end(bytes, pos);
++    }
++
++    // Other ASCII whitespace (\t, \x0b, \x0c) may prefix a letter run
++    if is_ascii_ws(b0) {
++        if let Some(p) = letter_end_at(bytes, pos + 1) {
++            return scan_letters_from(bytes, p);
++        }
++        return ws_token_end(bytes, pos);
++    }
++
++    // ASCII punctuation/symbol
++    if let Some(p) = letter_end_at(bytes, pos + 1) {
++        return scan_letters_from(bytes, p);
++    }
++    let p = scan_other_from(bytes, pos + 1);
++    scan_newlines(bytes, p)
++}
++

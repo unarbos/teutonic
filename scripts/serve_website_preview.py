@@ -133,7 +133,7 @@ def preview_inventory() -> dict:
         return {}
 
 
-def preview_payloads(established: int) -> dict:
+def preview_payloads(established: int, *, rollout: bool = False) -> dict:
     with (ROOT / "chain.toml").open("rb") as handle:
         config = tomllib.load(handle)
     now = datetime.now(timezone.utc)
@@ -152,11 +152,17 @@ def preview_payloads(established: int) -> dict:
         "mixes": {key: f"DEMO-{key.upper()}-HOTKEY" for key in mixes},
     }
     main_weight = (1 - .125 * established) * .4 / (.4 + sum(e["weight"] for e in legacy))
+    active = {"main", "mix01", "mix06", "mix07"} if rollout else set(definitions) - {"mix04"}
+    if rollout:
+        mixes = ["mix01", "mix06", "mix07"]
+        transition = {"version": "four-competition-v3", "main": transition["main"],
+                      "legacy": [], "mixes": {key: f"DEMO-{key.upper()}-HOTKEY" for key in mixes}}
+        main_weight = .4
     payloads = {}
     index = []
     for key, spec in definitions.items():
         prefix = "" if key == "main" else f"competitions/{key}/"
-        has_king = key == "main" or key in mixes
+        has_king = rollout or key == "main" or key in mixes
         chain = {
             "name": "Teutonic · LOCAL DEMO", "netuid": 3, "generation": "local-preview",
             "competition": key, "seed_repo": config["chain"]["seed_repo"],
@@ -170,6 +176,8 @@ def preview_payloads(established: int) -> dict:
         } if has_king else None
         payout = {"weight": main_weight if key == "main" else .125 if has_king else None,
                   "alpha_per_hour": None, "usd_per_hour": None}
+        if rollout:
+            payout["weight"] = spec["incentive"]
         history = []
         if key == "main":
             for i in range(12):
@@ -185,6 +193,12 @@ def preview_payloads(established: int) -> dict:
                     "timestamp": (now - timedelta(hours=12 - i)).isoformat(),
                     "wall_time_s": 3600, "early_stopped": False,
                 })
+                if rollout:
+                    history[-1].update(
+                        policy_version="horizon-deficit-bpb", loss_unit="bits/byte",
+                        reward_metric="horizon-deficit-reduction", avg_reference_loss=loss - .05,
+                        avg_king_token_loss=loss, avg_challenger_token_loss=loss - .001,
+                    )
         payloads[f"/{prefix}dashboard.json"] = {
             "schema_version": 1, "publication_id": "00000000-0000-4000-8000-000000000001",
             "generated_at": timestamp, "updated_at": timestamp, "source_watermark": 1,
@@ -204,14 +218,24 @@ def preview_payloads(established: int) -> dict:
                 "manifest_url": config["category_datasets"][inventory["dataset"]]["manifest_url"],
                 "source": inventory["dataset"],
             })
+            if rollout:
+                sources[-1].update(
+                    manifest_url=f"s3://dataset/teutonic-text/splits/{key}/" + "a" * 64 + ".json",
+                    dtype="utf-8", tokenization_mode="packed-text", tokenizer="per-model",
+                    total_tokens=None, total_shards=None, sequence_length=None,
+                )
         payloads[f"/{prefix}datasets/manifest.json"] = {
             "schema_version": 1, "generated_at": timestamp, "chain": chain,
             "dataset_label": f"{key}-categories-v1", "config_version": "local-preview",
             "eval_n": spec["n"], "delta_threshold": spec["delta_threshold"],
             "sources": sources,
         }
+        if rollout:
+            payloads[f"/{prefix}datasets/manifest.json"].update(
+                token_budget=spec["long_document_tokens"], loss_unit="bits/byte",
+            )
         index.append({
-            "competition": key, "active": key != "mix04", "has_king": has_king,
+            "competition": key, "active": key in active, "has_king": has_king,
             "reward_transition": transition if key == "main" else None,
             "eval_n": spec["n"], "document_tokens": spec["long_document_tokens"],
             "delta_threshold": spec["delta_threshold"], "dashboard": prefix + "dashboard.json",
@@ -231,9 +255,12 @@ def main() -> None:
     parser.add_argument(
         "--demo", action="store_true", help="use synthetic activity instead of live public feeds"
     )
+    parser.add_argument("--rollout-demo", action="store_true",
+                        help="synthetic four-competition, 35M, packed-text rollout preview")
     parser.add_argument("--mix-kings", type=int, choices=range(7), default=2,
                         help="number of MIX kings in the synthetic transition; requires --demo (0–6)")
     args = parser.parse_args()
+    args.demo = args.demo or args.rollout_demo
     public_feeds = PublicFeedCache()
 
     class Handler(SimpleHTTPRequestHandler):
@@ -246,7 +273,7 @@ def main() -> None:
             url = urlsplit(self.path)
             path = url.path
             upstream = public_data_url(path)
-            payloads = preview_payloads(args.mix_kings) if args.demo else {}
+            payloads = preview_payloads(args.mix_kings, rollout=args.rollout_demo) if args.demo else {}
             if args.demo and path in payloads:
                 self.respond(json.dumps(payloads[path]).encode(), "application/json")
             elif not args.demo and upstream:

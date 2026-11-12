@@ -43,20 +43,21 @@ the dedicated service account. Never commit `.env` or `.gpu.env`.
 
 ## R2 layout
 
-Create these three buckets before starting a competition:
+Provision these buckets before starting a packed-text competition:
 
 | Bucket | Visibility | Use |
 | --- | --- | --- |
 | `teutonic-private-models-enam` | Private | One isolated upload prefix per miner registration |
 | `teutonic-models-enam` | Public | Genesis and promoted immutable models |
 | `teutonic-dash-enam` | Public read | Dashboard state and encrypted credential mailboxes |
+| `dataset` | Private | Packed UTF-8 documents, indexes, sampling catalog and split manifests |
 
 The validator-host R2 key needs the object permissions used by seed upload,
 verification, promotion, cleanup, and dashboard publication. The Cloudflare API
 token must be able to create and revoke the scoped parent tokens used by the
 access controller.
 
-The GPU uses a separate read-only R2 key that can read both model buckets. It
+The GPU uses a separate read-only R2 key that can read both model buckets and `dataset`. It
 does not receive the Cloudflare management token or access-controller secrets.
 
 ## Configure the active chain
@@ -197,394 +198,353 @@ The helper creates a custom-format dump, validates it with `pg_restore`, and
 writes a SHA-256 checksum beside it. Copy both files to protected off-host
 storage.
 
-### Document-masked evaluation
+### Packed-text evaluation with Horizon
 
-The evaluator scores only isolated document fragments (`v1`). Sampling still uses
-the same fixed windows, shard quotas, source proportions, and seeds. EOS 151645
-ends a fragment; window boundaries also end fragments. Positions reset at every
-fragment, with no synthetic BOS/EOS or context restored from outside the window.
-EOS targets are scored, but each fragment's first token is excluded. Windows with
-no scored targets fail explicitly rather than being silently replaced or assigned
-a loss. Full and sliding attention retain their existing attention sinks.
+The current code uses `teutonic-evaluator-v3` and policy `horizon-deficit-bpb`.
+Deploy the validator and evaluator together after the new manifests and PostgreSQL
+configuration are ready. This local implementation does **not** activate itself
+against the previous configuration: the validator rejects legacy active settings.
+The final sampling catalog and four 35M competition manifests were published and
+hash-verified on 12 November 2026. Their small manifests, exact publication pins,
+release scope and staged SQL are in
+[`deployment/packed-text-20261112/`](deployment/packed-text-20261112/).
+The 192 MB sampling catalog remains in R2; it is not checked into the repository.
+No production database cutover or service deployment has been performed.
 
-Before deploying this revision, configure **both** validator and evaluator with:
+The corrected 7M MIX06 full flow passed on 12 November 2026: 2,563 documents
+across all 25 categories, four king and four challenger TP1 replicas, and successful
+startup/preload reuse and post-evaluation Horizon reload. The verdict took 21m 55s.
+The final Horizon minimum-padding repeatability check also passed: 19 cases and
+512 document-loss comparisons matched the saved deterministic baseline exactly,
+including short and mixed-length groups of 1/2/3/8, repeats and reversed order.
+It used the final worker source with one fresh load. Run this focused check with
+`scripts/verify_horizon_pipeline_worker.py --small-batches-only` and the saved
+fixture/baseline arguments. The full harness additionally covers groups of 16 and
+large throughput cases. The 35M runtime remains an estimate.
 
-```dotenv
-TEUTONIC_EVALUATION_POLICY_VERSION=category-mix-token-bootstrap-v2
-```
-
-Both services reject the old policy identity; this is not a switch that can enable
-unmasked scoring. Drain outstanding evaluations before a coordinated restart so
-requests created under the old identity are not retried against the new evaluator.
-Update `TEUTONIC_EVALUATOR_CODE_VERSION` consistently on both services as usual.
-Window-only masked evaluation does not require dataset or threshold changes.
-The optional long-document extension below adds a database column and a new
-dataset configuration identity.
-
-FA4 receives explicit cumulative fragment lengths through a scoped attention
-adapter, including for batches with multiple rows. Eager uses explicit causal
-document masks. Checkpoint Python files remain immutable. There is no automatic
-fallback to unmasked attention or another backend.
-
-The evaluator loads each checkpoint on the first GPU in its four-replica group,
-then broadcasts all parameters and buffers to the other three GPUs with NCCL.
-After both snapshots pass integrity, duplicate/reuse, configuration, and attention
-checks, model loading runs concurrently with dataset sampling and downloads.
-Scoring starts only after both model loading and corpus validation finish. If
-either setup phase fails, the loader is joined and the worker pool is closed
-before the evaluation releases its cache locks.
-The king and challenger groups load independently. Receivers allocate BF16 model
-storage without reading checkpoint shards; transfers use chunks of at most 256 MiB.
-Workers wait on CPU queues until their group is prepared, and loading communicators
-are released before scoring. Unchanged cached models skip loading and broadcast.
-A preparation or broadcast failure closes the entire worker pool rather than
-scoring with incomplete weights. Progress events report per-worker preparation,
-broadcast transfer, and total readiness times in `load_timing`.
-
-Model loading and each scoring worker enable strict PyTorch deterministic
-algorithms with `CUBLAS_WORKSPACE_CONFIG=:4096:8`, deterministic cuDNN, and
-cuDNN benchmarking disabled. Unsupported nondeterministic operations fail rather
-than produce a warning and continue. Worker audit metadata records these settings;
-kernel caches include the execution settings in their identity. This controls
-run-to-run numerical variation on the same software and hardware stack; it does
-not promise identical floating-point results across GPU types, library versions,
-or different batch shapes. No random seed replaces these execution settings.
-
-The verdict, per-source scores, progress, and futility projection weight each
-window's mean loss by its number of scored targets. Bootstrap resamples original
-paired windows and recomputes the sum/count ratio in each draw. The futility rule
-retains its observed-window advantage quantile heuristic, applying that advantage
-to the exact remaining token count. Audit output uses `columnar-masked-v1` with
-`scored_tokens` alongside each pair of window losses; verdicts also record the
-scoring policy, EOS ID, total scored tokens, and aggregation/bootstrap units.
-
-### Whole-document evaluation
-
-The `whole-documents-2-16384-40-60-v4` policy samples complete documents of
-**2–16384 tokens**, including terminal EOS. Each competition's category weights
-divide the document input-token budget first. Within every category, **40% of
-input tokens target 2–4096-token documents** and **60% target 4097–16384-token
-documents**, with inclusive boundaries. Documents of fewer than 2 tokens and
-16385 tokens or more are excluded. The 4k–16k range is one bucket, sampled
-uniformly by document without replacement; it is not split into smaller buckets.
-Both ranges must contain enough complete documents: missing or exhausted ranges
-fail evaluation rather than reallocating their budget. Each range contributes at
-least one document. Quotas are approximate because documents are never truncated
-or split; this minimum can exceed a small category's token allocation. The audit
-reports each bucket's token weight, target tokens, actual tokens and document count.
-
-Window count and document token budget are PostgreSQL configuration values.
-`--n 0` disables window sampling and requires an enabled document configuration.
-It does not download any window shards; document reconstruction still reads the
-shards referenced by sampled documents. Scores and bootstrap use whole documents,
-and progress reports their actual count, which is not the configured window count.
-
-Before activating documents-only evaluation, apply the schema migration with the
-schema-owner database connection. Drain outstanding evaluations and deploy the new
-validator and evaluator together: the previous document policy cannot be replayed
-under the new bucket definitions. With the deployment environment loaded:
-
-```bash
-psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/allow_document_only_evaluation.sql
-.venv/bin/python scripts/configure_evaluation.py --all --n 0 --long-document-tokens 70000000 --dry-run
-.venv/bin/python scripts/configure_evaluation.py --all --n 0 --long-document-tokens 70000000
-```
-
-The existing configuration script stores the 70M budget and zero windows in new
-versioned PostgreSQL configurations, atomically across competitions. It preserves
-the pinned manifests/indexes and thresholds. The current active configuration and
-`chain.toml` initialization defaults both use zero windows and a 70M document budget.
-Changing repository defaults does not update existing PostgreSQL configurations.
-The target allocation is approximately 28M input tokens in 2–4096 and 42M in
-4k–16k. These are input-token shares, not document-count or exact scored-token shares.
-
-If upgrading from `whole-documents-2k-16k-40-60-v3`, the lower bound changes from
-2049 to **2 tokens**. Drain pending work before updating both hosts, stop the
-control services, and run the two configuration commands above with the updated
-code to store the v4 policy. The already-applied schema migration and MIX07
-replacement do not need repeating. Existing index pins, MIX07's starting king and
-the MIX04 reward transition are preserved. Restart the updated GPU evaluator and
-verify health before restarting the control services.
-
-The index is read from the public datasets bucket's `doc_index/<dataset>/` prefix.
-Configuration fetches `doc_index/manifest.json` once and stores its URL, exact
-UTF-8 contents and SHA-256. The inventory lists all index files with their
-strong ETag and size, binary/token formats, categories and original dataset
-manifest hashes. Inventory v1 requires per-file SHA-256; v2 also permits ETag/size
-pins without a whole-file checksum. Requests and audits retain this pin; replay never refetches
-the mutable inventory. Changing it requires an explicit configuration refresh.
-Index range reads use `If-Match` and cache validated lookup pages (document
-lengths and fragment locations) under `TEUTONIC_DOC_INDEX_CACHE_DIR`
-(default: `$TEUTONIC_SHARD_CACHE_DIR/doc_index`).
-
-The scheduled shard cleanup also expires document-index pages, cached manifest
-JSON, and partial downloads. A custom `TEUTONIC_DOC_INDEX_CACHE_DIR` is cleaned
-separately with the same age limits. Evaluations lock both cache locations so
-cleanup cannot remove pages or manifests while an evaluation uses them.
-
-For persistent full document indexes on the evaluator, add these settings to
-`.gpu.env` (adjust the storage path for that host):
+Keep the current Teutonic II 110B king/challenger architecture. Horizon is pinned to
+`IFM/K2-Horizon-375B-A23B` commit `7d22cc0ac26a91003d19482efa71070244239b11`.
+Startup downloads its verified checkpoint into a persistent cache outside the
+king/challenger cleanup scope. There is no old `doc_index` prefetch job.
+After verification, the evaluator automatically loads Horizon onto all eight GPUs
+in the background and keeps it resident while idle. A duel reuses this worker for
+reference scoring, then unloads it before starting the MiMo replicas—even if all
+reference losses were cached. After evaluation cleanup, Horizon reloads in the
+background for the next duel. The verdict does not wait for this reload; a new duel
+arriving before loading finishes waits when it reaches reference scoring.
+`/health` reports GPU readiness under `horizon_gpu`, separately from checkpoint
+verification under `horizon_download`. Failed preloads are reported there and
+retried when a duel needs the reference. Shutdown prevents further preloads and
+closes the resident worker. Current and preceding load logs live under
+`TEUTONIC_HORIZON_CACHE_DIR/gpu-worker/`. This lifecycle passed the corrected 7M
+GPU test, including a post-evaluation reload of 6m 50s. The final small-batch
+padding repeatability check subsequently passed with exact document losses.
+Reserve at least 758 GB for Horizon weights plus space for the two Teutonic snapshots,
+text scratch space, and normal download overhead. Use a persistent NVMe path:
 
 ```dotenv
-TEUTONIC_DOC_INDEX_STORE_DIR=/path/to/persistent/doc_index
-TEUTONIC_DOC_INDEX_PREFETCH=1
-TEUTONIC_DOC_INDEX_PREFETCH_MANIFEST_URL=https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest-bb93856956e924c6139bebf73601c72cd58007ce916e6095b9929dd1b1d450c7.json
-TEUTONIC_DOC_INDEX_PREFETCH_MANIFEST_SHA256=bb93856956e924c6139bebf73601c72cd58007ce916e6095b9929dd1b1d450c7
-TEUTONIC_DOC_INDEX_DOWNLOAD_WORKERS=4
+TEUTONIC_HORIZON_CACHE_DIR=/path/to/persistent/horizon
+TEUTONIC_EVALUATION_POLICY_VERSION=horizon-deficit-bpb
+TEUTONIC_EVALUATOR_VERSION=document-evaluator-v3
+TEUTONIC_TOKENIZER_BACKEND=gigatoken
+TEUTONIC_REFERENCE_TOKENIZER_BACKEND=gigatoken
+TEUTONIC_TOKENIZER_THREADS=8
+TEUTONIC_VLLM_PYTHON=/absolute/path/to/.venv-vllm/bin/python
+TEUTONIC_VLLM_CACHE_DIR=/path/to/persistent/vllm-kernels
+TEUTONIC_HORIZON_PYTHON=/absolute/path/to/.venv-horizon/bin/python
+TEUTONIC_HORIZON_KERNEL_CACHE_DIR=/path/to/persistent/horizon-pipeline-kernels
 ```
 
-The release inventory contains 81 unique files, about 302.92 GB (282.11 GiB).
-Use a persistent disk with that much free space **in addition to** headroom for
-model downloads, shards and audit records. Keep the store outside disposable
-cache directories; a path inside the model cache is rejected. The evaluator
-creates the directory, which must be writable by its service account.
+Keep `TEUTONIC_EVALUATOR_CODE_VERSION` aligned on both hosts. Install the evaluator
+extra and the locally patched Gigatoken wheel described in
+[`patches/gigatoken-horizon/README.md`](patches/gigatoken-horizon/README.md).
+Token-ID comparisons run in the verification script/tests, not during evaluation.
+An explicit `reference` tokenizer backend remains available for diagnostics.
 
-At process startup, background workers fetch the small SHA-256-pinned inventory
-and download missing indexes. `/health` becomes available without waiting for
-the inventory or files. Existing completed files are checked using their exact
-descriptor, size and recorded filesystem identity/timestamps. No startup scan
-or whole-index hashing occurs. A same-size file copied in manually is not trusted:
-the store requires its own completion receipt, written only after an ETag-pinned
-transfer finishes. This detects truncation and ordinary file changes, but is not
-a cryptographic check against silent disk corruption; use trusted local storage.
-
-An accepted evaluation pauses background downloads. Workers close their HTTP
-responses at the next 256 KiB stream boundary and save a durable resume offset;
-an already-running network read can take time to return (10-second inactivity
-timeout). Evaluation admission does not wait for this. Complete files use local
-reads; missing or partial files use the existing pinned HTTP ranges. The same
-samples and scores are produced. Downloads resume after evaluation completion
-or failure, and partial files resume after a process restart. A crash can discard
-uncheckpointed bytes; transfers without a valid resume record start again.
-Each range is limited to 8 MiB per worker. Newly requested index
-pins are queued for prefetch too. Download failures are retried in the background
-and do not block evaluation; inspect logs and free space if errors persist.
-
-The download pool defaults to four workers (configurable from 1 to 16), separate
-from the 128 index-sampling workers but using the same shared HTTP connection
-pool and dataset R2 credentials. Full indexes and partial downloads are retained
-across restarts and excluded from shard cleanup, including when nested in a
-shard cache. They are not automatically expired. Stop the evaluator before
-manually deleting the store. Set `TEUTONIC_DOC_INDEX_PREFETCH=0` to keep reading
-completed local files without background downloads; unset the store variable to
-use only the existing HTTP range/page-cache path.
-
-After deploying the code and updating `.gpu.env`, drain any active evaluation
-and restart the evaluator and cleanup schedules with their updated environment:
+Install the MiMo GPU worker in a **separate Python 3.12 environment**, using the tested
+vLLM 0.33.0 / Torch 2.14.0 CUDA 13.0 / Transformers 5.20.2 stack. Do not combine
+the `evaluator` and `vllm-worker` extras in one environment. The control process
+retains its existing Transformers/tokenizer environment. On the target B300 host:
 
 ```bash
-pm2 restart ecosystem.eval.config.js --update-env
-curl --fail http://127.0.0.1:9000/health
-pm2 logs teutonic-evaluator --lines 100 --nostream
+python3.12 -m venv .venv-vllm
+.venv-vllm/bin/python -m pip install --upgrade pip
+.venv-vllm/bin/python -m pip install 'torch==2.14.0' --index-url https://download.pytorch.org/whl/cu130
+.venv-vllm/bin/python -m pip install -e '.[vllm-worker]'
+.venv-vllm/bin/python -m pip check
+.venv-vllm/bin/python -m teutonic.evaluator.vllm_score --identity
 ```
 
-`/health.document_index_store` reports whether prefetch is enabled/paused,
-inventory readiness, ready/total files, bytes in completed files, active downloads
-and cumulative retry errors. The evaluator can serve evaluations before all files
-are ready. Continue to keep the evaluator code-version identity aligned with the
-validator for the deployed commit.
+The extra installs the `teutonic_mimo` vLLM plugin for shared experts; do not use
+the old test-only plugin pointing at `scripts.mimo_vllm_adapter`. Locked checkpoint
+configs/tokenizers remain unchanged. Runtime preflight rejects an incorrect plugin
+entry point or dependency version. Save the resolved package inventory with the
+release. The tested B300 driver is
+620.70.06. The integrated four-king/four-challenger TP1 layout passed the 7M MIX06
+full-flow test; that run did not exercise the long-document TP2 fallback.
 
-Token shards use HTTP range downloads without disk caching;
-`TEUTONIC_PRETOKENIZED_CACHE_DIR` is unused. Document-index caching remains enabled.
-SHA-256 metadata is checked when available; whole-file hashes are not verified.
-Transient download failures are retried automatically.
+MiMo workers enforce `VLLM_BATCH_INVARIANT=1`, `VLLM_USE_V2_MODEL_RUNNER=0`, eager
+execution, seed 42, BF16, no prefix caching and native prompt-token scoring.
+MiMo additionally uses `VLLM_USE_FUSED_MOE_GROUPED_TOPK=0` and
+`TRITON_ATTN_DIFFKV`. These settings are fixed in the scorer, not optional service
+flags. No production tokenizer-parity or repeatability reruns are performed.
 
-Evaluator token and document-index range reads for
-`https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev` use the authenticated
-R2 S3 endpoint when `TEUTONIC_EVALUATOR_R2_ENDPOINT`,
-`TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID` and `TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY`
-are configured. These credentials need read access to the `datasets` bucket;
-`TEUTONIC_EVALUATOR_R2_BUCKET` does not override that dataset bucket. Optional
-`TEUTONIC_EVALUATOR_R2_SESSION_TOKEN` and `TEUTONIC_EVALUATOR_R2_REGION` (default
-`auto`) are supported. With no R2 configuration, reads remain public; incomplete
-configuration or denied access fails rather than silently falling back. Other
-origins remain public. Canonical URLs, cache identities and object pins stay unchanged.
-
-Window sampling downloads four shard files concurrently, with up to eight range
-workers per file. Document fragments use sixteen shard workers; index planning
-uses up to 128 workers, with one task per category (currently at most 25).
-All range reads share a pool capped at 128 connections. Window indices
-are selected before concurrent I/O, preserving deterministic selection and output order.
-
-Deploy this update to both hosts; no migration or new dependencies are required.
-Drain evaluations and persist verdicts before stopping the validator. Restart the
-evaluator, check `/health`, then resume the validator. Keep code versions aligned;
-resolve pending retries before changing the version. PM2's stop timeout does not
-drain running evaluations.
-
-Build the inventory locally (this command performs no uploads):
+Horizon uses a separate **layer-pipeline worker**, derived from
+`artifacts/s3_models_doc_eval/horizon/eval_horizon_fast.py`, with Torch 2.15.0
+CUDA 13.2, Transformers 5.15.1 and Accelerate 1.15.0. Provision a separate
+`.venv-horizon` with that tested CUDA build, then install `.[horizon-worker]` there.
+Do not combine it with `.[vllm-worker]`. Before starting the evaluator, check:
 
 ```bash
-python scripts/build_document_index_manifest.py \
-  --config artifacts/long-document-eval/main.json \
-  --manifest-url https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest.json \
-  --output artifacts/long-document-eval/manifest.json --metadata-only
+.venv-horizon/bin/python -m pip check
+.venv-horizon/bin/python -m teutonic.evaluator.horizon_pipeline --identity
 ```
 
-The builder accepts the earlier prepared MAIN configuration to enumerate files.
-Use `--metadata-only` for HEAD-only ETag/size pins, or `--index-root /path/to/doc_index`
-to hash local originals. Remote hashing is disabled. Existing verified checksums are
-preserved when object and source pins match. New ETag-only entries use inventory v2;
-legacy v1 inventories still require SHA-256 for every entry.
-Publish the generated bytes unchanged to the manifest URL as a separate action.
-Before publication, `configure_evaluation.py --doc-index-manifest-file PATH`
-and `prepare_long_document_evaluation.py --index-manifest-file PATH` use those
-same local bytes. Their corresponding manifest-URL and manifest-SHA256 options
-select the public location and optionally require an expected hash.
+Horizon enforces `torch.use_deterministic_algorithms(True)`, seed 42,
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`, and `PYTORCH_ALLOC_CONF=expandable_segments:True`.
+It runs BF16 grouped expert GEMMs and SDPA, computes FP32 token cross-entropy,
+and sums each document with CPU `math.fsum`. Reference cache identities include
+the Horizon worker's code, dependency versions and fixed scoring settings.
+Existing vLLM reference entries are preserved but cannot be reused by this backend.
+Its acceptance script is `scripts/verify_horizon_pipeline_worker.py`; comparisons
+against saved losses run only in validation, never inside live evaluations.
 
-Documents are reconstructed in fragment order across rows/shards. Incomplete
-source documents are skipped deterministically and counted. The selection cap is
-16384 tokens, including terminal EOS; larger source documents are excluded and
-counted, never cropped. Both checkpoints must support at least 16384 positions.
-Out-of-vocabulary tokens, missing shards, invalid fragments and missing
-terminal EOS fail evaluation.
+Dataset reads require authenticated R2 access to **`dataset`**, under
+`teutonic-text/`. Configure `TEUTONIC_EVALUATOR_R2_ENDPOINT`,
+`TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID`, and `TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY`.
+Optional session-token credentials are supported. The evaluator never reads the
+old `datasets` bucket. Preserve that bucket and all existing objects unchanged.
 
-FA4 packs unequal-length samples with explicit attention boundaries and reset
-positions. Original window boundaries remain isolated even when a window ends
-without EOS. Scheduling limits batch token count and sum of squared lengths.
-The current 16384-token selection cap uses the normal single-GPU path for every
-sample. Sequence-parallel groups are never initialized under this policy.
-The tested two-GPU path above 128,974 tokens remains implemented for a future
-sampling policy; it is inactive with the current selection range.
-Grouped MoE releases intermediate
-projection buffers before allocating weighted outputs, avoiding overlapping
-large temporary tensors for long documents. GPU memory fit still requires
-validation on the real checkpoints. Every replica preflights the longest sample before
-ordinary scoring (diagnostic losses do not enter the verdict). An OOM in a
-multi-sample single-GPU batch retries the same samples
-in smaller batches. An OOM in a single document's LM-head projection retries
-with a smaller projection chunk, down to 64 positions. An OOM in the single
-document's forward pass, or with the minimum projection chunk, fails evaluation
-explicitly. Nothing is truncated or skipped to fit. Preflight memory peaks and
-OOM retries are recorded in worker metadata. King and challenger score identical samples.
+For this release, use the already-published artifacts and staged
+[`cutover.sql`](deployment/packed-text-20261112/cutover.sql). It targets netuid 3,
+generation `teutonic-II-110B-hf-8f971f030f5d801f812540007b396058f69cc08a`,
+MAIN/MIX01/MIX06/MIX07, the expected previous 70M budget, and a new 35M budget with
+threshold 0.00075 bits/byte. The SQL preserves category weights and source mappings.
+The receipt in that directory records every remote key/hash. Local full-bundle
+and audit copies are in `artifacts/packed-evaluation-20261112/`.
 
-All scored tokens contribute to the combined token-weighted verdict. Bootstrap
-resamples paired original windows or whole documents, never their individual
-fragments. `component_scores` separates windows from long documents, and
-`long_document_scores` reports bucket, category and category/bucket losses.
-`columnar-masked-documents-v2` records aligned document rows, lengths, categories,
-fragment locations and scored-token counts. For this first version, early
-stopping is disabled when long documents are enabled, so the full sample is scored.
+The live database preflight is still pending: the configured local endpoint was
+unavailable during preparation. On the control host, confirm this release scope,
+active configuration IDs, category weights/source mappings, current budgets,
+early-stopping policies, crowned kings and reward state. Save the configuration
+IDs/policies with the database backup for rollback. Run the read-only competition
+retirement preview below. The migration and retirement guards remain mandatory;
+passing the disposable-database rehearsal does not establish live compatibility.
 
-Apply the additive migration before deploying the new validator/configuration
-tools, then update the validator/evaluator code identities together:
+For a future dataset release, the completed export manifest is the dataset
+inventory. Prepare an exact JSON pin
+with `bucket`, `key`, and `sha256`; do not use a changing bucket listing. Then prepare
+local sampling and competition manifests, explicitly selecting active competitions:
 
 ```bash
-psql "$TEUTONIC_DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/db/add_evaluation_long_documents.sql
+.venv/bin/python scripts/prepare_competition_mixes.py \
+  --dataset-pin /path/to/completed-dataset-pin.json \
+  --competition main --competition mix01 --competition mix06 --competition mix07 \
+  --output-dir artifacts/packed-evaluation-bundle
+.venv/bin/python scripts/configure_evaluation.py \
+  --bundle-dir artifacts/packed-evaluation-bundle \
+  --netuid 3 --chain-generation YOUR_GENERATION --delta-bpb 0.00075 \
+  --previous-token-budget 70000000 \
+  --output artifacts/packed-evaluation-cutover.sql
 ```
 
-After the category cutover and GPU validation, budgets can be changed using the configuration tool:
+Both commands write local files only. The first reads dataset metadata/ranges;
+the second has no database connection. Review `pending-publication.json` and the
+SQL before the separately approved publication/cutover. SQL guards preserve active
+category weights, source mappings, and competition identities, and explicitly
+guard the approved budget change from 70M to 35M. Repository defaults now select
+35,000,000 original MiMo input tokens; live PostgreSQL is unchanged until cutover. The old
+`n=0` and `long_documents` database columns are compatibility storage, not a legacy
+runtime path. `chain.toml` category definitions supply initialization data; the
+active PostgreSQL configuration is authoritative and SQL rejects mismatches.
+
+Validate the bundle against R2 without uploading:
 
 ```bash
-python scripts/configure_evaluation.py --competition main --long-document-tokens 6000000 --dry-run
-python scripts/configure_evaluation.py --competition main --long-document-tokens 6000000
+.venv/bin/python scripts/publish_packed_evaluation.py \
+  --bundle-dir artifacts/packed-evaluation-bundle --dry-run
 ```
 
-For current releases, perform the [category cutover](#main-and-mix-category-competitions)
-first. Then use `--competition MIX01` through `MIX06`, or `--all` for all seven. The current policy fixes `--max-document-tokens` at
-16384; other caps are rejected. Window-only configurations remain supported.
-`--long-document-tokens 0` disables documents and requires a positive `--n`. Budget
-and threshold edits preserve index pins; `--refresh-doc-index` explicitly selects
-new versions. Rebuilding an index requires the corresponding tokenization snapshot.
-The former `long-documents-v1`, `long-documents-2k-8k-v1` and
-`whole-documents-0-8k-v2` configurations are
-rejected rather than silently reinterpreted. Applying `--long-document-tokens`
-with the desired budget upgrades to the 40/60 token-budget policy while preserving the
-pinned index and source manifests.
+**Publication is enabled by default.** After approval, run the same command
+without `--dry-run` (or with the explicit, optional `--publish`). The publisher
+validates all manifests first, publishes the sampling catalog before the mixes,
+and verifies immutable content. It refuses to overwrite a different object.
+Local `validation.json` and `publication.json` distinguish a read-only check from
+verified publication. Neither mode changes PostgreSQL.
 
-For an isolated test, prepare a configuration and optional CPU-only sample plan
-without touching PostgreSQL, services or model weights:
+After GPU acceptance and explicit deployment approval:
+
+1. Drain active evaluations and pending retries. Stop access, validator, promotion,
+   weight-publisher and dashboard-publisher services; take and verify the DB backup.
+2. Save active configuration IDs and early-stopping settings. Review the read-only
+   retirement preview and verify the release's published hashes.
+3. With `psql -v ON_ERROR_STOP=1`, apply `scripts/db/allow_packed_text_manifests.sql`,
+   then `deployment/packed-text-20261112/cutover.sql`. These files are prepared,
+   **not applied**. No new R2 publication is needed for this release.
+4. Apply the reviewed retirement command below, saving its before-state snapshot.
+   Keep services stopped if either configuration or retirement validation fails.
+5. Deploy matching source/version identities on both hosts, install the patched
+   Gigatoken wheel and the separate MiMo/Horizon runtimes, and verify evaluator
+   health. Deploy the website assets from the same release.
+6. Restart the validator for finalized UID reconciliation, then the weight
+   publisher, remaining control services and dashboard publisher. Verify the four
+   active competitions, 35M budgets, and MAIN 40% / MIX01, MIX06, MIX07 20% each.
+
+Do not proceed past a failed step. Each database operation is separately guarded;
+the complete multi-service cutover is not one atomic transaction. Do not run the historical commands under
+`scripts/legacy/` against the migrated configuration. Existing R2 objects, database
+history, kings, and reward positions remain intact.
+Resolve pending evaluation retries as well: the staged transaction refuses claimed,
+evaluating, or retryable-failure evaluations. It disables early stopping for each
+migrated competition and retains the previous configuration rows.
+
+Before cutover, save each competition's active configuration ID and early-stopping
+policy, and retain the previous code/environment. Before accepting new work,
+rollback can restore those exact IDs and policies with services stopped, together
+with the matching previous evaluator and validator release. After new evaluations
+or promotions, review their effects before rollback; never erase history or undo
+kings automatically. A synthetic PostgreSQL rehearsal covers migration,
+idempotence, guard failures, and restoring the old configuration; the final live
+configuration snapshot still needs review.
+
+The rollout retires MIX02, MIX03 and MIX05 in addition to already retired MIX04.
+MAIN receives 40%; MIX01, MIX06 and MIX07 receive 20% each. Definitions, categories,
+models and historical results remain available. Category sampling weights do not change.
+
+Prepare the reward/activation cutover using the control-host database environment:
 
 ```bash
-python scripts/prepare_long_document_evaluation.py --competition main \
-  --output artifacts/long-document-eval/main.json --plan-context-limit 1048576
+.venv/bin/python scripts/retire_mix_competitions.py \
+  --output artifacts/four-competition-preview.json
 ```
 
-The standalone preparation tool uses `--bundle-dir` for a prepared immutable bundle,
-or the pinned `chain.toml` manifest URLs when omitted, and validates the explicit `chain.toml` category weights. For a replay, use a cached evaluation with matching sources and
-proportions. In an isolated checkout with all writable caches redirected to its
-test directory, use real cached checkpoints on all eight GPUs:
+This command defaults to a read-only transaction. After approval, stop and drain
+access, validator, promotion and weight-publisher services, then rerun with
+`--apply --output artifacts/four-competition-before-cutover.json`. The output path
+must be new; it saves previous competition/publication rows before any mutations.
+The transaction requires crowned MAIN/MIX01/MIX06/MIX07 recipients, no remaining
+legacy reward positions, matching durable policy and no outstanding weight attempt.
+It deactivates MIX02/03/05 and updates both the versioned reward policy and current
+publication payload atomically. Existing weight-attempt history stays intact.
+It does not upload to R2 or submit weights to chain. Repeating it is idempotent.
+
+Deploy the new policy code before restarting services. Restart the validator first
+and verify its finalized-metagraph UID reconciliation before restarting the weight
+publisher. The existing 101-block cadence remains. The dashboard publication then
+reflects active flags and the updated allocation; a hotkey holding multiple active
+positions receives their combined shares. Retain the saved snapshot for reviewed
+rollback with services stopped; do not use historical MIX activation commands below.
+
+The sampling catalog supplies eligible row intervals in each length-sorted index
+partition. Selection is uniform over documents across unequal partitions and
+reproducible from the pinned manifests and seed. Use the selected 35M original-MiMo-token
+budget, preserving category weights and the 40/60 split between lengths 2–4096 and
+4097–16384 (approximately 14M and 21M tokens).
+Fetch selected UTF-8 byte ranges and verify their byte counts/hashes. Category index
+reads and text fetches are concurrent across objects. Reads to the same object are
+serialized through body consumption, with bounded retry/backoff for throttling and
+transient failures. Authentication and ETag/hash/range failures fail the evaluation.
+Bounded preparation queues overlap inference.
+A temporary disk cache reuses text between the reference and duel phases.
+
+Tokenize raw text with no chat template or BOS and append the model's native EOS.
+Score targets after the first token, including EOS. Original MiMo counts govern
+sampling only; actual context lengths are checked separately. Never truncate or
+replace an over-limit document. Each document remains isolated even if its text
+contains an embedded special token. Canonical UTF-8 bytes are the bits/byte denominator.
+
+Reference cache misses use the deterministic Horizon layer pipeline across eight
+GPUs, with layer counts `[8,8,8,8,8,9,9,3]`. Its micro-batches have a 131,072 padded
+token budget and at most 128 documents; queues hold at most two micro-batches.
+Requests contain at most 1,024 documents and 4,194,304 native tokens. The text
+prefetch bound can produce smaller requests. Documents are stably sorted by
+length within each request, scored with full causal context, and returned in
+sampling order. A long document remains intact even above the micro-batch budget;
+supported production lengths still require GPU memory qualification. No KV cache
+is allocated for generation. After that process
+group exits and memory is released, king and challenger run as four independent single-GPU replicas each,
+on GPUs 0–3 and 4–7, with 16 GiB KV cache per GPU. A deterministic token-balanced
+dispatcher sends identical subsets to matching king/challenger replicas. Documents
+above the 128,974-token single-GPU boundary (subject to the new vLLM GPU acceptance checks) use two TP2 groups per side,
+with 32 GiB KV per GPU and a context sized for the complete document. Ordinary
+documents always use TP1. Switching layouts unloads the previous workers first.
+This is tensor-parallel long-document scoring, replacing the old FA4 sequence-parallel
+mechanism; GPU memory/determinism validation is required for each supported length.
+Each phase streams bounded batches of up to 128 documents while preparing the next
+batches. Both MiMo engines receive identical token IDs. Native EOS is included in
+the scored targets; the ignored one-token generation is not part of NLL.
+
+Cache reference losses by checkpoint, tokenizer, text, policy, scorer/adapter code,
+inference settings and dependency versions. Older Transformers cache entries cannot
+match the vLLM identity. A fully cached sample skips the reference GPU phase.
+MiMo engines currently reload for each duel. Workers have bounded loading/scoring
+timeouts and owned process-group cleanup; GPU memory must be released before the
+next phase. Failed-worker logs are retained beneath `TEUTONIC_HORIZON_CACHE_DIR` /
+`failed-workers/`; temporary corpus text is removed on success or failure.
+
+Reward is byte-weighted reduction in `max(model_bpb - horizon_bpb, 0)`.
+Promotion requires the paired document-bootstrap lower confidence bound to exceed
+an explicitly chosen threshold in **bits/byte**. There are no raw-loss retention
+vetoes and no early stopping. A regression that remains better than Horizon is neutral.
+The old numeric 0.0015 nats/token threshold is not an equivalent calibration.
+
+The integrated real-pair 7M test passed on **8×B300** with all 25 MIX06 categories.
+Final Horizon padding repeatability also passed; the live database preflight
+remains outstanding. The rollout budget is 35M; active production remains at 70M until
+the approved database cutover.
+The replay command reads R2/Hugging Face and
+writes local results; it never promotes a model or changes R2:
 
 ```bash
-python scripts/replay_cached_evaluation.py --record /path/to/cached-main-record.json \
-  --model-cache /path/to/read-only/immutable-r2 --batch-size 40 \
-  --long-document-config artifacts/long-document-eval/main.json \
-  --verify-packing --output artifacts/long-document-eval/main-gpu.json
+.venv/bin/python scripts/replay_cached_evaluation.py \
+  --mix artifacts/packed-evaluation-bundle/main.json \
+  --king-snapshot /path/to/verified/king \
+  --challenger-snapshot /path/to/verified/king \
+  --self-duel --token-budget 100000 \
+  --output artifacts/packed-self-duel.json
 ```
 
-This explicitly adds a new sample and scores it fully; its comparison against
-the saved verdict therefore includes the dataset change. `--verify-packing`
-compares real-model losses in mixed batches against one-sample batches, covering
-each sampled length bucket and a window when present. `--prepare-only` samples and
-downloads data without loading weights or using GPUs. Replay never promotes
-models or publishes evaluation artifacts to R2.
-
-GPU validation is required before rollout. Use real cached checkpoints and
-cached evaluation records through the normal eight-worker topology. The replay
-checks the reconstructed window identities against saved per-sample provenance
-before loading the models. Run it from an isolated checkout with its own caches
-and output paths; do not start the evaluator HTTP service for a replay.
+The mix's sampling object must already be published and hash-verified for that replay.
+Before the completed dataset is published, model-only GPU checks can run against
+local snapshots without any R2 access:
 
 ```bash
-python -m scripts.replay_cached_evaluation \
-  --record /path/to/cached/evaluation.json \
-  --model-cache /path/to/model/cache \
-  --batch-size 40 --gpu-ids 0,1,2,3,4,5,6,7 \
-  --attn-implementation flash_attention_4 \
-  --output /tmp/masked-replay.json
+.venv/bin/python scripts/verify_horizon_gpu.py \
+  --snapshot /path/to/verified/horizon --report artifacts/horizon-gpu.json \
+  --throughput-lengths 512 4096
+.venv/bin/python scripts/verify_mimo_gpu.py \
+  --snapshot /path/to/verified/king --report artifacts/mimo-self-duel.json
 ```
 
-Replay always uses masked scoring, even when its input record was produced under
-the old policy; both policy identities are included in the report. Its differences
-from an old record measure the method change, not exact replay error. Compare
-several batch sizes and record throughput, memory, paired advantages, and verdicts.
-The experimental report's slowdown is not an assumed property of this implementation.
+The Horizon check compares the production chunked NLL function with a full
+forward pass. The MiMo check loads all eight replicas and compares identical
+checkpoints. Their inputs are synthetic, so their timings are not a production
+corpus benchmark. Neither script publishes data or promotes a model.
 
-### Configure evaluation early stopping
-
-Existing PostgreSQL volumes need the one-time additive schema setup before a
-validator running this revision is started:
+While the full UTF-8 export is still running, exercise the complete two-phase
+orchestrator with a local packed-text fixture and real models:
 
 ```bash
-psql "$TEUTONIC_DATABASE_URL" \
-  --no-psqlrc \
-  --set=ON_ERROR_STOP=1 \
-  --file=scripts/db/add_evaluation_early_stopping.sql
-
-psql "$TEUTONIC_DATABASE_URL" \
-  --no-psqlrc \
-  --set=ON_ERROR_STOP=1 \
-  --file=scripts/db/add_safetensors_reuse_limit_error.sql
+TEUTONIC_ATTN_IMPLEMENTATION=flash_attention_4 \
+  .venv/bin/python scripts/verify_packed_duel_gpu.py \
+  --mimo-snapshot /path/to/verified/king \
+  --horizon-snapshot /path/to/verified/horizon \
+  --output-dir artifacts/packed-fixture-gpu
 ```
 
-The first setup creates one competition-scoped policy row with early stopping
-enabled, a `0.4` minimum fraction, `0.95` observed-advantage quantile, zero
-margin, and a 100-sequence check interval. The second exposes the evaluator's
-safetensors reuse-limit code through the dashboard view. Both are idempotent;
-the policy setup preserves an existing row.
+Use a new output directory for each run. This script replaces only dataset
+transport with local byte-range reads and uses the existing verified Horizon
+snapshot directly. It makes no R2 requests or uploads. It runs real Horizon and
+MiMo scoring, then repeats the same sample to verify reference-cache reuse,
+identical scores, zero self-duel reward, text-cache cleanup, and streamed batches.
+This validates orchestration before export completion; it does not replace the
+later authenticated R2 replay or real-corpus performance measurement.
 
-Inspect or update the current competition through the validated helper:
-
-```bash
-.venv/bin/python scripts/configure_early_stopping.py \
-  --enabled \
-  --min-fraction 0.4 \
-  --advantage-quantile 0.95 \
-  --margin 0.0 \
-  --check-interval 100
-```
-
-Arguments that are omitted retain their current PostgreSQL values. The
-validator reads the row before claiming each new evaluation, so a change does
-not require a validator restart and never changes an evaluation already in
-progress. Every claim snapshots the complete policy in its signed request and
-durable `evaluations.thresholds` record.
-
-Early stopping is rejection-only: it can retain the king when the configured
-futility projection is below `delta_threshold - margin`, but it never crowns a
-challenger before the full evaluation. The observed advantage quantile is a
-heuristic for unseen sequences, not a mathematical bound; lower fractions and
-lower quantiles stop more aggressively.
+Run with legacy `datasets` access denied. Verify K2 summed NLL against a trusted forward,
+self-duel zero reward, GPU memory, phase cleanup, deterministic sample replay, and
+cold/warm reference-cache behavior. Benchmark loading, tokenizer throughput, inference,
+and input stalls separately; historical Teutonic-only times do not predict K2 latency.
+Inspect `/health.horizon_download` for checkpoint preparation progress and failures.
 
 ## Publish genesis and start the competition
 
@@ -780,6 +740,10 @@ pm2 logs teutonic-mock-evaluator --lines 100
 Do not add the mock evaluator to either production ecosystem file.
 
 ## MAIN and MIX category competitions
+
+The rollout commands below are historical. For the current evaluator use the packed-text
+section above; legacy token-inventory tools were moved to `scripts/legacy/`.
+
 
 PostgreSQL remains the runtime source of truth. `chain.toml` defines the category
 registry and seven explicit category-weight tables under `[competitions.*]`.
@@ -1329,3 +1293,24 @@ four decimal places; manifests retain full precision. Each category appears once
 | `txt360-qa` | 7.0193% |
 | `web-high-medium` | 4.9513% |
 | `web-high-nltk-qa` | 5.2181% |
+
+
+## CPU release verification
+
+The test image runs pytest for both unittest classes and pytest functions; the
+unit and integration suites run in separate processes to avoid same-name module
+collisions. The database in `tests/compose.yaml` is disposable and uses tmpfs.
+Do not point these tests at a production database.
+
+```bash
+docker compose -f tests/compose.yaml build control-plane-tests
+docker compose -f tests/compose.yaml up --abort-on-container-exit --exit-code-from control-plane-tests postgres control-plane-tests
+node --test tests/contracts/*.test.js
+docker compose -f tests/compose.yaml down
+```
+
+The packed-cutover integration test rehearses the actual staged release SQL
+and published mix bytes, checks 70M-to-35M migration, preserves old configurations,
+reapplies idempotently, restores the old IDs/policies, and verifies that a mismatch
+in the last competition rolls back preceding changes. Retirement tests separately
+check the 40/20/20/20 policy and retained history. No GPU inference is involved.

@@ -1,0 +1,46 @@
+{
+  "state": "published-and-verified",
+  "dataset": {
+    "bucket": "dataset",
+    "key": "teutonic-text/manifest.json",
+    "sha256": "58ce39daf1a3b5be5860779faaf32245d1d040edad25c9abf17c399369e96448"
+  },
+  "objects": [
+    {
+      "local": "sampling.json",
+      "bucket": "dataset",
+      "key": "teutonic-text/sampling/57f867e2c1abdd1952ff031141682f1759b582de50e3a6233fac013b65bd9d68/manifest.json",
+      "sha256": "57f867e2c1abdd1952ff031141682f1759b582de50e3a6233fac013b65bd9d68"
+    },
+    {
+      "local": "main.json",
+      "bucket": "dataset",
+      "key": "teutonic-text/splits/main/1adf390b76c32aca45f9c4a40ea835c4742c8b4f90d6915162a9004c7e299934.json",
+      "sha256": "1adf390b76c32aca45f9c4a40ea835c4742c8b4f90d6915162a9004c7e299934"
+    },
+    {
+      "local": "mix01.json",
+      "bucket": "dataset",
+      "key": "teutonic-text/splits/mix01/dabac3f1f1fa1180f4b53f8c9e4a18fd615f0cee7249a41b7f1157bbea2b1cdb.json",
+      "sha256": "dabac3f1f1fa1180f4b53f8c9e4a18fd615f0cee7249a41b7f1157bbea2b1cdb"
+    },
+    {
+      "local": "mix06.json",
+      "bucket": "dataset",
+      "key": "teutonic-text/splits/mix06/1ad1a116559058dc550c8382471ad607504c28ead570498db848b075f67e7d83.json",
+      "sha256": "1ad1a116559058dc550c8382471ad607504c28ead570498db848b075f67e7d83"
+    },
+    {
+      "local": "mix07.json",
+      "bucket": "dataset",
+      "key": "teutonic-text/splits/mix07/683cc1ae7618284e1616aebb1138248af3fbfe43dc1385ae76692431e7c0e954.json",
+      "sha256": "683cc1ae7618284e1616aebb1138248af3fbfe43dc1385ae76692431e7c0e954"
+    }
+  ],
+  "budgets": {
+    "main": 35000000,
+    "mix01": 35000000,
+    "mix06": 35000000,
+    "mix07": 35000000
+  }
+}

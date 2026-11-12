@@ -57,7 +57,7 @@ class EvaluationConfigurationIntegrationTests(unittest.TestCase):
         self.connection.close()
 
     def test_long_document_config_roundtrips_and_changes_configuration_identity(self):
-        from scripts.configure_evaluation import load_active
+        from scripts.legacy.configure_evaluation import load_active
         from teutonic.evaluation.long_documents import build_long_document_config
         from teutonic.evaluation.index_manifest import INDEX_FORMAT, TOKEN_FORMAT, index_paths, pin_index_manifest
 

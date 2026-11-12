@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Publish a prepared category bundle to new immutable R2 paths only."""
 
-import argparse
 import hashlib
 import json
 import os
@@ -109,15 +108,7 @@ def publish_bundle(directory, bucket, index_file=None):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bundle-dir", type=Path, required=True)
-    parser.add_argument("--index-manifest-file", type=Path)
-    parser.add_argument("--bucket", default=os.environ.get("TEUTONIC_DATASETS_BUCKET", "datasets"))
-    args = parser.parse_args(argv)
-    print(
-        json.dumps(publish_bundle(args.bundle_dir, args.bucket, args.index_manifest_file), indent=2)
-    )
-    return 0
+    raise SystemExit("Legacy token-shard publication is disabled. Use scripts/publish_packed_evaluation.py; use --dry-run for read-only validation.")
 
 
 if __name__ == "__main__":

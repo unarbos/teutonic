@@ -63,6 +63,9 @@ def manifest_from_storage(manifest):
 
 
 def validate_dataset_manifest(manifest: object) -> Mapping[str, Any]:
+    from .packed_text import MIX_FORMAT, validate_mix
+    if isinstance(manifest, Mapping) and manifest.get("format") == MIX_FORMAT:
+        return validate_mix(dict(manifest))
     if isinstance(manifest, Mapping):
         shards = manifest.get("shards")
         if not isinstance(shards, list) or not shards:
@@ -160,7 +163,12 @@ class DatasetManifestSnapshot:
         if not _NAME.fullmatch(self.name):
             raise ValueError("dataset manifest name is invalid")
         parsed = urlparse(self.manifest_url)
-        if parsed.scheme != "https" or not parsed.netloc:
+        from .packed_text import MIX_FORMAT, validate_pin
+        if self.manifest.get("format") == MIX_FORMAT:
+            validate_pin({"bucket": parsed.netloc, "key": parsed.path.lstrip("/"), "sha256": self.manifest_sha256})
+            if parsed.scheme != "s3":
+                raise ValueError("packed-text manifest must use an authenticated S3 pin")
+        elif parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("dataset manifest URL must be public HTTPS")
         if not _DIGEST.fullmatch(self.manifest_sha256):
             raise ValueError("dataset manifest SHA-256 is invalid")
@@ -206,7 +214,13 @@ class EvaluationSettings:
             raise ValueError("evaluation configuration needs dataset manifests")
         if self.shards_per_dataset < 1:
             raise ValueError("evaluation shards_per_dataset must be positive")
-        validate_long_documents(self.long_documents)
+        from .packed_text import MIX_FORMAT, validate_mix
+        if self.long_documents and self.long_documents.get("format") == MIX_FORMAT:
+            validate_mix(dict(self.long_documents))
+            if self.n != 0 or len(self.manifests) != 1 or self.manifests[0].manifest != self.long_documents:
+                raise ValueError("packed-text settings must contain one matching document-only mix")
+        else:
+            validate_long_documents(self.long_documents)
         total = sum(item.proportion for item in self.manifests)
         if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
             raise ValueError("dataset sample proportions must sum to 1")
@@ -376,7 +390,13 @@ def evaluation_config_version(
         },
     }
     if long_documents is not None:
-        value["long_documents"] = validate_long_documents(long_documents)
+        from .packed_text import MIX_FORMAT, validate_mix
+        if long_documents.get("format") == MIX_FORMAT:
+            value["long_documents"] = validate_mix(dict(long_documents))
+            value["protocol_version"] = 3
+            value["sampling_policy"] = "packed-document-buckets"
+        else:
+            value["long_documents"] = validate_long_documents(long_documents)
     return hashlib.sha256(canonical_manifest_bytes(value)).hexdigest()
 
 

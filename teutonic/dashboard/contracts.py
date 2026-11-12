@@ -73,8 +73,15 @@ def canonical_dataset_manifest_json(payload: Mapping[str, Any]) -> bytes:
         "sampling",
         "sources",
     }
-    if set(payload) != required:
+    if not required <= set(payload) or set(payload) - required - {"token_budget", "loss_unit"}:
         raise DashboardContractError("global dataset manifest has invalid top-level fields")
+    if "token_budget" in payload and (
+        type(payload["token_budget"]) is not int or payload["token_budget"] < 1
+        or payload.get("loss_unit") != "bits/byte"
+    ):
+        raise DashboardContractError("packed dataset needs a positive token budget and bits/byte units")
+    if "loss_unit" in payload and payload["loss_unit"] != "bits/byte":
+        raise DashboardContractError("unsupported dataset loss unit")
     if payload.get("schema_version") != 1:
         raise DashboardContractError("global dataset manifest schema_version must be 1")
     sources = payload.get("sources")
@@ -114,9 +121,9 @@ def canonical_dataset_manifest_json(payload: Mapping[str, Any]) -> bytes:
             )
         if not isinstance(source["manifest_url"], str) or not source[
             "manifest_url"
-        ].startswith("https://"):
+        ].startswith(("https://", "s3://dataset/")):
             raise DashboardContractError(
-                "global dataset manifest source URL must use HTTPS"
+                "global dataset manifest source URL must use HTTPS or s3://dataset/"
             )
         digest = source["manifest_sha256"]
         if (
@@ -143,6 +150,8 @@ def canonical_dataset_manifest_json(payload: Mapping[str, Any]) -> bytes:
                 )
         for field in ("total_tokens", "total_shards"):
             value = source[field]
+            if value is None and source["tokenization_mode"] == "packed-text":
+                continue
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise DashboardContractError(
                     f"global dataset manifest source {field} must be positive"

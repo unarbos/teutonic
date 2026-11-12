@@ -1,0 +1,24 @@
+{
+  "netuid": 3,
+  "chain_generation": "teutonic-II-110B-hf-8f971f030f5d801f812540007b396058f69cc08a",
+  "previous_token_budget": 70000000,
+  "token_budget": 35000000,
+  "delta_threshold_bpb": 0.00075,
+  "active_competitions": [
+    "main",
+    "mix01",
+    "mix06",
+    "mix07"
+  ],
+  "incentives": {
+    "main": 0.4,
+    "mix01": 0.2,
+    "mix06": 0.2,
+    "mix07": 0.2
+  },
+  "retire_competitions": [
+    "mix02",
+    "mix03",
+    "mix05"
+  ]
+}

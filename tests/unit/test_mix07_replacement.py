@@ -6,7 +6,7 @@ import pytest
 from test_category_competitions import original_sources, transition
 
 import chain_config
-from scripts import prepare_competition_mixes as prepare
+from scripts.legacy import prepare_competition_mixes as prepare
 from teutonic.competitions import ACTIVE_COMPETITIONS
 from teutonic.evaluation.configuration import canonical_manifest_bytes
 from teutonic.evaluation.mixes import competition_snapshot

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.configure_evaluation import parse_args, prepare_configuration
+from scripts.legacy.configure_evaluation import parse_args, prepare_configuration
 from scripts.publish_split_manifests import build_manifests
 from teutonic.access.contracts import ReadySignal, ready_signal_payload
 from teutonic.evaluation.configuration import (

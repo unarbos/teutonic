@@ -1,8 +1,6 @@
-import ast
 import base64
 import hashlib
 import io
-from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
@@ -77,53 +75,8 @@ def shard_fixture(array, tmp_path, *, metadata=True):
     return ref, server
 
 
-def old_loader():
-    """Exercise the actual legacy loader without importing torch/transformers."""
-    path = Path(__file__).parents[2] / "teutonic/evaluator/engine.py"
-    tree = ast.parse(path.read_text())
-    names = {"read_npy_header", "shuffled_indices", "load_indexed_sequences_from_npy_shard"}
-    functions = ast.Module(
-        body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names],
-        type_ignores=[],
-    )
-    namespace = {"ast": ast, "io": io, "np": np, "EvalRequest": SimpleNamespace}
-    exec(compile(functions, str(path), "exec"), namespace)  # noqa: S102 - only checked-in code
-    return SimpleNamespace(**{name: namespace[name] for name in names})
 
 
-@pytest.mark.parametrize("layout", ["stream", "matrix", "fortran"])
-@pytest.mark.parametrize("limit", [3, 1024])
-def test_range_sampling_matches_actual_local_loader(tmp_path, layout, limit):
-    from test_evaluator_sources import load_sources_module
-
-    array = np.arange(1024 * 64, dtype="<u4").reshape(1024, 64)
-    if layout == "stream":
-        array = np.append(array.reshape(-1), np.array([42, 43], dtype="<u4"))
-    elif layout == "fortran":
-        array = np.asfortranarray(array)
-    ref, server = shard_fixture(array, tmp_path)
-    path = tmp_path / "reference.npy"
-    path.write_bytes(server.objects[ref.url])
-    legacy = old_loader()
-    sources = load_sources_module(tmp_path)
-    sources.base.shuffled_indices = legacy.shuffled_indices
-    sources.open_shard = lambda ref: NpyShard(ref, opener=server.open)
-    req = SimpleNamespace(seq_len=64)
-    expected = legacy.load_indexed_sequences_from_npy_shard(
-        str(path), req, np.random.default_rng(123), limit
-    )
-    events = []
-    actual = sources._load_with_retry(ref, req, np.random.default_rng(123), limit, events.append)
-    assert actual == expected
-    assert events[-1]["metadata_sha256_checked"] is True
-    assert events[-1]["size_bytes"] == server.transferred
-    if limit == 3 and layout != "fortran":
-        assert server.transferred < ref.size_bytes // 10
-    calls = len(server.calls)
-    repeated = sources._load_with_retry(ref, req, np.random.default_rng(123), limit)
-    assert repeated == expected
-    assert len(server.calls) == calls * 2
-    assert sorted(tmp_path.iterdir()) == [path]  # Only the legacy reference file exists.
 
 
 def test_sparse_large_shard_download_without_disk_cache(tmp_path):
@@ -148,32 +101,6 @@ def test_sparse_large_shard_download_without_disk_cache(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-def test_token_reader_ignores_legacy_cache_and_never_accesses_disk(tmp_path, monkeypatch):
-    from test_evaluator_sources import load_sources_module
-
-    array = np.arange(10000, dtype="<u4")
-    ref, server = shard_fixture(array, tmp_path)
-    descriptor = {"url": ref.url, "size_bytes": ref.size_bytes, "sha256": ref.sha256}
-    legacy = document_index.RangeObject(descriptor, tmp_path / "ranges", server.open)
-    legacy._range(0, 1023, "0-1024")
-    legacy._range(128 + 2500 * 4, 128 + 2503 * 4 - 1, "10128-12")
-    calls = len(server.calls)
-    monkeypatch.setenv("TEUTONIC_PRETOKENIZED_CACHE_DIR", str(tmp_path))
-    sources = load_sources_module(tmp_path)
-    sources.NpyShard = lambda shard: NpyShard(shard, opener=server.open)
-
-    def disk_access(*_args, **_kwargs):
-        pytest.fail("token range reader accessed the disk cache")
-
-    # The legacy cache is valid and populated, but the token reader must ignore it.
-    with monkeypatch.context() as no_disk:
-        for name in ("exists", "read_bytes", "mkdir", "replace"):
-            no_disk.setattr(Path, name, disk_access)
-        no_disk.setattr(document_index.tempfile, "NamedTemporaryFile", disk_access)
-        reader = sources.open_shard(ref)
-        np.testing.assert_array_equal(reader.read_tokens([(2500, 3)])[0], array[2500:2503])
-    assert len(server.calls) == calls + 2
-    assert reader.reader.cache is None
 
 
 @pytest.mark.parametrize("failure", ["full_response", "wrong_range", "metadata"])

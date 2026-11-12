@@ -92,11 +92,23 @@
         return Math.max(minRadius, Math.min(maxRadius, width / (count - 1) * 0.28));
     }
 
+    function lossUnit(record) {
+        return record && (record.loss_unit === "bits/byte" || record.policy_version === "horizon-deficit-bpb") ? "bits/byte" : "nats/token";
+    }
+
     function lossChartPresentation(history) {
         function loss(value) {
             return value == null || value === "" ? null : finiteNumber(value, null);
         }
-        var points = (Array.isArray(history) ? history : []).filter(function(item) {
+        var points = (Array.isArray(history) ? history : []).map(function(item) {
+            // New reward records contain bits/byte, but the chart stays in nats/token.
+            // Missing token diagnostics must not be replaced with byte-normalized loss.
+            if (!item || lossUnit(item) !== "bits/byte") return item;
+            return Object.assign({}, item, {
+                avg_king_loss: item.avg_king_token_loss,
+                avg_challenger_loss: item.avg_challenger_token_loss
+            });
+        }).filter(function(item) {
             return item
                 && loss(item.avg_king_loss) != null
                 && loss(item.avg_challenger_loss) != null;
@@ -110,7 +122,8 @@
             points: points.filter(function(item) {
                 return loss(item.avg_challenger_loss) <= maximum;
             }),
-            maximum: maximum
+            maximum: maximum,
+            unit: "nats/token"
         };
     }
 
@@ -248,7 +261,8 @@
                 nSequences: Math.max(0, Math.floor(nSequences)),
                 kingLoss: kingLoss,
                 challengerLoss: challengerLoss,
-                muHat: muHat
+                muHat: muHat,
+                ...(raw.avg_reference_loss == null ? {} : { referenceLoss: finiteNumber(raw.avg_reference_loss, null) })
             };
         }).filter(Boolean).sort(function(a, b) { return a.source.localeCompare(b.source); });
         return { rows: rows, count: rows.length };
@@ -328,7 +342,7 @@
                     ? "The challenger cleared the promotion policy."
                     : "LCB " + lcb.toFixed(6) + " > REQUIRED " + threshold.toFixed(6)
                         + " · MARGIN +" + (lcb - threshold).toFixed(6),
-                detail: "The confidence-adjusted improvement was high enough to replace the king."
+                detail: lossUnit(record) === "bits/byte" ? "The byte-weighted reduction in loss above Horizon cleared the required confidence bound. Improvements beyond Horizon parity earn no extra reward." : "The confidence-adjusted improvement was high enough to replace the king."
             };
         }
         if (lost) {
@@ -339,7 +353,7 @@
                     ? "The challenger did not clear the promotion policy."
                     : "LCB " + lcb.toFixed(6) + " ≤ REQUIRED " + threshold.toFixed(6)
                         + " · SHORTFALL " + Math.max(0, threshold - lcb).toFixed(6),
-                detail: "The measured improvement was not confident enough to replace the king."
+                detail: lossUnit(record) === "bits/byte" ? "The byte-weighted reduction in loss above Horizon did not clear the required confidence bound." : "The measured improvement was not confident enough to replace the king."
             };
         }
         return {
@@ -369,6 +383,7 @@
         var weightTotal = rawWeights.reduce(function(total, weight) { return total + weight; }, 0);
         var defaultWeight = sources.length ? 1 / sources.length : 0;
         var evalN = Math.max(0, finiteNumber(manifest.eval_n || manifest.default_eval_sequences, 0));
+        var tokenBudget = Math.max(0, finiteNumber(manifest.token_budget, 0));
         var rows = sources.map(function(source, index) {
             var weight = weightTotal > 0 ? rawWeights[index] / weightTotal : defaultWeight;
             var sequenceLength = Math.max(0, finiteNumber(
@@ -385,7 +400,7 @@
                 sequenceLength ? Math.floor(totalTokens / sequenceLength) : 0
             ));
             var evalSequences = evalN ? Math.round(evalN * weight) : 0;
-            var evalTokens = evalSequences * sequenceLength;
+            var evalTokens = tokenBudget ? Math.round(tokenBudget * weight) : evalSequences * sequenceLength;
             return {
                 name: source.name || "dataset",
                 manifestUrl: source.manifest_url || "",
@@ -403,7 +418,7 @@
                 tokenizer: source.tokenizer || "",
                 dtype: source.dtype || "",
                 tokenizationMode: source.tokenization_mode || "",
-                metadataLoaded: Boolean(totalTokens || totalShards || sequenceLength || source.source_repo)
+                metadataLoaded: source.tokenization_mode === "packed-text" || Boolean(totalTokens || totalShards || sequenceLength || source.source_repo)
             };
         });
         var totalTokens = rows.reduce(function(total, row) { return total + row.totalTokens; }, 0);
@@ -650,6 +665,7 @@
         mainDatasetPresentation: mainDatasetPresentation,
         graphPointRadius: graphPointRadius,
         lossChartPresentation: lossChartPresentation,
+        lossUnit: lossUnit,
         datasetChangePresentation: datasetChangePresentation,
         benchmarkDetailsKey: benchmarkDetailsKey,
         benchmarkDetailRequests: benchmarkDetailRequests,

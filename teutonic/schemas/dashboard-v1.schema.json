@@ -51,15 +51,15 @@
         "name": { "type": "string", "minLength": 1, "maxLength": 128 },
         "dataset": { "type": "string", "minLength": 1 },
         "proportion": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
-        "manifest_url": { "type": "string", "pattern": "^https://" },
+        "manifest_url": { "type": "string", "pattern": "^(https://|s3://dataset/)" },
         "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "source_repo": { "$ref": "#/$defs/nullable_string" },
         "tokenizer": { "$ref": "#/$defs/nullable_string" },
         "dtype": { "$ref": "#/$defs/nullable_string" },
         "tokenization_mode": { "$ref": "#/$defs/nullable_string" },
         "sequence_length": { "$ref": "#/$defs/nullable_integer" },
-        "total_tokens": { "type": "integer", "minimum": 0 },
-        "total_shards": { "type": "integer", "minimum": 1 },
+        "total_tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "total_shards": { "type": ["integer", "null"], "minimum": 1 },
         "estimated_sequences": { "$ref": "#/$defs/nullable_integer" }
       }
     },
@@ -71,6 +71,8 @@
         "config_version": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "dataset_label": { "type": "string", "minLength": 1 },
         "eval_n": { "type": "integer", "minimum": 0 },
+        "token_budget": { "type": "integer", "minimum": 1 },
+        "loss_unit": { "const": "bits/byte" },
         "delta_threshold": { "type": "number", "minimum": 0, "maximum": 100 },
         "created_at": { "$ref": "#/$defs/timestamp" },
         "sources": {
@@ -287,6 +289,9 @@
               "n_sequences": { "type": "integer", "minimum": 0 },
               "avg_king_loss": { "type": "number" },
               "avg_challenger_loss": { "type": "number" },
+              "loss_unit": { "const": "bits/byte" },
+              "n_bytes": { "$ref": "#/$defs/nullable_integer" },
+              "avg_reference_loss": { "$ref": "#/$defs/nullable_number" },
               "mu_hat": { "type": "number" }
             }
           }
@@ -296,6 +301,11 @@
         "error_code": { "$ref": "#/$defs/nullable_string" },
         "error_message": { "$ref": "#/$defs/nullable_string" },
         "policy_version": { "$ref": "#/$defs/nullable_string" },
+        "loss_unit": { "enum": ["bits/byte", "nats/token"] },
+        "reward_metric": { "enum": ["horizon-deficit-reduction", "raw-loss-reduction"] },
+        "avg_reference_loss": { "$ref": "#/$defs/nullable_number" },
+        "avg_king_token_loss": { "$ref": "#/$defs/nullable_number" },
+        "avg_challenger_token_loss": { "$ref": "#/$defs/nullable_number" },
         "dataset_version": { "$ref": "#/$defs/nullable_string" },
         "timestamp": { "$ref": "#/$defs/nullable_timestamp" },
         "challenger_repo": { "$ref": "#/$defs/nullable_string" },

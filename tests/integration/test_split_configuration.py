@@ -12,7 +12,7 @@ import pytest
 from psycopg.rows import dict_row
 
 import chain_config
-from scripts import configure_evaluation as admin
+from scripts.legacy import configure_evaluation as admin
 from teutonic.evaluation.configuration import (
     DatasetManifestSnapshot,
     canonical_manifest_bytes,
@@ -213,8 +213,8 @@ def test_initialize_dry_run_targeted_update_and_atomic_all(database, tmp_path):
     assert all(r["starting_reign_id"] == starting_king for r in states if r["competition_key"].startswith("mix"))
     state = next(r["reward_transition"] for r in states if r["competition_key"] == "main")
     assert dict(zip(*replacement_rewards(state))) == pytest.approx({"latest-main": .6, "old-winner": .4})
-    budgets = database.execute("SELECT ec.eval_n,ec.long_documents FROM control_plane.evaluation_configs ec JOIN control_plane.competitions c USING(competition_id) WHERE c.netuid=998 AND ec.active").fetchall()
-    assert all(r["eval_n"] == 0 and r["long_documents"]["token_budget"] == 70_000_000 for r in budgets)
+    budgets = database.execute("SELECT c.competition_key,ec.eval_n,ec.long_documents FROM control_plane.evaluation_configs ec JOIN control_plane.competitions c USING(competition_id) WHERE c.netuid=998 AND ec.active").fetchall()
+    assert all(r["eval_n"] == 0 and r["long_documents"]["token_budget"] == chain_config.COMPETITION_DEFAULTS[r["competition_key"]]["long_document_tokens"] for r in budgets)
     database.execute(
         "UPDATE control_plane.king_reigns SET ended_at=now(),replacement_reason='accepted_challenger' WHERE reign_id=%s",
         (starting_king,),

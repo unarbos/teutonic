@@ -13,6 +13,7 @@ from psycopg.errors import QueryCanceled
 from psycopg.rows import dict_row
 
 from teutonic.evaluation.category_scores import category_scores_from_samples
+from teutonic.evaluation.packed_text import MIX_FORMAT, validate_mix
 
 DASHBOARD_LOCK_ID = 6_082_759_349_011_801
 
@@ -143,6 +144,9 @@ def _source_scores(value: Any) -> list[dict[str, Any]]:
                 "mu_hat": mu_hat,
             }
         )
+        if raw_score.get("loss_unit") == "bits/byte":
+            scores[-1].update(loss_unit="bits/byte", n_bytes=_int(raw_score.get("n_bytes")),
+                              avg_reference_loss=_float(raw_score.get("avg_reference_loss")))
     return scores
 
 
@@ -281,6 +285,20 @@ def _dataset_sources(rows):
     result = []
     for row in rows:
         manifest = row["manifest_json"]
+        if manifest.get("format") == MIX_FORMAT:
+            validate_mix(manifest)
+            for category in sorted(manifest["categories"], key=lambda c: c["category"]):
+                result.append({
+                    "name": category["category"], "dataset": category["dataset"],
+                    "proportion": float(row["sample_proportion"]) * category["weight"],
+                    "manifest_url": row["manifest_url"],
+                    "manifest_sha256": row["manifest_sha256"],
+                    "source_repo": None, "tokenizer": "per-model",
+                    "dtype": "utf-8", "tokenization_mode": "packed-text",
+                    "sequence_length": None, "total_tokens": None,
+                    "total_shards": None, "estimated_sequences": None,
+                })
+            continue
         if manifest.get("format") != "teutonic-category-mix-v1":
             result.append(_dataset_source(row))
             continue
@@ -300,6 +318,14 @@ def _dataset_sources(rows):
             source["dataset"] = dataset
             result.append(source)
     return result
+
+
+def _packed_dataset_metadata(rows):
+    manifests = [row["manifest_json"] for row in rows]
+    if all(manifest.get("format") == MIX_FORMAT for manifest in manifests):
+        return {"token_budget": sum(manifest["token_budget"] for manifest in manifests),
+                "loss_unit": "bits/byte"}
+    return {}
 
 
 def _dataset_versions(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -324,6 +350,7 @@ def _dataset_versions(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
             "delta_threshold": float(first["delta_threshold"]),
             "created_at": _iso(first["config_created_at"]),
             "sources": _dataset_sources(config_rows),
+            **_packed_dataset_metadata(config_rows),
         })
     return versions
 
@@ -473,6 +500,9 @@ class DashboardProjectionRepository:
                                FROM 1 FOR 16
                            ) AS challenge_id,
                            e.verdict_summary -> 'source_scores' AS source_scores,
+                           e.verdict_summary ->> 'avg_reference_loss' AS avg_reference_loss,
+                           e.verdict_summary ->> 'avg_king_token_loss' AS avg_king_token_loss,
+                           e.verdict_summary ->> 'avg_challenger_token_loss' AS avg_challenger_token_loss,
                            e.evaluation_id, e.result_artifact_sha256,
                            e.updated_at, e.completed_at
                       FROM control_plane.evaluations e
@@ -515,9 +545,15 @@ class DashboardProjectionRepository:
             (row["challenge_id"], row["completed_at"]): _source_scores(row["source_scores"])
             for row in source_score_rows
         }
+        loss_diagnostics = {
+            (row["challenge_id"], row["completed_at"]): {
+                key: _float(row.get(key)) for key in
+                ("avg_reference_loss", "avg_king_token_loss", "avg_challenger_token_loss")
+            } for row in source_score_rows
+        }
         history_entries = [
             self._history(
-                row,
+                {**row, **loss_diagnostics.get((row["challenge_id"], row["completed_at"]), {})},
                 source_scores_by_evaluation.get((row["challenge_id"], row["completed_at"]), []),
                 category_scores_by_evaluation.get((row["challenge_id"], row["completed_at"]), []),
                 ((row["challenge_id"], row["completed_at"]) in source_scores_by_evaluation
@@ -602,6 +638,7 @@ class DashboardProjectionRepository:
                 "inputs": ["block_hash", "hotkey"],
             },
             "sources": _dataset_sources(rows),
+            **_packed_dataset_metadata(rows),
         }
 
     @staticmethod
@@ -713,6 +750,11 @@ class DashboardProjectionRepository:
             "error_code": error_code,
             "error_message": PUBLIC_ERROR_MESSAGES.get(error_code) if error_code else None,
             "policy_version": row["policy_version"],
+            "loss_unit": "bits/byte" if row["policy_version"] == "horizon-deficit-bpb" else "nats/token",
+            "reward_metric": "horizon-deficit-reduction" if row["policy_version"] == "horizon-deficit-bpb" else "raw-loss-reduction",
+            "avg_reference_loss": _float(row.get("avg_reference_loss")),
+            "avg_king_token_loss": _float(row.get("avg_king_token_loss")),
+            "avg_challenger_token_loss": _float(row.get("avg_challenger_token_loss")),
             "dataset_version": row["dataset_version"],
             "timestamp": _iso(row["completed_at"]),
             "challenger_repo": row["public_model_name"] if public else None,

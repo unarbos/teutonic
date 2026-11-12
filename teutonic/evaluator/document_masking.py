@@ -36,12 +36,12 @@ class DocumentLayout:
         return self.devices[device]
 
 
-def document_layout(input_ids: torch.Tensor, sample_lengths: list[int] | None = None) -> DocumentLayout:
+def document_layout(input_ids: torch.Tensor, sample_lengths: list[int] | None = None, *, document_only=False) -> DocumentLayout:
     if input_ids.ndim != 2 or input_ids.shape[1] < 2 or input_ids.shape[0] < 1:
         raise ValueError("masked evaluation expects a nonempty matrix of windows of length >= 2")
     batch, width = input_ids.shape
     starts = torch.ones_like(input_ids, dtype=torch.bool)
-    starts[:, 1:] = input_ids[:, :-1] == DOCUMENT_EOS_TOKEN_ID
+    starts[:, 1:] = False if document_only else input_ids[:, :-1] == DOCUMENT_EOS_TOKEN_ID
     if sample_lengths is not None:
         if batch != 1 or sum(sample_lengths) != width or any(n < 2 for n in sample_lengths):
             raise ValueError("packed sample lengths must match the input tensor")
@@ -114,10 +114,10 @@ def install_document_flash_adapter():
 
 
 @contextmanager
-def masked_model_inputs(model, input_ids, sample_lengths=None):
+def masked_model_inputs(model, input_ids, sample_lengths=None, *, document_only=False):
     if getattr(model.config, "model_type", None) != "mimo_v2":
         raise ValueError("document-masked scoring supports the pinned MiMo model only")
-    layout = document_layout(input_ids, sample_lengths)
+    layout = document_layout(input_ids, sample_lengths, document_only=document_only)
     implementation = model.config._attn_implementation
     if implementation == "flash_attention_4":
         install_document_flash_adapter()

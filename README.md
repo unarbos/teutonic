@@ -7,15 +7,17 @@ submission and sends the challenger and current king to a remote GPU evaluator
 for paired cross-entropy scoring. A successful challenger becomes the new king,
 and the validator updates subnet weights and publishes the resulting state.
 
-Evaluation isolates EOS-delimited document fragments inside the sampled windows,
-resets their positions, and excludes predictions across document boundaries.
-Scores are weighted by scored-token counts; bootstrap resamples paired original
-windows. See [masked evaluation setup and GPU checks](DEPLOY.md#document-masked-evaluation).
+The evaluator update samples complete UTF-8 documents deterministically from
+packed text and byte-offset indexes. Each model scores the same text with its
+native tokenizer. Reward measures improvement in the byte-weighted loss deficit
+against the pinned Horizon reference; ordinary token loss remains available for
+historical charts. The default sampling budget is 35M original MiMo tokens.
 
-Evaluation can additionally sample complete documents
-between 2049 and 8192 tokens, with category-proportional coverage of 2049–4096
-and 4097–8192. It supports MAIN, MATH, CODE and TEXT, with a combined token-weighted verdict
-and separate long-document metrics. See [configuration and GPU validation](DEPLOY.md#additional-long-document-evaluation).
+Horizon uses a deterministic eight-GPU layer pipeline, followed by four MiMo king
+and four challenger vLLM replicas. Large MiMo documents use two-GPU groups.
+Horizon preloads at startup and after each duel, remaining on the GPUs while idle;
+it unloads before the MiMo phase. GPU readiness is exposed as `horizon_gpu` in health.
+See [deployment and GPU validation](DEPLOY.md); production cutover is pending.
 
 ## Miner CLI
 
@@ -163,15 +165,15 @@ teutonic-miner status
 
 ## Competitions
 
-Miners can select `MAIN` or `MIX01`–`MIX06` with
-`teutonic-miner ready --competition MIX02` (also supported by `submit`). Omission
+For the new rollout, miners can select `MAIN`, `MIX01`, `MIX06` or `MIX07` with
+`teutonic-miner ready --competition MIX01` (also supported by `submit`). Omission
 selects MAIN. One ready submission per hotkey is shared across all competitions.
-Each competition uses an explicit category list, zero windows, and a 70M-token
-whole-document input budget. PostgreSQL holds the active configuration; repository
-initialization defaults use the same budgets. Acceptance uses the whole mix's
-token-weighted bootstrap LCB.
-A kingless MIX challenges its fixed starting MAIN king using its own mix and threshold.
-The starting king is pinned once; later MAIN promotions do not move it. After its
-first win, the MIX challenges its own current king. `competitions.json` publishes
-the pinned model as `starting_king`.
+The allocation is MAIN **40%**, MIX01/MIX06/MIX07 **20% each**. MIX02/03/05 retire
+at cutover and MIX04 stays retired; models and historical results are retained.
+Each competition uses its existing category weights and a **35M original MiMo-token**
+whole-document budget. Acceptance uses a byte-weighted bootstrap LCB for reduction
+in loss above the fixed Horizon reference, in bits/byte. PostgreSQL holds the live
+configuration; repository defaults take effect only after approved migration.
+Each MIX challenges its own current king. Historical starting kings remain pinned
+and are published as `starting_king` in `competitions.json`.
 

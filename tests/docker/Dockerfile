@@ -10,10 +10,13 @@ RUN pip install --no-cache-dir \
     "httpx>=0.27,<0.29" \
     "numpy>=1.26,<3" \
     "boto3>=1.34,<2" \
+    "huggingface-hub>=0.34,<2" \
+    "tokenizers>=0.22,<0.23" \
     "PyNaCl>=1.5,<2" \
-    "jsonschema>=4.22,<5"
+    "jsonschema>=4.22,<5" \
+    "pytest>=9,<10"
 
 WORKDIR /app
 ENV PYTHONPATH=/app
 
-CMD ["sh", "-c", "python -m unittest discover -s tests/unit -v && python -m unittest discover -s tests/integration -v"]
+CMD ["sh", "-c", "python -m pytest -q -p no:cacheprovider tests/unit && python -m pytest -q -p no:cacheprovider tests/integration"]

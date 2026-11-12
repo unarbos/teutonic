@@ -3,7 +3,7 @@ import multiprocessing as mp
 import threading
 import time
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
@@ -175,25 +175,28 @@ def test_evaluator_locks_caches_before_resolution_and_releases_on_failure(tmp_pa
     )
 
     def resolve(_artifact):
-        for root in (model_cache, shard_cache, index_cache):
+        for root in (model_cache, shard_cache):
             with cache_lock(root, cleanup=True) as locked:
                 assert not locked
+        with cache_lock(index_cache, cleanup=True) as locked:
+            assert locked  # old index cache is no longer used by the evaluator
         raise ValueError("fixture resolution failure")
 
     def cleanup():
-        for root in (model_cache, shard_cache, index_cache):
+        for root in (model_cache, shard_cache):
             with cache_lock(root, cleanup=True) as locked:
                 assert locked
 
     import subprocess
+
     from teutonic.evaluator.document_index import DocumentIndexDownloadError, RangeDownloadError
 
     namespace = {
-        "EvaluationRequestV2": object, "ExitStack": ExitStack, "cache_lock": cache_lock,
+        "EvaluationRequestV3": object, "ExitStack": ExitStack, "cache_lock": cache_lock,
         "document_index_cache_dir": document_index_cache_dir,
-        "_attempts": SimpleNamespace(get=lambda _: record), "_eval_lock": Mock(),
+        "_attempts": SimpleNamespace(get=lambda _: record), "_eval_lock": Mock(), "_idle_horizon": None,
         "MODEL_CACHE_DIR": model_cache, "SHARD_CACHE_DIR": shard_cache,
-        "time": time, "datetime": datetime, "timezone": timezone,
+        "time": time, "datetime": datetime, "timezone": timezone, "UTC": UTC,
         "threading": SimpleNamespace(Event=threading.Event, Thread=Mock()),
         "R2ArtifactResolver": lambda _: SimpleNamespace(resolve=resolve), "log": Mock(),
         "SafetensorsReuseLimitError": type("SafetensorsReuseLimitError", (RuntimeError,), {}),

@@ -13,6 +13,8 @@ MAIN_SHARES = {
     3: (40, 15),
 }
 
+FOUR_COMPETITION_POLICY = "four-competition-v3"
+
 
 def competition_rewards(main_history: Sequence[str], split_kings: Mapping[str, str]):
     if set(split_kings) - {"math", "code", "text"}:
@@ -34,6 +36,13 @@ def competition_rewards(main_history: Sequence[str], split_kings: Mapping[str, s
 
 def validate_transition(state):
     from teutonic.competitions import MIX_COMPETITIONS
+    if isinstance(state, dict) and state.get("version") == FOUR_COMPETITION_POLICY:
+        if (set(state.get("mixes", {})) != {"mix01", "mix06", "mix07"}
+                or not state.get("main", {}).get("hotkey")
+                or any(not isinstance(h, str) or not h for h in state["mixes"].values())
+                or state.get("legacy") != []):
+            raise ValueError("four-competition rewards require MAIN and three crowned MIX kings")
+        return
     if not isinstance(state, dict) or state.get("version") not in {
         "mix-replacement-v1", "mix-successor-v2"
     }:
@@ -59,8 +68,16 @@ def validate_transition(state):
 
 
 def replacement_rewards(state):
-    """Allocate 12.5% per MIX; normalize the remainder over surviving positions."""
+    """Calculate the versioned allocation, retaining historical policy semantics."""
     validate_transition(state)
+    if state["version"] == FOUR_COMPETITION_POLICY:
+        from teutonic.competitions import ACTIVE_INCENTIVES
+        recipients = {"main": state["main"]["hotkey"], **state["mixes"]}
+        combined = {}
+        for key, share in ACTIVE_INCENTIVES.items():
+            hotkey = recipients[key]
+            combined[hotkey] = combined.get(hotkey, 0) + share
+        return tuple(combined), tuple(combined.values())
     entries = [state["main"], *state["legacy"]]
     remaining = 1 - 0.125 * len(state["mixes"])
     total = sum(e["weight"] for e in entries)
@@ -78,6 +95,16 @@ def replacement_after_win(state, competition, hotkey):
     from teutonic.competitions import MIX_COMPETITIONS
     validate_transition(state)
     result = deepcopy(state)
+    if result["version"] == FOUR_COMPETITION_POLICY:
+        if not isinstance(hotkey, str) or not hotkey:
+            raise ValueError("winner hotkey is empty")
+        if competition == "main":
+            result["main"]["hotkey"] = hotkey
+        elif competition in result["mixes"]:
+            result["mixes"][competition] = hotkey
+        else:
+            raise ValueError("retired or unknown competition cannot receive rewards")
+        return result
     if competition == "main":
         result["main"]["hotkey"] = hotkey
     elif competition in MIX_COMPETITIONS:
@@ -103,12 +130,32 @@ def replacement_after_win(state, competition, hotkey):
 def begin_mix07_replacement(state):
     """Retain MIX04's full reward slot until MIX07 is actually crowned."""
     validate_transition(state)
+    if state["version"] == FOUR_COMPETITION_POLICY:
+        raise ValueError("MIX07 replacement is already complete; four-competition policy is active")
     result = deepcopy(state)
     if result["version"] == "mix-successor-v2":
         return result
     if "mix04" not in result["mixes"]:
         raise ValueError("MIX04 must have a rewarded king before replacement")
     result.update(version="mix-successor-v2", successors={"mix07": "mix04"})
+    validate_transition(result)
+    return result
+
+
+def begin_four_competition_policy(state):
+    """Retire three reward slots without inventing kings or changing old state."""
+    validate_transition(state)
+    if state["version"] == FOUR_COMPETITION_POLICY:
+        return deepcopy(state)
+    if state["legacy"] or not {"mix01", "mix06", "mix07"} <= set(state["mixes"]):
+        raise ValueError("cutover requires crowned MIX01/06/07 and no surviving legacy positions")
+    result = deepcopy(state)
+    result["version"] = FOUR_COMPETITION_POLICY
+    result["mixes"] = {k: state["mixes"][k] for k in ("mix01", "mix06", "mix07")}
+    result["retired_rewards"] = {
+        k: h for k, h in state["mixes"].items() if k not in result["mixes"]
+    }
+    result.pop("successors", None)
     validate_transition(result)
     return result
 

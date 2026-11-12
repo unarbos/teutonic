@@ -13,11 +13,10 @@ except ImportError:
 
 from teutonic.evaluation import (
     EarlyStoppingPolicy,
-    EvaluationRequestV2,
     EvaluatorJobNotFoundError,
-    result_provenance,
 )
 from teutonic.evaluation.configuration import DatasetManifestSnapshot, canonical_manifest_bytes
+from teutonic.evaluation.protocol_v3 import EvaluationRequestV3, result_provenance
 from teutonic.validator import (
     EvaluationPolicyConfig,
     SchedulerLockUnavailable,
@@ -30,37 +29,38 @@ NOW = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
 
 
 def policy(**overrides) -> EvaluationPolicyConfig:
+    competition = overrides.pop("competition", "main")
     manifest = {
-        "shards": [{
-            "key": "shards/part-000.npy",
-            "sha256": "a" * 64,
-            "size_bytes": 16384,
-            "n_tokens": 16384,
-        }]
+        "format": "teutonic-packed-text-mix", "competition": competition,
+        "dataset": {"bucket": "dataset", "key": "teutonic-text/manifest.json", "sha256": "a"*64},
+        "sampling": {"bucket": "dataset", "key": "teutonic-text/sampling/test.json", "sha256": "b"*64},
+        "categories": [{"dataset": "test", "category": "text", "weight": 1.0}],
+        "token_budget": 35000000,
     }
     snapshot = DatasetManifestSnapshot(
         name="fixture",
-        manifest_url="https://datasets.example/fixture/manifest.json",
+        manifest_url=f"s3://dataset/teutonic-text/splits/{competition}/" + hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest() + ".json",
         manifest_sha256=hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest(),
         proportion=1.0,
         manifest=manifest,
     )
     values = {
-        "policy_version": "quasar-paired-v1",
+        "policy_version": "horizon-deficit-bpb",
         "code_version": "phase5-test",
         "dataset_version": "b" * 64,
-        "evaluator_version": "teutonic-evaluator-v2",
+        "evaluator_version": "document-evaluator-v3",
         "sampling_seed": 7,
         "bootstrap_seed": 11,
-        "n": 32,
+        "n": 0,
         "seq_len": 64,
         "n_bootstrap": 128,
         "alpha": 0.05,
         "delta_threshold": 0.0015,
-        "dataset_source": "pretokenized_npy",
+        "dataset_source": "packed_text",
         "dataset_label": "fixture-v1",
-        "shards_per_dataset": 4,
+        "shards_per_dataset": 1,
         "dataset_manifests": (snapshot,),
+        "long_documents": manifest,
         "lease": timedelta(minutes=2),
         "retry_base_delay": timedelta(seconds=5),
         "max_attempts": 3,
@@ -70,7 +70,7 @@ def policy(**overrides) -> EvaluationPolicyConfig:
 
 
 def terminal_result(request_payload, *, accepted: bool):
-    request = EvaluationRequestV2.from_mapping(request_payload)
+    request = EvaluationRequestV3.from_mapping(request_payload)
     result = result_provenance(
         request,
         started_at=NOW.isoformat(),
@@ -84,9 +84,11 @@ def terminal_result(request_payload, *, accepted: bool):
         {
             "accepted": accepted,
             "verdict": "challenger" if accepted else "king",
-            "mu_hat": 0.003 if accepted else 0.0,
-            "lcb": 0.002 if accepted else -0.001,
-            "delta_threshold": 0.0015,
+            "mu_hat": request.limits["delta_threshold"] + .0015 if accepted else 0.0,
+            "lcb": request.limits["delta_threshold"] + .0005 if accepted else -0.001,
+            "delta_threshold": request.limits["delta_threshold"],
+            "scoring_policy": "horizon-deficit-bpb", "loss_unit": "bits/byte",
+            "aggregation": "byte-weighted", "retention_gates": False, "avg_reference_loss": 1.1,
             "avg_king_loss": 1.2,
             "avg_challenger_loss": 1.197 if accepted else 1.201,
             "wall_time_s": 60.0,
@@ -105,12 +107,12 @@ class FakeEvaluator:
         return {"status": "ok"}
 
     async def start_attempt(self, request):
-        parsed = EvaluationRequestV2.from_mapping(request)
+        parsed = EvaluationRequestV3.from_mapping(request)
         self.started.append(parsed.request_payload)
         return {"eval_id": parsed.eval_id, "duplicate": False}
 
     async def events(self, eval_id):
-        request = EvaluationRequestV2.from_mapping(self.started[-1])
+        request = EvaluationRequestV3.from_mapping(self.started[-1])
         yield {
             "evaluation_id": request.evaluation_id,
             "attempt_number": request.attempt_number,
@@ -162,7 +164,7 @@ class UnavailableEvaluator:
 
 class ReuseLimitEvaluator(FakeEvaluator):
     async def events(self, eval_id):
-        request = EvaluationRequestV2.from_mapping(self.started[-1])
+        request = EvaluationRequestV3.from_mapping(self.started[-1])
         yield {
             "evaluation_id": request.evaluation_id,
             "attempt_number": request.attempt_number,
@@ -178,7 +180,7 @@ class ReuseLimitEvaluator(FakeEvaluator):
 
 class LegacyDuplicateEvaluator(FakeEvaluator):
     async def events(self, eval_id):
-        request = EvaluationRequestV2.from_mapping(self.started[-1])
+        request = EvaluationRequestV3.from_mapping(self.started[-1])
         yield {
             "evaluation_id": request.evaluation_id,
             "attempt_number": request.attempt_number,
@@ -196,7 +198,7 @@ class DispatchOutageEvaluator(FakeEvaluator):
         self.dispatches = []
 
     async def start_attempt(self, request):
-        parsed = EvaluationRequestV2.from_mapping(request)
+        parsed = EvaluationRequestV3.from_mapping(request)
         self.dispatches.append(parsed.request_payload)
         if len(self.dispatches) == 1:
             raise ConnectionError("connecterror: GPU tunnel unavailable")
@@ -224,7 +226,7 @@ class AcceptedEvaluator(FakeEvaluator):
 
     async def start_attempt(self, request):
         self.posts.append(request)
-        parsed = EvaluationRequestV2.from_mapping(request)
+        parsed = EvaluationRequestV3.from_mapping(request)
         for existing in self.started:
             if existing["evaluation_id"] == request["evaluation_id"]:
                 assert existing == request, "payload mutated under existing evaluator identity"
@@ -339,7 +341,7 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             INSERT INTO control_plane.evaluation_early_stopping_policies (
                 competition_id, enabled, min_fraction, advantage_quantile,
                 margin, check_interval
-            ) VALUES (%s, true, 0.4, 0.95, 0.0, 100)
+            ) VALUES (%s, false, 0.4, 0.95, 0.0, 100)
             """,
             (competition,),
         )
@@ -444,7 +446,7 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
                 (self.genesis_reign_id, competition),
             )
         self.connection.execute(
-            "INSERT INTO control_plane.evaluation_early_stopping_policies(competition_id,enabled,check_interval) VALUES (%s,true,8)",
+            "INSERT INTO control_plane.evaluation_early_stopping_policies(competition_id,enabled,check_interval) VALUES (%s,false,8)",
             (competition,),
         )
         original_factory = self.connection.row_factory
@@ -456,10 +458,11 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
                 chain_generation="test",
                 competition=key,
                 dataset_label=key,
-                n=32,
+                n=0,
                 delta_threshold=0.007,
-                manifests=policy().dataset_manifests,
-                shards_per_dataset=4,
+                manifests=policy(competition=key).dataset_manifests,
+                shards_per_dataset=1,
+                long_documents=policy(competition=key).long_documents,
             )
         finally:
             self.connection.row_factory = original_factory
@@ -786,12 +789,12 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual(rows, [("math", 1), ("quasar", 2)])
 
-    def test_early_stopping_policy_is_loaded_and_bound_to_claim(self):
+    def test_disabled_early_stopping_policy_is_loaded_and_bound_to_claim(self):
         loaded = self.repository.load_early_stopping_policy()
         self.assertEqual(
             loaded,
             EarlyStoppingPolicy(
-                enabled=True,
+                enabled=False,
                 min_fraction=0.4,
                 advantage_quantile=0.95,
                 margin=0.0,
@@ -800,10 +803,10 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         )
         claim = self.repository.claim_next(
             now=NOW,
-            policy=policy(n=128, early_stopping=loaded),
+            policy=policy(early_stopping=loaded),
         )
         self.assertIsNotNone(claim)
-        parsed = EvaluationRequestV2.from_mapping(claim.request)
+        parsed = EvaluationRequestV3.from_mapping(claim.request)
         self.assertEqual(parsed.early_stopping, loaded.request_dict())
         row = self.connection.execute(
             "SELECT thresholds FROM control_plane.evaluations WHERE evaluation_id = %s",
@@ -1675,7 +1678,7 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             restarted.release_lock()
             self.repository.acquire_lock()
 
-    def test_v2_dispatch_persists_bounded_progress_and_one_accepted_verdict(self) -> None:
+    def test_v3_dispatch_persists_bounded_progress_and_one_accepted_verdict(self) -> None:
         evaluator = FakeEvaluator(lambda request: terminal_result(request, accepted=True))
 
         async def preflight(_request):

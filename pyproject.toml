@@ -27,6 +27,9 @@ validator = [
 evaluator = [
     "accelerate",
     "boto3",
+    "gigatoken==0.11.0",
+    "huggingface-hub>=0.34,<2",
+    "tokenizers>=0.22,<0.23",
     "fastapi",
     "flash-attn-4==4.0.0b28",
     "httpx",
@@ -37,7 +40,25 @@ evaluator = [
     "transformers @ git+https://github.com/tony-dendrite/transformers.git@9e8a1817d44502602b5b50e09b2a5ab0271bdb39",
     "uvicorn",
 ]
+# Install separately from [evaluator]: the GPU worker uses the tested vLLM
+# dependency stack; the control/tokenization environment retains its own pins.
+vllm-worker = [
+    "vllm==0.33.0",
+    "torch==2.14.0",
+    "transformers==5.20.2",
+]
+# Independent Horizon pipeline environment; CUDA 13.2 Torch build required.
+horizon-worker = [
+    "torch==2.15.0",
+    "transformers==5.15.1",
+    "accelerate==1.15.0",
+    "numpy==2.5.4",
+    "safetensors",
+]
 dev = ["pytest", "ruff"]
+
+[project.entry-points."vllm.general_plugins"]
+teutonic_mimo = "teutonic.evaluator.mimo_vllm:register"
 
 [project.scripts]
 teutonic-miner = "miner.cli:main"

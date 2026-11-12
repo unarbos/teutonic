@@ -325,7 +325,7 @@ CREATE TABLE control_plane.dataset_manifests (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT dataset_manifests_manifest_json_check CHECK ((jsonb_typeof(manifest_json) = 'object'::text)),
     CONSTRAINT dataset_manifests_manifest_sha256_check CHECK ((manifest_sha256 ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT dataset_manifests_manifest_url_check CHECK ((manifest_url ~ '^https://'::text)),
+    CONSTRAINT dataset_manifests_manifest_url_check CHECK (manifest_url ~ '^https://' OR manifest_url ~ '^s3://dataset/teutonic-text/splits/[a-z0-9_-]+/[0-9a-f]{64}\.json$'),
     CONSTRAINT dataset_manifests_name_check CHECK ((name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'::text)),
     CONSTRAINT dataset_manifests_position_check CHECK (("position" >= 0)),
     CONSTRAINT dataset_manifests_sample_proportion_check CHECK (((sample_proportion > (0)::double precision) AND (sample_proportion <= (1)::double precision)))

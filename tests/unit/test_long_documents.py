@@ -36,7 +36,6 @@ from teutonic.evaluator.document_index import (
     PinnedObject,
     sample_category,
 )
-from teutonic.evaluator.long_documents import extend_with_long_documents, sequence_digest
 
 LEGACY_CONFIG = tomllib.loads((Path(__file__).parents[1] / "fixtures/legacy_evaluation.toml").read_text())
 
@@ -452,116 +451,6 @@ def make_index_fixture(tmp_path):
     return config, snap, factory, documents, paths, server
 
 
-@pytest.mark.parametrize("flat_mix", [False, True])
-@pytest.mark.parametrize("local_files", [0, 2, 4])
-@pytest.mark.parametrize("documents_only", [False, True])
-def test_complete_document_reconstruction_shuffle_and_audit_without_model(tmp_path, monkeypatch, flat_mix, local_files, documents_only):
-    import teutonic.evaluator as evaluator_package
-
-    config, snap, factory, documents, paths, _server = make_index_fixture(tmp_path)
-    if flat_mix:
-        from teutonic.evaluation.index_manifest import ETAG_INDEX_FORMAT, pin_index_manifest
-        from teutonic.evaluation.mixes import build_mix_manifests
-        manifest = build_mix_manifests((snap,), {"mix02": {"categories": {"codeio": 1.0}}})["mix02"]
-        snap = snapshot("mix02", manifest.pop("shards"), **manifest)
-        inventory = json.loads(config["index_manifest"]["content"])
-        inventory["format"] = ETAG_INDEX_FORMAT
-        for entry in inventory["files"].values():
-            entry.pop("sha256")
-        pin = pin_index_manifest(json.dumps(inventory).encode(), config["index_manifest"]["url"])
-        config = build_config((snap,), token_budget=15000, index_manifest=pin)
-    fake_sources = SimpleNamespace(
-        base=SimpleNamespace(SHARD_CACHE_DIR=tmp_path),
-        ShardRef=lambda *args: SimpleNamespace(
-            source=args[0], url=args[1], sha256=args[2], size_bytes=args[3], n_tokens=args[4]
-        ),
-    )
-    monkeypatch.setattr(evaluator_package, "sources", fake_sources, raising=False)
-    req = SimpleNamespace(
-        long_documents=config,
-        max_document_tokens=16384,
-        vocab_size=160000,
-        dataset_sources=[{"name": snap.name, "proportion": 1}],
-    )
-    meta = {
-        "dataset_seed": 10,
-        "digest": "base",
-        "sources": [{"name": snap.name}],
-        "_source_labels": [snap.name],
-        "_sample_provenance": [
-            {"shard_group_index": 0, "shard_index": 0, "shard_sequence_index": 0}
-        ],
-    }
-    windows = [] if documents_only else [[12, 13]]
-    if documents_only:
-        meta["_source_labels"] = []
-        meta["_sample_provenance"] = []
-    kwargs = {
-        "index_factory": factory,
-        "manifest_loader": lambda *args: snap,
-    }
-    from test_token_shards import ShardServer
-
-    from teutonic.evaluator.token_shards import NpyShard
-
-    server = ShardServer({
-        f"https://datasets.example/code-reasoning/{key}": path.read_bytes()
-        for key, path in paths.items()
-    })
-    kwargs["shard_reader"] = lambda ref: NpyShard(ref, opener=server.open)
-    result, audit = extend_with_long_documents(req, windows, meta, **kwargs)
-    first_transferred = server.transferred
-    if local_files:
-        from teutonic.evaluator.local_index import LocalIndexStore
-
-        root = tmp_path / "persistent-indexes"
-        store = LocalIndexStore(root)
-        descriptors = list(config["categories"][0]["files"].values())[:local_files]
-
-        def download(request, timeout):
-            response = _server.open(request, timeout)
-            response.iter_chunks = lambda size: iter(lambda: response.read(size), b"")
-            return response
-
-        for descriptor in descriptors:
-            assert store.download(descriptor, lambda: False, download)
-        monkeypatch.setenv("TEUTONIC_DOC_INDEX_STORE_DIR", str(root))
-
-        def local_object(descriptor, cache):
-            reader = PinnedObject(descriptor, cache, _server.open)
-            assert (reader.local is not None) == (descriptor in descriptors)
-            return reader
-
-        kwargs["index_factory"] = lambda category, cache: DocumentIndex(category, cache, local_object)
-    second, again = extend_with_long_documents(req, windows, meta, **kwargs)
-    assert result == second and audit == again
-    full_dataset_bytes = sum(path.stat().st_size for path in paths.values())
-    assert first_transferred < full_dataset_bytes
-    assert server.transferred - first_transferred < full_dataset_bytes
-    assert audit["long_documents"]["n_documents"] >= 3
-    assert sum(p["component"] == "windows" for p in audit["_sample_provenance"]) == len(windows)
-    assert audit["n"] == len(result)
-    from teutonic.evaluation.masking import scored_token_counts
-    assert all(n > 0 for n in scored_token_counts(result))
-    for tokens, p in zip(result, audit["_sample_provenance"], strict=True):
-        if p["component"] == "windows":
-            assert tokens == [12, 13]
-        else:
-            assert tokens == documents[p["document_row"]].tolist()
-            assert 2 <= len(tokens) <= 16384
-            assert p["shard_index"] == -1
-    assert audit["digest"] == sequence_digest(result)
-    assert any(len(tokens) == 16384 for tokens in result)
-    buckets = audit["long_documents"]["categories"][0]["buckets"]
-    assert [b["target_tokens"] for b in buckets] == [6000, 9000]
-    req.max_document_tokens = 8192
-    with pytest.raises(ValueError, match="context limit"):
-        extend_with_long_documents(req, windows, meta, **kwargs)
-    req.max_document_tokens = 16384
-    assert sequence_digest([[1, 2], [3, 4, 5]]) != sequence_digest([[1, 2, 3], [4, 5]])
-    req.vocab_size = 100
-    with pytest.raises(ValueError, match="vocabulary"):
-        extend_with_long_documents(req, windows, meta, **kwargs)
 
 
 def test_incomplete_documents_are_rejected_by_index(tmp_path):
@@ -662,7 +551,7 @@ def test_previous_policy_is_not_silently_replayed(version):
 
 
 def test_budget_changes_preserve_pins_and_threshold_updates_do_not_fetch(monkeypatch):
-    from scripts import configure_evaluation as cli
+    from scripts.legacy import configure_evaluation as cli
     from teutonic.evaluation.mixes import build_mix_manifests
 
     manifest = build_mix_manifests(all_sources(), {"main": chain_config.COMPETITION_DEFAULTS["main"]})["main"]

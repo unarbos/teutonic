@@ -1,3 +1,4 @@
+# Historical token-inventory mix helpers. Live packed-text preparation uses packed_text.py.
 """Compile explicit category lists into immutable, flat evaluation manifests."""
 
 import hashlib
@@ -21,7 +22,7 @@ _RULES = load_rules(DEFAULT_RULES_PATH)
 
 
 def validate_definitions():
-    from teutonic.competitions import CONFIGURED_COMPETITIONS
+    from teutonic.competitions import ACTIVE_INCENTIVES, CONFIGURED_COMPETITIONS
 
     if set(chain_config.COMPETITION_DEFAULTS) != set(CONFIGURED_COMPETITIONS):
         raise ValueError("configure MAIN and MIX01–MIX07, including retired MIX04 history")
@@ -38,7 +39,7 @@ def validate_definitions():
             raise ValueError(f"duplicate category: {key}")
         if spec["n"] < 0 or not 1 <= spec["long_document_tokens"] <= 100_000_000:
             raise ValueError(f"invalid evaluation budgets: {key}")
-        if spec["incentive"] != (0.25 if key == "main" else 0.125):
+        if spec["incentive"] != ACTIVE_INCENTIVES.get(key, 0):
             raise ValueError(f"unsupported incentive allocation: {key}")
 
 

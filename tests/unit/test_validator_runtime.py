@@ -51,16 +51,15 @@ class ValidatorRuntimeTests(unittest.TestCase):
     @staticmethod
     def _settings() -> EvaluationSettings:
         manifest = {
-            "shards": [{
-                "key": "shards/part-000.npy",
-                "sha256": "a" * 64,
-                "size_bytes": 4096,
-                "n_tokens": 4096,
-            }]
+            "format": "teutonic-packed-text-mix", "competition": "main",
+            "dataset": {"bucket": "dataset", "key": "teutonic-text/manifest.json", "sha256": "a"*64},
+            "sampling": {"bucket": "dataset", "key": "teutonic-text/sampling/test.json", "sha256": "b"*64},
+            "categories": [{"dataset": "test", "category": "text", "weight": 1.0}],
+            "token_budget": 70000000,
         }
         snapshot = DatasetManifestSnapshot(
             name="fixture",
-            manifest_url="https://datasets.example/fixture/manifest.json",
+            manifest_url="s3://dataset/teutonic-text/splits/main/fixture.json",
             manifest_sha256=hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest(),
             proportion=1.0,
             manifest=manifest,
@@ -68,10 +67,11 @@ class ValidatorRuntimeTests(unittest.TestCase):
         return EvaluationSettings(
             config_version="b" * 64,
             dataset_label="fixture",
-            n=2000,
+            n=0,
             delta_threshold=0.5,
             manifests=(snapshot,),
-            shards_per_dataset=4,
+            shards_per_dataset=1,
+            long_documents=manifest,
         )
     def test_equal_weight_plan_preserves_order_and_deduplicates_uids(self):
         hotkeys, uids, weights = equal_weight_plan(
@@ -120,20 +120,20 @@ class ValidatorRuntimeTests(unittest.TestCase):
     def test_policy_matches_evaluator_defaults(self):
         policy = evaluation_policy_from_env(
             {
-                "TEUTONIC_EVALUATION_POLICY_VERSION": "category-mix-token-bootstrap-v2",
+                "TEUTONIC_EVALUATION_POLICY_VERSION": "horizon-deficit-bpb",
                 "TEUTONIC_EVALUATOR_CODE_VERSION": "release-1",
-                "TEUTONIC_EVALUATOR_VERSION": "pair-evaluator-v2",
+                "TEUTONIC_EVALUATOR_VERSION": "document-evaluator-v3",
                 "TEUTONIC_EVAL_BATCH_SIZE": "64",
             },
             settings=self._settings(),
         )
-        self.assertEqual(policy.n, 2000)
+        self.assertEqual(policy.n, 0)
         self.assertEqual(policy.seq_len, 2048)
         self.assertEqual(policy.n_bootstrap, 10000)
         self.assertEqual(policy.batch_size, 64)
         self.assertEqual(policy.thresholds["batch_size"], 64)
         self.assertEqual(policy.delta_threshold, 0.5)
-        self.assertEqual(policy.dataset_source, "pretokenized_npy")
+        self.assertEqual(policy.dataset_source, "packed_text")
         self.assertFalse(policy.publish_non_winning_models)
 
     def test_old_unmasked_policy_is_rejected(self):
@@ -146,9 +146,9 @@ class ValidatorRuntimeTests(unittest.TestCase):
     def test_policy_defaults_to_tested_batch_size(self):
         policy = evaluation_policy_from_env(
             {
-                "TEUTONIC_EVALUATION_POLICY_VERSION": "category-mix-token-bootstrap-v2",
+                "TEUTONIC_EVALUATION_POLICY_VERSION": "horizon-deficit-bpb",
                 "TEUTONIC_EVALUATOR_CODE_VERSION": "release-1",
-                "TEUTONIC_EVALUATOR_VERSION": "pair-evaluator-v2",
+                "TEUTONIC_EVALUATOR_VERSION": "document-evaluator-v3",
             },
             settings=self._settings(),
         )

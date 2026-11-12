@@ -10,8 +10,9 @@ from typing import Any, Mapping, Sequence
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from teutonic.evaluation import EarlyStoppingPolicy, EvaluationRequestV2
+from teutonic.evaluation import EarlyStoppingPolicy
 from teutonic.evaluation.configuration import DatasetManifestSnapshot, EvaluationSettings
+from teutonic.evaluation.protocol_v3 import PROTOCOL_VERSION, EvaluationRequestV3
 
 from .contracts import ClaimedEvaluation, EvaluationPolicyConfig, RecoveryCandidate
 from .model_ownership import model_ownership_error, reject_model_copy
@@ -297,7 +298,7 @@ class ValidatorRepository:
             # Missing started_at does not prove non-acceptance. Reclaim the exact
             # identity; the scheduler reconciles stale split requests before dispatch.
             if row["previous_state"] == "retryable_failure" and row["previous_started_at"] is None:
-                request = EvaluationRequestV2.from_mapping(row["previous_request"])
+                request = EvaluationRequestV3.from_mapping(row["previous_request"])
                 evaluation_id = str(row["previous_evaluation_id"])
                 cursor.execute(
                     """
@@ -359,12 +360,12 @@ class ValidatorRepository:
             if frozen_retry:
                 payload = dict(row["previous_request"])
                 payload.update(evaluation_id=evaluation_id, attempt_number=attempt_number)
-                request = EvaluationRequestV2.from_mapping(payload)
+                request = EvaluationRequestV3.from_mapping(payload)
                 row["current_reign_id"] = row["previous_king_reign_id"]
             else:
-                request = EvaluationRequestV2.from_mapping(
+                request = EvaluationRequestV3.from_mapping(
                     {
-                        "protocol_version": "teutonic-evaluator-v2",
+                        "protocol_version": PROTOCOL_VERSION,
                         "evaluation_id": evaluation_id,
                         "attempt_number": attempt_number,
                         "king": {

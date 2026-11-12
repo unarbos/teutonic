@@ -45,6 +45,8 @@ def category_scores_from_samples(
     """
     if not isinstance(samples, Mapping):
         return {}
+    if samples.get("format") == "packed-document-losses":
+        return _packed_category_scores(samples)
     columns = [
         samples.get(key)
         for key in (
@@ -137,3 +139,40 @@ def category_scores_from_samples(
         }
         for label, (count, weight, king, challenger, delta) in sorted(totals.items())
     }
+
+
+def _packed_category_scores(samples):
+    columns = [samples.get(key) for key in
+               ("documents", "king_nll", "challenger_nll", "reference_nll")]
+    if any(not isinstance(column, list) for column in columns):
+        return {}
+    if not columns[0] or any(len(column) != len(columns[0]) for column in columns):
+        return {}
+    totals = {}
+    for document, king, challenger, reference in zip(*columns, strict=True):
+        if not isinstance(document, Mapping):
+            return {}
+        dataset, category, weight = (document.get(key) for key in
+                                     ("dataset", "category", "byte_length"))
+        if not all(isinstance(value, str) and _NAME.fullmatch(value)
+                   for value in (dataset, category)):
+            return {}
+        if type(weight) is not int or weight <= 0 or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0 for value in (king, challenger, reference)
+        ):
+            return {}
+        label = dataset if dataset == category else f"{dataset}/{category}"
+        total = totals.setdefault(label, [0, 0, 0, 0, 0, 0])
+        total[0] += 1
+        total[1] += weight
+        total[2] += king / math.log(2)
+        total[3] += challenger / math.log(2)
+        total[4] += (max(king - reference, 0) - max(challenger - reference, 0)) / math.log(2)
+        total[5] += reference / math.log(2)
+    return {label: {"n_sequences": count, "n_bytes": weight, "loss_unit": "bits/byte",
+                    "avg_reference_loss": round(reference / weight, 6),
+                    "avg_king_loss": round(king / weight, 6),
+                    "avg_challenger_loss": round(challenger / weight, 6),
+                    "mu_hat": round(delta / weight, 6)}
+            for label, (count, weight, king, challenger, delta, reference) in sorted(totals.items())}

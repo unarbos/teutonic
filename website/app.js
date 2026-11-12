@@ -49,12 +49,13 @@
   function historyDetailKey(item, index) { return String(item.challenge_id || item.upload_id || item.timestamp || "evaluation-" + index); }
   function historySourceScores(item, byCategory) {
     var view = byCategory ? TeutonicDashboardV1.categoryScoresPresentation(item) : TeutonicDashboardV1.sourceScoresPresentation(item), section = document.createElement("section"), heading = document.createElement("h3"), wrap = document.createElement("div"), table = document.createElement("table"), head = document.createElement("thead"), headRow = document.createElement("tr"), body = document.createElement("tbody");
-    section.className = "history-source-scores"; section.dataset.breakdown = byCategory ? "category" : "dataset"; heading.textContent = (byCategory ? "LOSS BY CATEGORY · " : "LOSS BY DATASET · ") + view.count; section.appendChild(heading);
+    var unit = TeutonicDashboardV1.lossUnit(item), packed = unit === "bits/byte";
+    section.className = "history-source-scores"; section.dataset.breakdown = byCategory ? "category" : "dataset"; heading.textContent = (byCategory ? "LOSS BY CATEGORY · " : "LOSS BY DATASET · ") + view.count + " · " + unit; section.appendChild(heading);
     if (!view.count) { var empty = document.createElement("p"); empty.className = "history-shards-empty"; empty.textContent = byCategory ? item.category_scores_pending ? "CATEGORY LOSS IS BEING PREPARED" : "CATEGORY LOSS UNAVAILABLE FOR THIS EVALUATION" : "PER-DATASET LOSS UNAVAILABLE FOR THIS EVALUATION"; section.appendChild(empty); return section; }
     wrap.className = "history-source-score-wrap"; table.className = "history-source-score-table";
-    [byCategory ? "CATEGORY" : "DATASET", "KING LOSS", "CHALL LOSS", "Δ", byCategory ? "SAMPLES" : "N"].forEach(function(label) { var th = document.createElement("th"); th.textContent = label; if (label === "Δ") th.title = "King loss minus challenger loss; positive means lower challenger loss"; headRow.appendChild(th); });
+    [byCategory ? "CATEGORY" : "DATASET", "KING LOSS", "CHALL LOSS"].concat(packed ? ["HORIZON LOSS", "DEFICIT REDUCTION"] : ["Δ"]).concat([byCategory ? "DOCUMENTS" : "N"]).forEach(function(label) { var th = document.createElement("th"); th.textContent = label; if (label === "Δ") th.title = "King loss minus challenger loss"; if (label === "DEFICIT REDUCTION") th.title = "Byte-weighted reduction in max(model loss − Horizon loss, 0); positive favors the challenger"; headRow.appendChild(th); });
     head.appendChild(headRow); table.appendChild(head);
-    view.rows.forEach(function(score) { var row = document.createElement("tr"), delta = finite(score.muHat); cell(row, score.source, "history-source-name", score.source); cell(row, metric(score.kingLoss, 5), "mono"); cell(row, metric(score.challengerLoss, 5), "mono"); cell(row, delta == null ? "--" : (delta > 0 ? "+" : "") + delta.toFixed(5), "mono history-source-delta " + (delta > 0 ? "positive" : delta < 0 ? "negative" : "neutral")); cell(row, number(score.nSequences), "mono"); body.appendChild(row); });
+    view.rows.forEach(function(score) { var row = document.createElement("tr"), delta = finite(score.muHat); cell(row, score.source, "history-source-name", score.source); cell(row, metric(score.kingLoss, 5), "mono"); cell(row, metric(score.challengerLoss, 5), "mono"); if (packed) cell(row, metric(score.referenceLoss, 5), "mono"); cell(row, delta == null ? "--" : (delta > 0 ? "+" : "") + delta.toFixed(5), "mono history-source-delta " + (delta > 0 ? "positive" : delta < 0 ? "negative" : "neutral")); cell(row, number(score.nSequences), "mono"); body.appendChild(row); });
     table.appendChild(body); wrap.appendChild(table); section.appendChild(wrap); return section;
   }
   function historyShardRow(item, index, detailKey) {
@@ -68,6 +69,7 @@
     }
     var evaluationMetadata = document.createElement("dl"); evaluationMetadata.className = "history-error-metadata history-eval-metadata";
     [["SAMPLES", run.samples, run.samplesTitle], ["EARLY STOP", run.earlyStopLabel, "Whether evaluation stopped before all planned samples"]].forEach(function(entry) { var group = document.createElement("div"), label = document.createElement("dt"), value = document.createElement("dd"); label.textContent = entry[0]; value.textContent = entry[1]; value.title = entry[2]; group.appendChild(label); group.appendChild(value); evaluationMetadata.appendChild(group); });
+    var units = document.createElement("p"); units.textContent = "Loss and reward units: " + TeutonicDashboardV1.lossUnit(item) + (TeutonicDashboardV1.lossUnit(item) === "bits/byte" ? " · Horizon loss: " + metric(item.avg_reference_loss, 5) + " · Reward: byte-weighted Horizon-deficit reduction" : " · Historical raw-loss reduction"); panel.appendChild(units);
     panel.appendChild(evaluationMetadata);
     panel.appendChild(historySourceScores(item, true));
     panel.appendChild(historySourceScores(item));
@@ -125,7 +127,7 @@
   function huggingFaceUrl(repo, digest) { var base = repo ? "https://huggingface.co/" + repo : ""; var raw = String(digest || "").replace(/^hf:/, ""); return base && raw ? base + "/tree/" + raw : base; }
   function datasetCell(row, value, subtext, href) {
     var td = document.createElement("td"), main;
-    if (href) { main = document.createElement("a"); main.href = href; main.target = "_blank"; main.rel = "noopener"; main.textContent = value || "--"; td.appendChild(main); }
+    if (href && !href.startsWith("s3://")) { main = document.createElement("a"); main.href = href; main.target = "_blank"; main.rel = "noopener"; main.textContent = value || "--"; td.appendChild(main); }
     else td.textContent = value || "--";
     if (subtext) { var sub = document.createElement("span"); sub.className = "dataset-sub"; sub.textContent = subtext; td.appendChild(sub); }
     row.appendChild(td);
@@ -405,7 +407,7 @@
     var toggle = el("history-errors-toggle"); toggle.textContent = historyShowErrors ? "HIDE ERRORS" : "SHOW ERRORS"; toggle.setAttribute("aria-pressed", historyShowErrors ? "true" : "false");
     if (!rows.length) return emptyRow(body, 11, view.errorCount && !historyShowErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET"); clear(body);
     var fragment = document.createDocumentFragment();
-    rows.forEach(function (item, index) { var detailKey = item.competition + "-" + historyDetailKey(item, index), tr = document.createElement("tr"); cell(tr, item.competition.toUpperCase()); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); cell(tr, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); fragment.appendChild(tr); makeHistoryRowExpandable(tr, item, index, detailKey); });
+    rows.forEach(function (item, index) { var detailKey = item.competition + "-" + historyDetailKey(item, index), tr = document.createElement("tr"); cell(tr, item.competition.toUpperCase()); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); cell(tr, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat) + " " + TeutonicDashboardV1.lossUnit(item)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); fragment.appendChild(tr); makeHistoryRowExpandable(tr, item, index, detailKey); });
     body.appendChild(fragment);
   }
   function renderReigns() {
@@ -454,6 +456,7 @@
     var smoothLabel = amount > 0 ? "SMOOTH " + smoothMode.toUpperCase() + " " + amount.toFixed(2) : "SMOOTH OFF";
     text("smooth-status", smoothLabel);
     var chart = TeutonicDashboardV1.lossChartPresentation(d.history || []), points = chart.points;
+    text("performance-heading", "MAIN LOSS HISTORY");
     text("chart-count", points.length + (points.length === 1 ? " EVALUATION" : " EVALUATIONS"));
     el("chart-empty").hidden = points.length > 0;
     if (!points.length) { svg.innerHTML = ""; return; }
@@ -609,10 +612,9 @@
       view.rows.forEach(function (source) { var li = document.createElement("li"); li.textContent = source.name + ": " + (source.normalizedWeight * 100).toFixed(4) + "%"; list.appendChild(li); });
       details.appendChild(list); categoryCell.appendChild(details);
     }
-    cell(row, view ? number(view.evalN) : "--");
-    cell(row, number(state.documentTokens));
+    cell(row, number(manifest && manifest.token_budget || state.documentTokens));
     cell(row, state.hasKing ? "OWN KING" : state.key === "mix07" ? "PINNED MIX05 KING" : "PINNED MAIN KING");
-    cell(row, manifest ? "> " + metric(manifest.delta_threshold, 4) : "--");
+    cell(row, manifest ? "> " + metric(manifest.delta_threshold, 5) + " " + (manifest.loss_unit || "nats/token") : "--");
     datasetCell(row, "MANIFEST", "", state.prefix + "datasets/manifest.json");
   }
   async function loadSpecialistDataset(state) {

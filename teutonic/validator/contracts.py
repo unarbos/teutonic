@@ -64,13 +64,17 @@ class EvaluationPolicyConfig:
             and self.early_stopping.check_interval > self.n
         ):
             raise ValueError("early stopping check_interval cannot exceed evaluation n")
-        if self.dataset_source != "pretokenized_npy" or not self.dataset_manifests:
+        if self.dataset_source not in {"pretokenized_npy", "packed_text"} or not self.dataset_manifests:
             raise ValueError("evaluation needs database-backed pre-tokenized manifests")
         if self.shards_per_dataset < 1:
             raise ValueError("shards_per_dataset must be positive")
 
     @property
     def thresholds(self) -> dict[str, int | float]:
+        if self.dataset_source == "packed_text":
+            return {"batch_token_budget": self.seq_len * self.batch_size,
+                    "n_bootstrap": self.n_bootstrap, "alpha": self.alpha,
+                    "delta_threshold": self.delta_threshold, "batch_size": self.batch_size}
         return {
             "n": self.n,
             "seq_len": self.seq_len,
@@ -88,6 +92,11 @@ class EvaluationPolicyConfig:
         }
 
     def dataset_request(self, *, block_hash: str, hotkey: str) -> dict[str, Any]:
+        if self.dataset_source == "packed_text":
+            from teutonic.evaluation.packed_text import validate_mix
+            if self.n != 0 or self.early_stopping.enabled or len(self.dataset_manifests) != 1:
+                raise ValueError("packed-text evaluation is document-only without early stopping")
+            return dict(validate_mix(dict(self.dataset_manifests[0].manifest)))
         settings = EvaluationSettings(
             config_version=self.dataset_version,
             dataset_label=self.dataset_label,
