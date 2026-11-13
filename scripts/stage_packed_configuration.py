@@ -34,8 +34,6 @@ def stage(bundle, *, netuid, generation, threshold, previous_token_budget=None, 
                 or any(not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{64}", v)
                        for v in previous_configs.values())):
             raise ValueError("previous configs must map competitions to exact config-version hashes")
-        if previous_token_budget is not None:
-            raise ValueError("pin-only migration cannot change the token budget")
     staged = set()
     blocks = ["-- Apply allow_packed_text_manifests.sql first. Verify R2 publication before applying.\nBEGIN;"]
     for entry in entries:
@@ -62,13 +60,21 @@ def stage(bundle, *, netuid, generation, threshold, previous_token_budget=None, 
         if previous_configs is not None:
             if mix['competition'] not in previous_configs:
                 raise ValueError("missing previous configuration for competition")
+            if previous_token_budget is None:
+                change_guard = f"(dm.manifest_json - 'dataset' - 'sampling')=({content}::jsonb - 'dataset' - 'sampling')"
+            else:
+                # Budget-only update: preserve exact dataset/catalog pins and weights.
+                change_guard = f"""(dm.manifest_json - 'token_budget')=({content}::jsonb - 'token_budget')
+   AND ((ec.config_version={literal(previous_configs[mix['competition']])}
+         AND (ec.long_documents->>'token_budget')::bigint={previous_token_budget})
+        OR (ec.config_version={literal(version)} AND ec.long_documents={content}::jsonb))"""
             source_guard = f"""
    AND ec.config_version IN ({literal(previous_configs[mix['competition']])},{literal(version)})
    AND ec.delta_threshold={threshold} AND ec.dataset_label={literal(mix['competition'])}
    AND ec.shards_per_dataset=1 AND dm.position=0
    AND dm.manifest_json->>'format'='teutonic-packed-text-mix'
    AND ec.long_documents=dm.manifest_json
-   AND (dm.manifest_json - 'dataset' - 'sampling')=({content}::jsonb - 'dataset' - 'sampling')
+   AND {change_guard}
 """
         else:
             source_guard = f"""
@@ -105,7 +111,7 @@ BEGIN
    WHERE ec.evaluation_config_id=previous AND ec.eval_n=0
    AND (SELECT count(*) FROM control_plane.dataset_manifests WHERE evaluation_config_id=previous)=1
    AND dm.sample_proportion=1
-   {source_guard}
+{source_guard}
  ) THEN RAISE EXCEPTION 'Active category weights, sources or budget differ; review migration'; END IF;
  SELECT evaluation_config_id INTO eid FROM control_plane.evaluation_configs
  WHERE competition_id=cid AND config_version={literal(version)};
@@ -156,7 +162,8 @@ def main():
     p.add_argument("--previous-token-budget", type=int,
                    help="explicit expected live budget when changing the budget at cutover")
     p.add_argument("--previous-configs", type=Path,
-                   help="JSON competition-to-config-version map; allow only dataset/sampling pin changes")
+                   help="JSON competition-to-config-version map; pin-only update unless "
+                        "--previous-token-budget selects a budget-only update")
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args()
     args.output.write_text(stage(args.bundle_dir, netuid=args.netuid,

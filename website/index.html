@@ -47,7 +47,7 @@
           <h2 id="competition-dataset-heading">COMPETITION DATASET MIX</h2>
           <span class="dataset-help" id="competition-dataset-help">
             <button type="button" aria-label="About the competition dataset mix" aria-describedby="competition-dataset-tooltip">(?)</button>
-            <span id="competition-dataset-tooltip" class="dataset-help-tooltip" role="tooltip" hidden>Each competition uses an explicit category list. Weights are sampling targets for whole documents. The rollout budget is 35M original MiMo tokens. Reward is the byte-weighted reduction in max(model loss − Horizon loss, 0); losses and thresholds are in bits/byte. Acceptance requires the bootstrap LCB to exceed the threshold. A kingless MIX challenges its pinned starting king; MIX07 starts from the MIX05 king pinned at activation.</span>
+            <span id="competition-dataset-tooltip" class="dataset-help-tooltip" role="tooltip" hidden>Each competition uses an explicit category list. Weights are sampling targets for whole documents. The rollout budget is 60M original MiMo tokens. Reward is the byte-weighted reduction in max(model loss − Horizon loss, 0); losses and thresholds are in bits/byte. Acceptance requires the bootstrap LCB to exceed the threshold. A kingless MIX challenges its pinned starting king; MIX07 starts from the MIX05 king pinned at activation.</span>
           </span>
         </div>
         <div class="dataset-table-wrap">
@@ -172,7 +172,7 @@
 
     <footer><span>TEUTONIC / DASHBOARD V1</span><span id="last-refresh">LAST REFRESH --</span></footer>
   </main>
-  <script src="dashboard-v1.js?v=packed-inventory-v1"></script>
-  <script src="app.js?v=packed-inventory-v1"></script>
+  <script src="dashboard-v1.js?v=live-progress-v1"></script>
+  <script src="app.js?v=live-progress-v1"></script>
 </body>
 </html>

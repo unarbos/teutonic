@@ -182,7 +182,7 @@ def main():
                 if list(state.glob("duel-text-*")):
                     raise AssertionError("temporary text cache was not cleaned up")
                 if name == "cache-hit":
-                    if any(e.get("phase") == "reference_scoring" for e in events):
+                    if "horizon" in workers["roles"]:
                         raise AssertionError("cache hit ran reference scoring")
                     if metadata["digest"] != reports[0]["dataset"]["digest"]:
                         raise AssertionError("sample changed across identical requests")

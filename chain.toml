@@ -187,7 +187,7 @@ manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/dclm-baselin
 
 [competitions.main]
 n = 0
-long_document_tokens = 35000000
+long_document_tokens = 60000000
 delta_threshold = 0.00075
 incentive = 0.4
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/main/versions/44383013ef3b8c1fbaaf54ece816af899bb55727d18f842249931e56cf09e99d.json"
@@ -220,7 +220,7 @@ web-high-nltk-qa = 0.0656642256232968
 
 [competitions.mix01]
 n = 0
-long_document_tokens = 35000000
+long_document_tokens = 60000000
 delta_threshold = 0.00075
 incentive = 0.2
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix01/versions/406f640bf0946c50625c54aa80334b9032ca2001bd5175ab18fed4f2e71ae94d.json"
@@ -334,7 +334,7 @@ reasoning = 0.19917344489800715
 
 [competitions.mix06]
 n = 0
-long_document_tokens = 35000000
+long_document_tokens = 60000000
 delta_threshold = 0.00075
 incentive = 0.2
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix06/versions/23aa16564c225ef8212d82eeefe74cb47b0cae1daa8532ed05f0307104b92c29.json"
@@ -368,7 +368,7 @@ web-high-nltk-qa = 0.05218087169792589
 
 [competitions.mix07]
 n = 0
-long_document_tokens = 35000000
+long_document_tokens = 60000000
 delta_threshold = 0.00075
 incentive = 0.2
 # Prepare/publish a bundle before activation; no published immutable URL yet.

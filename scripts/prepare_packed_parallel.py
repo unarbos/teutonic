@@ -55,8 +55,8 @@ def main():
     dataset=PackedDataset(LocalReader(),pin)
     config=tomllib.loads(args.definitions.read_text())
     definitions={key:config['competitions'][key] for key in ACTIVE_COMPETITIONS}
-    if any(d['long_document_tokens']!=35000000 for d in definitions.values()):
-        raise ValueError('expected the approved 35M rollout definitions')
+    if any(d['long_document_tokens']!=60000000 for d in definitions.values()):
+        raise ValueError('expected the approved 60M rollout definitions')
     context=multiprocessing.get_context('fork')
     processes=[]
     try:

@@ -44,7 +44,7 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, required=True)
-    parser.add_argument('--token-budget', type=int, default=35000000)
+    parser.add_argument('--token-budget', type=int, default=60000000)
     parser.add_argument('--inventory-dir', type=Path, default=ROOT/'results/codeio-70m-live-r2-20261111T205700Z/inventory')
     args = parser.parse_args()
     run = args.output_dir.resolve()

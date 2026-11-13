@@ -10,6 +10,9 @@
   var BENCHMARK_POLL_MS = 60000;
   var lastPayload = null;
   var mainQueueFailed = false;
+  var livePayload = null;
+  var livePolling = false;
+  var liveFailed = false;
   var benchmarkPayload = null;
   var benchmarkHistoryVisible = false;
   var benchmarkSources = new Map();
@@ -300,9 +303,29 @@
   function competitionSources() {
     return [{ key: "main", dashboard: lastPayload, failed: mainQueueFailed }].concat(specialists || []);
   }
+  function evaluationSources() {
+    return TeutonicDashboardV1.liveEvaluationSources(competitionSources(), livePayload, Date.now(), liveFailed);
+  }
+  async function pollLive() {
+    if (livePolling) return;
+    livePolling = true;
+    var controller = new AbortController(), timeout = setTimeout(function () { controller.abort(); }, 8000);
+    try {
+      var response = await fetch("/dashboard-live.json", { cache: "no-cache", credentials: "omit", signal: controller.signal });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      var payload = TeutonicDashboardV1.validateLive(await response.json());
+      if (Date.parse(payload.generated_at) > Date.now() + 30000) throw new Error("future live timestamp");
+      if (!livePayload || payload.generation !== livePayload.generation || payload.netuid !== livePayload.netuid
+          || (payload.source_watermark >= livePayload.source_watermark && Date.parse(payload.generated_at) >= Date.parse(livePayload.generated_at))) {
+        livePayload = payload;
+      }
+      liveFailed = false;
+    } catch (error) { liveFailed = true; }
+    finally { clearTimeout(timeout); livePolling = false; renderSharedEvaluation(); }
+  }
   function globalQueueRows() {
     var rows = [];
-    competitionSources().forEach(function (source) {
+    evaluationSources().forEach(function (source) {
       if (source.dashboard) source.dashboard.queue.forEach(function (item) { rows.push({ competition: source.key, item: item }); });
     });
     return rows.sort(function (a, b) {
@@ -314,7 +337,7 @@
     });
   }
   function renderEvaluation() {
-    var sources = competitionSources(), missing = [], stale = [];
+    var sources = evaluationSources(), missing = [], stale = [];
     sources.forEach(function (source) { if (!source.dashboard) missing.push(source.key.toUpperCase()); else if (source.failed) stale.push(source.key.toUpperCase()); });
     var notes = [];
     if (missing.length) notes.push("WAITING FOR EVALUATION DATA: " + missing.join(", "));
@@ -325,7 +348,7 @@
       return Number(a.failed) - Number(b.failed)
         || new Date(b.dashboard.updated_at || b.dashboard.generated_at || 0) - new Date(a.dashboard.updated_at || a.dashboard.generated_at || 0);
     });
-    var selected = active[0], d = selected ? selected.dashboard : lastPayload || {}, ev = d.current_eval;
+    var selected = active[0], d = selected ? selected.dashboard : (sources.find(function (source) { return source.key === "main"; }) || {}).dashboard || {}, ev = d.current_eval;
     var service = d.service_status || {}, card = el("eval-card"), provisionalNode = el("eval-provisional");
     text("validator-phase", "VALIDATOR " + String(service.validator_phase || "--").toUpperCase());
     if (!ev) {
@@ -340,12 +363,14 @@
     var pct = finite(ev.percent); if (pct == null && finite(ev.total) > 0) pct = finite(ev.progress) / finite(ev.total) * 100; pct = Math.max(0, Math.min(100, pct || 0));
     var provisional = TeutonicDashboardV1.currentEvaluationPresentation(ev);
     provisionalNode.hidden = false; text("eval-mu-hat", metric(provisional.muHat)); text("eval-lcb", metric(provisional.lcb)); text("eval-delta", metric(provisional.threshold));
-    text("eval-lcb-meta", provisional.available ? number(provisional.sequences) + " PAIRED · " + number(provisional.bootstraps) + " BOOTSTRAPS · UPDATES AT 10% CHECKPOINTS" : "WAITING FOR FIRST 10% CHECKPOINT");
+    text("eval-lcb-meta", provisional.available ? number(provisional.sequences) + " PAIRED · " + number(provisional.bootstraps) + " BOOTSTRAPS · UPDATES AT 10% OF PAIRED SCORING" : "WAITING FOR FIRST 10% OF PAIRED SCORING");
     card.dataset.active = "true";
     hotkeyText("eval-title", selected.key.toUpperCase() + " · HOTKEY ", ev.hotkey, 16, 8); el("eval-title").title = ev.hotkey || "";
     text("eval-meta", "UID " + ev.uid + " · MODEL SHA256 " + short(ev.model_digest, 12, 6) + " · " + number(ev.elapsed_seconds) + "S ELAPSED");
-    el("eval-meta").title = ev.model_digest || ""; text("eval-stage", String(ev.stage || "PROCESSING").replaceAll("_", " "));
-    text("eval-percent", pct.toFixed(0) + "% · " + number(ev.progress) + "/" + number(ev.total)); el("eval-progress").style.width = pct + "%";
+    var stageLabel = ev.stage === "reference_scoring" ? "HORIZON SCORING" : ev.stage === "paired_scoring" ? "KING / CHALLENGER SCORING" : String(ev.stage || "PROCESSING").replaceAll("_", " ");
+    el("eval-meta").title = ev.model_digest || ""; text("eval-stage", stageLabel);
+    var scoringPhase = ev.stage === "reference_scoring" ? " HORIZON DOCUMENTS" : ev.stage === "paired_scoring" ? " PAIRED DOCUMENTS" : "";
+    text("eval-percent", pct.toFixed(0) + "% · " + number(ev.progress) + "/" + number(ev.total) + scoringPhase); el("eval-progress").style.width = pct + "%";
   }
   function renderSharedEvaluation() { renderQueue(); renderEvaluation(); }
   function scheduleSharedRender() {
@@ -357,7 +382,7 @@
     });
   }
   function renderQueue() {
-    var sources = competitionSources(), rows = globalQueueRows(), missing = [], stale = [];
+    var sources = evaluationSources(), rows = globalQueueRows(), missing = [], stale = [];
     sources.forEach(function (source) {
       if (!source.dashboard) missing.push(source.key.toUpperCase());
       else if (source.failed) stale.push(source.key.toUpperCase());
@@ -633,6 +658,7 @@
   pollSpecialists(); setInterval(pollSpecialists, POLL_MS);
   loadSpecialistDatasets(); setInterval(loadSpecialistDatasets, DATASET_POLL_MS);
   poll(); setInterval(poll, POLL_MS);
+  pollLive(); setInterval(pollLive, 5000);
   loadDatasetManifest(); setInterval(loadDatasetManifest, DATASET_POLL_MS);
   loadBenchmarks(); setInterval(loadBenchmarks, BENCHMARK_POLL_MS);
 })();

@@ -291,6 +291,10 @@
               "avg_challenger_loss": { "type": "number" },
               "loss_unit": { "const": "bits/byte" },
               "n_bytes": { "$ref": "#/$defs/nullable_integer" },
+              "n_scoring_sequences": { "$ref": "#/$defs/nullable_integer" },
+              "n_skipped_sequences": { "$ref": "#/$defs/nullable_integer" },
+              "scoring_bytes": { "$ref": "#/$defs/nullable_integer" },
+              "skipped_bytes": { "$ref": "#/$defs/nullable_integer" },
               "avg_reference_loss": { "$ref": "#/$defs/nullable_number" },
               "mu_hat": { "type": "number" }
             }

@@ -76,3 +76,30 @@ def test_budget_change_is_explicit_in_staged_sql(tmp_path):
     assert "Drain active evaluations" in sql
     assert "DO UPDATE SET enabled=false" in sql
     assert "DELETE" not in sql
+
+
+def test_exact_config_budget_change_preserves_dataset_pins(tmp_path):
+    bundle(tmp_path)
+    configs = {"main": "a" * 64}
+    sql = stage(tmp_path, netuid=999, generation="fixture", threshold=.00075,
+                previous_configs=configs, previous_token_budget=70000000)
+    assert "::bigint=70000000" in sql
+    assert "dm.manifest_json - 'token_budget'" in sql
+    assert "dm.manifest_json - 'dataset'" not in sql
+    assert "a" * 64 in sql
+    pins_only = stage(tmp_path, netuid=999, generation="fixture", threshold=.00075,
+                      previous_configs=configs)
+    assert "dm.manifest_json - 'dataset' - 'sampling'" in pins_only
+    assert "dm.manifest_json - 'token_budget'" not in pins_only
+
+
+def test_active_competition_defaults_use_60m():
+    import tomllib
+    from pathlib import Path
+
+    from teutonic.competitions import ACTIVE_COMPETITIONS
+
+    config = tomllib.loads((Path(__file__).resolve().parents[2] / 'chain.toml').read_text())
+    for name in ACTIVE_COMPETITIONS:
+        assert config['competitions'][name]['long_document_tokens'] == 60_000_000
+        assert config['competitions'][name]['delta_threshold'] == .00075

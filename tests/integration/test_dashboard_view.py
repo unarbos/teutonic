@@ -259,6 +259,75 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             "model_digest": model_digest,
         }
 
+    def test_live_queue_progress_and_clear_use_existing_views(self):
+        from teutonic.dashboard.live import LiveDashboardRepository, canonical_live_json
+
+        live = LiveDashboardRepository(self.dashboard, netuid=306,
+                                       chain_generation="test", competition="quasar")
+        # The full publisher already holds its lock on this fixture connection.
+        self.assertTrue(live.acquire_lock())
+        duplicate = LiveDashboardRepository(self.owner, netuid=306,
+                                            chain_generation="test", competition="quasar")
+        self.assertFalse(duplicate.acquire_lock())
+        try:
+            self.owner.execute("UPDATE control_plane.uploads SET state='retry_pending' WHERE upload_id=%s",
+                               (self.ids["upload"],))
+            first = live.project(now=NOW)
+            entry = first["competitions"][0]
+            self.assertEqual(entry["key"], "main")
+            self.assertEqual(entry["queue"][0]["state"], "retrying")
+            self.assertEqual(entry["queue"][0]["model_identity"], "hidden_until_promotion")
+            self.assertIsNone(entry["queue"][0]["model_digest"])
+            self.assertIsNone(entry["current_eval"])
+            text = canonical_live_json(first).decode()
+            self.assertNotIn("DO-NOT-LEAK", text)
+            self.assertNotIn("private_diagnostic_reference", text)
+            self.owner.execute("UPDATE control_plane.uploads SET state='evaluating' WHERE upload_id=%s",
+                               (self.ids["upload"],))
+            self.owner.execute(
+                "UPDATE control_plane.evaluations SET state='evaluating', verdict=NULL, "
+                "verdict_summary=NULL, completed_at=NULL, started_at=%s, heartbeat_at=%s, "
+                "lease_expires_at=%s, progress_summary=%s::jsonb WHERE evaluation_id=%s",
+                (NOW, NOW, NOW + timedelta(minutes=5), '{"phase":"reference_scoring","completed_sequences":3,"total":10}',
+                 self.ids["evaluation"]),
+            )
+            second = live.project(now=NOW + timedelta(seconds=5))
+            entry = second["competitions"][0]
+            self.assertEqual(entry["queue"], [])
+            self.assertEqual(entry["current_eval"]["stage"], "reference_scoring")
+            self.assertEqual(entry["current_eval"]["progress"], 3)
+            self.assertGreater(second["source_watermark"], first["source_watermark"])
+            canonical_live_json(second)
+            self.owner.execute("UPDATE control_plane.evaluations SET state='terminal_failure', "
+                               "lease_expires_at=NULL WHERE evaluation_id=%s", (self.ids["evaluation"],))
+            final = live.project(now=NOW + timedelta(seconds=10))
+            self.assertIsNone(final["competitions"][0]["current_eval"])
+            self.assertEqual(final["competitions"][0]["queue"], [])
+            canonical_live_json(final)
+        finally:
+            live.release_lock()
+
+    def test_live_projection_needs_no_history_or_dataset_permissions(self):
+        from teutonic.dashboard.live import LiveDashboardRepository, canonical_live_json
+
+        views = ["dashboard_king_reigns", "dashboard_evaluation_history",
+                 "dashboard_upload_failures", "dashboard_dataset_versions",
+                 "dashboard_dataset_manifests"]
+        for view in views:
+            self.owner.execute(f"REVOKE SELECT ON control_plane.{view} FROM teutonic_dashboard_view")
+        live = LiveDashboardRepository(self.dashboard, netuid=306,
+                                       chain_generation="test", competition="quasar")
+        try:
+            self.assertTrue(live.acquire_lock())
+            canonical_live_json(live.project(now=NOW))
+            with patch("teutonic.dashboard.live.monotonic", side_effect=[0, 6]):
+                with self.assertRaisesRegex(projection.DashboardProjectionError, "deadline"):
+                    live.project(now=NOW)
+        finally:
+            live.release_lock()
+            for view in views:
+                self.owner.execute(f"GRANT SELECT ON control_plane.{view} TO teutonic_dashboard_view")
+
     def test_projection_is_schema_valid_complete_and_secret_free(self):
         payload = self.repository.project(now=NOW)
         body = canonical_dashboard_json(payload)

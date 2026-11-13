@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from collections import Counter
 from contextlib import nullcontext
 from dataclasses import asdict
 from functools import lru_cache
@@ -15,7 +16,8 @@ from pathlib import Path
 from teutonic.evaluation.masking import DOCUMENT_EOS_TOKEN_ID
 from teutonic.evaluation.packed_text import DatasetReader, PackedDataset, digest, read_client
 from teutonic.evaluation.reference_policy import reference_verdict
-from teutonic.evaluator.horizon import REVISION, file_hash
+from teutonic.evaluator.document_progress import DocumentProgress
+from teutonic.evaluator.horizon import REPO, REVISION, file_hash
 from teutonic.evaluator.horizon_pipeline import BACKEND as REFERENCE_BACKEND
 from teutonic.evaluator.horizon_pipeline import MAX_REQUEST_DOCUMENTS, MAX_REQUEST_TOKENS
 from teutonic.evaluator.horizon_pipeline_runtime import HorizonWorker
@@ -92,15 +94,21 @@ def reference_key(doc, tokenizer_hash, code_hash, runtime=None):
                    "dependencies": backend_versions(), "runtime": runtime})
 
 
-def run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase):
-    king_tokenizer = file_hash(Path(king_snapshot) / "tokenizer.json")
-    if king_tokenizer != file_hash(Path(challenger_snapshot) / "tokenizer.json"):
+def validate_tokenizers(king_snapshot, challenger_snapshot):
+    if file_hash(Path(king_snapshot) / "tokenizer.json") != file_hash(Path(challenger_snapshot) / "tokenizer.json"):
         raise ValueError("king/challenger tokenizer mismatch")
+
+
+def run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, *,
+                      prepare_models=None, check_preparation=None):
+    if prepare_models is None:
+        validate_tokenizers(king_snapshot, challenger_snapshot)
     # One selected corpus on local disk: range-fetch once across the two GPU phases.
     # Automatic cleanup also applies when preparation or inference fails.
     with tempfile.TemporaryDirectory(prefix="duel-text-", dir=base._horizon_downloader.root) as cache_dir:
         try:
-            return _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, cache_dir)
+            return _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, cache_dir,
+                                      prepare_models=prepare_models, check_preparation=check_preparation)
         except BaseException:
             # Preserve diagnostic logs, but never retain corpus text after a duel.
             destination = base._horizon_downloader.root / "failed-workers" / Path(cache_dir).name
@@ -110,7 +118,13 @@ def run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase):
             raise
 
 
-def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, cache_dir):
+def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, cache_dir, *,
+                       prepare_models=None, check_preparation=None):
+    def check():
+        if check_preparation is not None:
+            check_preparation()
+
+    check()
     reader = DatasetReader(read_client())
     mix = req.packed_dataset
     dataset = PackedDataset(reader, mix["dataset"], text_cache=cache_dir)
@@ -118,7 +132,10 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
     sampling_started = time.monotonic()
     documents, metadata = sample_documents(dataset, catalog, mix, base.dataset_seed(req))
     metadata["sampling_seconds"] = time.monotonic() - sampling_started
+    progress = DocumentProgress(len(documents), on_phase)
+    on_phase = progress
     on_phase({"phase": "documents_selected", "total": len(documents), "digest": metadata["digest"]})
+    check()
     horizon = base._horizon_downloader.wait_ready(on_phase)
     tokenizer_hash = file_hash(horizon / "tokenizer.json")
     runtime = runtime_identity()
@@ -147,7 +164,11 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
         for doc, key in zip(documents, keys, strict=True):
             if cache.get(key) is None:
                 missing.setdefault(key, doc)
+        key_counts = Counter(keys)
+        reference_done = len(documents) - sum(key_counts[key] for key in missing)
+        progress.reference_scored(reference_done)
         if missing:
+            check()
             on_phase({"phase": "reference_prepare", "missing_documents": len(missing)})
             tok = TextTokenizer(horizon, backend=os.environ.get("TEUTONIC_REFERENCE_TOKENIZER_BACKEND", "gigatoken"))
             key_by_id = {doc.doc_id: key for key, doc in missing.items()}
@@ -157,8 +178,13 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
                 with lease as worker:
                     on_phase({"phase": "reference_scoring", "missing_documents": len(missing)})
                     for group, sequences in reference_batches(dataset, list(missing.values()), tok):
+                        check()
                         for row in worker.score(group, sequences):
-                            cache.put(key_by_id[row["id"]], row["nll"], row["scored_tokens"])
+                            key = key_by_id[row["id"]]
+                            cache.put(key, row["nll"], row["scored_tokens"])
+                            reference_done += key_counts[key]
+                        progress.reference_scored(reference_done)
+                        check()
                     reports["horizon"] = dict(worker.report)
             except BaseException:
                 if resident is not None:
@@ -166,7 +192,9 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
                     if log_path.exists():
                         shutil.copyfile(log_path, Path(cache_dir) / "horizon.log")
                 raise
-        reference = [cache.get(key)[0] for key in keys]
+        reference_scores = [cache.get(key) for key in keys]
+        reference = [score[0] for score in reference_scores]
+        reference_counts = [score[1] for score in reference_scores]
     finally:
         cache.close()
         # Also unload a preloaded Horizon when all reference scores were cached.
@@ -174,10 +202,23 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
             resident.release()
         wait_for_gpu_release(base._gpu_ids)
     metadata["reference_phase_seconds"] = time.monotonic() - reference_started
+    progress.begin_paired()
+    # Horizon has released every GPU. Only now may the verified MiMo snapshots
+    # and their config/tokenizer/duplicate-policy checks open the paired phase.
+    check()
+    preparation_started = time.monotonic()
+    if prepare_models is not None:
+        on_phase({"phase": "waiting_for_models"})
+        king_snapshot, challenger_snapshot = prepare_models()
+        validate_tokenizers(king_snapshot, challenger_snapshot)
+    metadata["model_preparation_wait_seconds"] = time.monotonic() - preparation_started
     tokenizer = TextTokenizer(king_snapshot, eos_token_id=DOCUMENT_EOS_TOKEN_ID,
                               backend=os.environ.get("TEUTONIC_TOKENIZER_BACKEND", "gigatoken"))
     king, challenger, counts = [], [], []
     maximum_length = 0
+    next_checkpoint = 1
+    checkpoint_verdict = None
+    byte_counts = [d.byte_length for d in documents]
     started = time.monotonic()
     with MiMoPool(king_snapshot, challenger_snapshot, base._gpu_ids,
                   cache_dir, runtime, on_phase) as pool:
@@ -189,15 +230,29 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
             king.extend(row["nll"] for row in k)
             challenger.extend(row["nll"] for row in c)
             counts.extend(len(t) - 1 for t in sequences)
-            on_phase({"phase": "paired_scoring", "done": len(king), "total": len(documents)})
+            provisional = {}
+            if len(king) * 10 >= next_checkpoint * len(documents):
+                checkpoint_verdict = reference_verdict(
+                    king, challenger, reference[:len(king)], byte_counts[:len(king)],
+                    bootstrap_seed=req.bootstrap_seed, n_bootstrap=req.n_bootstrap,
+                    alpha=req.alpha, delta_threshold=req.delta_threshold,
+                )
+                provisional = {
+                    "provisional_mu_hat": checkpoint_verdict["mu_hat"],
+                    "provisional_lcb": checkpoint_verdict["lcb"],
+                    "provisional_n_sequences": len(king),
+                    "provisional_n_bootstrap": req.n_bootstrap,
+                }
+                next_checkpoint = len(king) * 10 // len(documents) + 1
+            progress.paired_scored(len(king), provisional)
     reports["mimo_replicas"] = pool.reports
     combined_runtime = {"horizon": reference_runtime, "mimo": runtime}
     workers = {"backend": {"horizon": REFERENCE_BACKEND, "mimo": MIMO_BACKEND}, "runtime": combined_runtime, "roles": reports,
                "model_parallel_strategy": "replicas_with_large_document_tp2",
                "scored_tokens": counts}
-    verdict = reference_verdict(king, challenger, reference, [d.byte_length for d in documents],
-                                bootstrap_seed=req.bootstrap_seed, n_bootstrap=req.n_bootstrap,
-                                alpha=req.alpha, delta_threshold=req.delta_threshold)
+    # The 100% checkpoint uses all selected documents and is the final verdict.
+    # Earlier checkpoints are display-only; they never stop or promote a duel.
+    verdict = checkpoint_verdict
     # Preserve ordinary token-weighted NLL for the historical loss chart.
     # These diagnostics never enter the Horizon-deficit reward/bootstrap.
     verdict.update(avg_king_token_loss=math.fsum(king) / sum(counts),
@@ -207,6 +262,24 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
                     tokenization={"mimo": tokenizer.status(), "horizon": tok.status() if tok else {"cached": True}},
                     text_policy=TEXT_POLICY, max_seq_len=maximum_length, paired_scoring_seconds=time.monotonic()-started)
     verdict["sample_results"] = {"format": "packed-document-losses", "documents": [asdict(d) for d in documents],
+                                 "scoring_policy": verdict["scoring_policy"],
+                                 "sample_filter": verdict["sample_filter"],
+                                 "scoring_included": [k > r or c > r for k, c, r in
+                                                      zip(king, challenger, reference, strict=True)],
                                  "king_nll": king, "challenger_nll": challenger,
-                                 "reference_nll": reference, "scored_tokens": counts}
+                                 "reference_nll": reference, "scored_tokens": counts,
+                                 "reference_scored_tokens": reference_counts,
+                                 "reference_model": {"repository": REPO, "revision": REVISION},
+                                 "units": {"nll": "nats", "token_loss": "nats/token",
+                                           "bits_per_byte": "bits/byte"}}
+    # Keep every column aligned with documents, including repeated text and cache
+    # hits. Each tokenizer has its own scored-token denominator; bytes are shared.
+    samples = verdict["sample_results"]
+    for role, losses, tokens in (("king", king, counts), ("challenger", challenger, counts),
+                                ("reference", reference, reference_counts)):
+        samples[f"{role}_token_loss"] = [loss / count for loss, count in zip(losses, tokens, strict=True)]
+        samples[f"{role}_bits_per_byte"] = [
+            loss / (math.log(2) * doc.byte_length)
+            for loss, doc in zip(losses, documents, strict=True)
+        ]
     return verdict, metadata, workers

@@ -195,7 +195,7 @@ def preview_payloads(established: int, *, rollout: bool = False) -> dict:
                 })
                 if rollout:
                     history[-1].update(
-                        policy_version="horizon-deficit-bpb", loss_unit="bits/byte",
+                        policy_version="horizon-deficit-active-bpb", loss_unit="bits/byte",
                         reward_metric="horizon-deficit-reduction", avg_reference_loss=loss - .05,
                         avg_king_token_loss=loss, avg_challenger_token_loss=loss - .001,
                     )
@@ -256,7 +256,7 @@ def main() -> None:
         "--demo", action="store_true", help="use synthetic activity instead of live public feeds"
     )
     parser.add_argument("--rollout-demo", action="store_true",
-                        help="synthetic four-competition, 35M, packed-text rollout preview")
+                        help="synthetic four-competition, 60M, packed-text rollout preview")
     parser.add_argument("--mix-kings", type=int, choices=range(7), default=2,
                         help="number of MIX kings in the synthetic transition; requires --demo (0–6)")
     args = parser.parse_args()

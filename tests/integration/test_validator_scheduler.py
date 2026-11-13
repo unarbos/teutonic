@@ -45,7 +45,7 @@ def policy(**overrides) -> EvaluationPolicyConfig:
         manifest=manifest,
     )
     values = {
-        "policy_version": "horizon-deficit-bpb",
+        "policy_version": "horizon-deficit-active-bpb",
         "code_version": "phase5-test",
         "dataset_version": "b" * 64,
         "evaluator_version": "document-evaluator-v3",
@@ -87,8 +87,11 @@ def terminal_result(request_payload, *, accepted: bool):
             "mu_hat": request.limits["delta_threshold"] + .0015 if accepted else 0.0,
             "lcb": request.limits["delta_threshold"] + .0005 if accepted else -0.001,
             "delta_threshold": request.limits["delta_threshold"],
-            "scoring_policy": "horizon-deficit-bpb", "loss_unit": "bits/byte",
+            "scoring_policy": "horizon-deficit-active-bpb", "loss_unit": "bits/byte",
             "aggregation": "byte-weighted", "retention_gates": False, "avg_reference_loss": 1.1,
+            "sample_filter": "exclude-both-zero-deficits", "n_sequences": 32,
+            "n_scoring_sequences": 20, "n_skipped_sequences": 12,
+            "scoring_bytes": 2000, "skipped_bytes": 1200,
             "avg_king_loss": 1.2,
             "avg_challenger_loss": 1.197 if accepted else 1.201,
             "wall_time_s": 60.0,
@@ -1677,6 +1680,52 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         finally:
             restarted.release_lock()
             self.repository.acquire_lock()
+
+    def test_active_reference_policy_persists_all_samples_and_filtered_counts(self) -> None:
+        from teutonic.evaluation.reference_policy import reference_verdict
+        from teutonic.evaluation.category_scores import category_scores_from_samples
+        from teutonic.dashboard.projection import _source_scores
+
+        samples = {
+            "format": "packed-document-losses", "scoring_policy": "horizon-deficit-active-bpb",
+            "sample_filter": "exclude-both-zero-deficits",
+            "documents": [{"doc_id": str(i), "dataset": "test", "category": "text", "byte_length": 10}
+                          for i in range(32)],
+            "king_nll": [3.] * 20 + [1.] * 12,
+            "challenger_nll": [4.] * 20 + [2.] * 12,
+            "reference_nll": [2.] * 32,
+            "scoring_included": [True] * 20 + [False] * 12,
+            "scored_tokens": [2] * 32, "reference_scored_tokens": [4] * 32,
+        }
+
+        def result(request):
+            value = terminal_result(request, accepted=False)
+            value.update(reference_verdict(
+                samples['king_nll'], samples['challenger_nll'], samples['reference_nll'], [10] * 32,
+                bootstrap_seed=request['sampling']['bootstrap_seed'],
+                **{key: request['limits'][key] for key in ('n_bootstrap', 'alpha', 'delta_threshold')},
+            ))
+            value['sample_results'] = samples
+            return value
+
+        async def preflight(_request):
+            return None
+
+        scheduler = ValidatorScheduler(self.repository, FakeEvaluator(result), policy=policy(),
+                                       preflight=preflight, clock=lambda: NOW)
+        self.assertTrue(asyncio.run(scheduler.run_once()))
+        state, stored = self.connection.execute(
+            "SELECT state,verdict_summary FROM control_plane.evaluations"
+        ).fetchone()
+        self.assertEqual(state, 'completed')
+        self.assertEqual(stored['sample_results'], samples)
+        self.assertEqual(stored['n_sequences'], 32)
+        self.assertEqual(stored['n_scoring_sequences'], 20)
+        self.assertEqual(stored['n_skipped_sequences'], 12)
+        scores = _source_scores(category_scores_from_samples(stored['sample_results'], {}))
+        self.assertEqual(scores[0]['n_scoring_sequences'], 20)
+        self.assertEqual(scores[0]['scoring_bytes'], 200)
+        self.assertEqual(scores[0]['mu_hat'], round(stored['mu_hat'], 6))
 
     def test_v3_dispatch_persists_bounded_progress_and_one_accepted_verdict(self) -> None:
         evaluator = FakeEvaluator(lambda request: terminal_result(request, accepted=True))

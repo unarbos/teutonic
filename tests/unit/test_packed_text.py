@@ -238,7 +238,8 @@ def verdict(k, c, r, sizes):
 
 def test_deficit_reward_and_no_retention_veto():
     result = verdict([.7, 1.3], [.95, 1.1], [1., 1.], [10, 100])
-    assert result["mu_hat"] == pytest.approx(.2*100/110)
+    assert result["mu_hat"] == pytest.approx(.2)
+    assert result["n_skipped_sequences"] == 1
     assert not result["retention_gates"]
     assert verdict([1.3]*10, [.8]*10, [1.]*10, [100]*10)["mu_hat"] == pytest.approx(.3)
     assert verdict([.9], [1.1], [1.], [100])["mu_hat"] == pytest.approx(-.1)

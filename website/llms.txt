@@ -122,7 +122,7 @@ before proceeding.
    weights may differ.
 4. The packed-text rollout scores the same complete documents with Horizon,
    king and challenger. Horizon uses vLLM TP8/EP first; king and challenger
-   then run concurrently as TP4/EP engines. The rollout budget is 35M original
+   then run concurrently as TP4/EP engines. The rollout budget is 60M original
    MiMo tokens, allocated 40/60 between 2–4096 and 4097–16384-token documents.
    Active published configuration remains authoritative during cutover.
    There are no sampled windows or early stopping.
@@ -134,9 +134,13 @@ before proceeding.
    Reward is `king_deficit - challenger_deficit`, weighted by canonical UTF-8 bytes.
    Improvements after reaching Horizon parity earn no extra reward. A regression
    that stays at or better than Horizon is neutral; new or enlarged deficits hurt.
+   Under horizon-deficit-active-bpb, documents with two zero deficits are excluded
+   from both the reward denominator and bootstrap. Remaining documents retain byte
+   weighting. Equal positive deficits remain included. An empty eligible population
+   has zero mean and LCB, so the king stays. All sampled losses are still saved.
    A paired whole-document bootstrap uses 10,000 draws, alpha=0.001 and seed 0.
    Promotion requires its lower confidence bound to be strictly greater than the
-   configured bits/byte threshold (rollout setting: 0.0015). Equality does not pass.
+   configured bits/byte threshold (rollout setting: 0.00075). Equality does not pass.
    There are no additional raw-loss, source or category retention gates.
 
 7. On accept, you are crowned: the dashboard updates, your model is
@@ -156,7 +160,7 @@ reserves MIX01–MIX99; MIX02/03/04/05 are retired. MATH, CODE and
 TEXT are retired: their histories remain readable, but they accept no new submissions.
 
 Each mix is an explicit flat list of unique categories. The same sampler uses
-its category weights as targets for the 35M original-MiMo-token document budget; they are not fixed contributions to the final score. MAIN contains 24
+its category weights as targets for the 60M original-MiMo-token document budget; they are not fixed contributions to the final score. MAIN contains 24
 categories, proportional to token inventory. MIX06 contains all 25, adding
 `dclm-baseline-1.0` as one category. Follow each MIX's published category list
 and percentages rather than expanding retired competition names. MIX02 has no
@@ -213,7 +217,7 @@ The validated backend is vLLM 0.33.0, BF16, V1 runner, batch invariance enabled,
 eager execution and no prefix caching. MiMo uses the shared-expert adapter,
 TRITON_ATTN_DIFFKV and fused grouped top-k disabled. Exact repeatability was checked
 on the pinned B300 stack; it is not a promise across arbitrary hardware or versions.
-35M tokens targets 14M short and 21M long original MiMo input tokens. Whole-document
+60M tokens targets 24M short and 36M long original MiMo input tokens. Whole-document
 boundaries may slightly exceed quotas, and each model has different native counts.
 
 ## 4. Zero to registered miner
@@ -366,7 +370,7 @@ teutonic-miner ready --hotkey h0 --competition MIX01
 1. START FROM THE KING. Download the current king from the public model
    bucket (section 2) at its pinned digest for your selected competition.
    Your challenger's byte-weighted Horizon-deficit reduction must have an LCB
-   strictly above the competition's bits/byte threshold (rollout setting 0.0015).
+   strictly above the competition's bits/byte threshold (rollout setting 0.00075).
    For a kingless MIX, use its fixed `starting_king` from competitions.json.
 2. MATCH THE EVAL DISTRIBUTION. Use the selected category weights and complete
    documents, retaining independent document contexts and native tokenizer/EOS rules.
@@ -530,8 +534,8 @@ the coldkey.
 - document indexes: use the authenticated packed-data pins in the exact request
 - king download: https://pub-0821d4e196224864af220294345fd141.r2.dev/models/sha256/<king_digest>/
 - accept rule: paired-bootstrap LCB of byte-weighted Horizon-deficit reduction
-  exceeds the competition's threshold in bits/byte (rollout setting 0.0015)
-- sample: 35M original MiMo tokens in whole documents, 40/60 short/long quotas;
+  exceeds the competition's threshold in bits/byte (rollout setting 0.00075)
+- sample: 60M original MiMo tokens in whole documents, 40/60 short/long quotas;
   alpha=0.001, B=10000, bootstrap seed 0; no windows or early stopping
 - competitions: MAIN, MIX01, MIX06 and MIX07 after cutover; MIX07 is 100% DCLM;
   MIX02/03/04/05 are retired, with history preserved.

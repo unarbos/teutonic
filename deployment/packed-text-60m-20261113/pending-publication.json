@@ -1,0 +1,32 @@
+[
+  {
+    "local": "sampling.json",
+    "key": "teutonic-text/sampling/0530605e7d6e54d2d00a7d6713f36cf959e42fbd78df32ee1d8aea1f9be60ed4/manifest.json",
+    "bucket": "dataset",
+    "sha256": "0530605e7d6e54d2d00a7d6713f36cf959e42fbd78df32ee1d8aea1f9be60ed4"
+  },
+  {
+    "local": "main.json",
+    "bucket": "dataset",
+    "key": "teutonic-text/splits/main/7927fddc6a4fc5f06bd5897a7621cfbbf9d0df6bd9bed698ba8fbfeaad191368.json",
+    "sha256": "7927fddc6a4fc5f06bd5897a7621cfbbf9d0df6bd9bed698ba8fbfeaad191368"
+  },
+  {
+    "local": "mix01.json",
+    "bucket": "dataset",
+    "key": "teutonic-text/splits/mix01/a353bba6159413775e029c6e066115119451c10ceb670234fc27ff5841e8745b.json",
+    "sha256": "a353bba6159413775e029c6e066115119451c10ceb670234fc27ff5841e8745b"
+  },
+  {
+    "local": "mix06.json",
+    "bucket": "dataset",
+    "key": "teutonic-text/splits/mix06/66ecfefe702328777f3c2c79baff6ff18de0759158f4cb86ee640f8d4313fb85.json",
+    "sha256": "66ecfefe702328777f3c2c79baff6ff18de0759158f4cb86ee640f8d4313fb85"
+  },
+  {
+    "local": "mix07.json",
+    "bucket": "dataset",
+    "key": "teutonic-text/splits/mix07/24cd6fe1e3576e5d595eaf7efb65ca4be5bfb2fbed80f42df035fefe15ac5e94.json",
+    "sha256": "24cd6fe1e3576e5d595eaf7efb65ca4be5bfb2fbed80f42df035fefe15ac5e94"
+  }
+]

@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 
 from teutonic.evaluation.category_scores import category_scores_from_samples
 from teutonic.evaluation.packed_text import MIX_FORMAT, validate_mix
+from teutonic.evaluation.reference_policy import LEGACY_POLICY_VERSION, POLICY_VERSION
 
 DASHBOARD_LOCK_ID = 6_082_759_349_011_801
 
@@ -147,6 +148,9 @@ def _source_scores(value: Any) -> list[dict[str, Any]]:
         if raw_score.get("loss_unit") == "bits/byte":
             scores[-1].update(loss_unit="bits/byte", n_bytes=_int(raw_score.get("n_bytes")),
                               avg_reference_loss=_float(raw_score.get("avg_reference_loss")))
+            for key in ("n_scoring_sequences", "n_skipped_sequences", "scoring_bytes", "skipped_bytes"):
+                if key in raw_score:
+                    scores[-1][key] = _int(raw_score[key])
     return scores
 
 
@@ -365,6 +369,8 @@ def _scope_sql(view: str) -> str:
 class DashboardProjectionRepository:
     """Read a complete public projection using only the granted dashboard views."""
 
+    lock_id = DASHBOARD_LOCK_ID
+
     def __init__(
         self,
         connection,
@@ -391,14 +397,14 @@ class DashboardProjectionRepository:
     def acquire_lock(self) -> bool:
         self._lock_held = bool(
             self.connection.execute(
-                "SELECT pg_try_advisory_lock(%s)", (DASHBOARD_LOCK_ID,)
+                "SELECT pg_try_advisory_lock(%s)", (self.lock_id,)
             ).fetchone()[0]
         )
         return self._lock_held
 
     def release_lock(self) -> None:
         if self._lock_held:
-            self.connection.execute("SELECT pg_advisory_unlock(%s)", (DASHBOARD_LOCK_ID,))
+            self.connection.execute("SELECT pg_advisory_unlock(%s)", (self.lock_id,))
             self._lock_held = False
 
     def competition_scope(self, competition: str) -> DashboardProjectionRepository:
@@ -750,8 +756,8 @@ class DashboardProjectionRepository:
             "error_code": error_code,
             "error_message": PUBLIC_ERROR_MESSAGES.get(error_code) if error_code else None,
             "policy_version": row["policy_version"],
-            "loss_unit": "bits/byte" if row["policy_version"] == "horizon-deficit-bpb" else "nats/token",
-            "reward_metric": "horizon-deficit-reduction" if row["policy_version"] == "horizon-deficit-bpb" else "raw-loss-reduction",
+            "loss_unit": "bits/byte" if row["policy_version"] in {LEGACY_POLICY_VERSION, POLICY_VERSION} else "nats/token",
+            "reward_metric": "horizon-deficit-reduction" if row["policy_version"] in {LEGACY_POLICY_VERSION, POLICY_VERSION} else "raw-loss-reduction",
             "avg_reference_loss": _float(row.get("avg_reference_loss")),
             "avg_king_token_loss": _float(row.get("avg_king_token_loss")),
             "avg_challenger_token_loss": _float(row.get("avg_challenger_token_loss")),

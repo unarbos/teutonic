@@ -44,6 +44,9 @@ def runtime_identity():
 
 
 class HorizonWorker(Worker):
+    def __init__(self, *args, load_timeout=1200, **kwargs):
+        super().__init__(*args, load_timeout=load_timeout, **kwargs)
+
     def _settings(self, role, gpu_ids, max_model_len):
         if role != "horizon" or len(gpu_ids) != 8 or len(set(gpu_ids)) != 8 or max_model_len is not None:
             raise ValueError("Horizon pipeline requires eight distinct GPUs and its pinned context")

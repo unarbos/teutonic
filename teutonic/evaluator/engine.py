@@ -2198,40 +2198,47 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV3) -> None:
     t0 = time.time()
     started_at = datetime.now(UTC).isoformat()
 
+    downloads = None
+    progress_lock = threading.RLock()
+
     def on_phase(info: dict):
-        previous = record.progress or {}
-        normalized = dict(info)
-        completed = normalized.pop(
-            "done",
-            normalized.get("completed_sequences", previous.get("completed_sequences", 0)),
-        )
-        requested = normalized.pop(
-            "total",
-            normalized.get(
-                "requested_sequences",
-                previous.get("requested_sequences", 0),
-            ),
-        )
-        completed = max(0, int(completed))
-        requested = max(0, int(requested))
-        normalized["completed_sequences"] = completed
-        normalized["requested_sequences"] = requested
-        normalized["percent"] = round(
-            (100.0 * completed / requested) if requested else 0.0,
-            4,
-        )
-        normalized["elapsed_seconds"] = round(max(time.time() - t0, 0.0), 1)
-        normalized["early_stopped"] = bool(normalized.get("early_stopped", False))
-        record.progress = normalized
-        events.put(record.event("progress", normalized))
+        with progress_lock:
+            previous = record.progress or {}
+            normalized = dict(info)
+            completed = normalized.pop(
+                "done",
+                normalized.get("completed_sequences", previous.get("completed_sequences", 0)),
+            )
+            requested = normalized.pop(
+                "total",
+                normalized.get(
+                    "requested_sequences",
+                    previous.get("requested_sequences", 0),
+                ),
+            )
+            completed = max(0, int(completed))
+            requested = max(0, int(requested))
+            normalized["completed_sequences"] = completed
+            normalized["requested_sequences"] = requested
+            normalized["percent"] = round(
+                float(normalized.get("percent", (100.0 * completed / requested) if requested else 0.0)),
+                4,
+            )
+            normalized["elapsed_seconds"] = round(max(time.time() - t0, 0.0), 1)
+            normalized["early_stopped"] = bool(normalized.get("early_stopped", False))
+            if downloads is not None:
+                normalized["model_downloads"] = downloads.status()
+            record.progress = normalized
+            events.put(record.event("progress", normalized))
 
     heartbeat_stop = threading.Event()
 
     def heartbeat_loop():
         while not heartbeat_stop.wait(30):
-            current = dict(record.progress or {})
-            current["heartbeat_at"] = time.time()
-            on_phase(current or {"phase": "heartbeat"})
+            with progress_lock:
+                current = dict(record.progress or {})
+                current["heartbeat_at"] = time.time()
+                on_phase(current or {"phase": "heartbeat"})
 
     threading.Thread(target=heartbeat_loop, daemon=True, name=f"heartbeat-{eval_id}").start()
 
@@ -2240,69 +2247,90 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV3) -> None:
         on_phase({"phase": "setup_start"})
         cache_locks.enter_context(cache_lock(MODEL_CACHE_DIR))
         cache_locks.enter_context(cache_lock(SHARD_CACHE_DIR))
-        resolver = R2ArtifactResolver(MODEL_CACHE_DIR / "immutable-r2")
-        on_phase({"phase": "artifact_materialization_start", "role": "king"})
-        king_snapshot = resolver.resolve(protocol_request.king)
-        on_phase({
-            "phase": "artifact_materialization_verified",
-            "role": "king",
-            "digest": protocol_request.king.expected_digest,
-        })
-        on_phase({"phase": "artifact_materialization_start", "role": "challenger"})
-        challenger_snapshot = resolver.resolve(protocol_request.challenger)
-        on_phase({
-            "phase": "artifact_materialization_verified",
-            "role": "challenger",
-            "digest": protocol_request.challenger.expected_digest,
-        })
-        req = internal_request_from_v3(protocol_request, king_snapshot, challenger_snapshot)
+        from teutonic.evaluator.document_duel import run_document_duel
+        from teutonic.evaluator.model_downloads import ModelDownloads
+
+        # Sampling and Horizon depend only on the pinned dataset/request, not on
+        # MiMo weights. All checkpoint downloads remain inside the cache locks.
+        req = internal_request_from_v3(protocol_request, "", "")
         limits_meta = apply_eval_limits(req, eval_id)
         on_phase({"phase": "limits_applied", **limits_meta})
-        check_eval_runtime(t0)
-        king_snapshot = materialize_model(req.king_repo, req.king_digest, on_phase=on_phase)
-        check_eval_runtime(t0)
-        challenger_snapshot = materialize_model(req.challenger_repo, req.challenger_digest, on_phase=on_phase)
-        check_eval_runtime(t0)
-        duplicate_meta = reject_duplicate_safetensors(king_snapshot, challenger_snapshot, on_phase=on_phase)
-        local_challenger_digest = duplicate_meta["challenger_safetensors_sha256"]
-        duplicate_meta.update(
-            reject_reused_safetensors(local_challenger_digest, on_phase=on_phase)
+        resolver = R2ArtifactResolver(MODEL_CACHE_DIR / "immutable-r2")
+        downloads = cache_locks.enter_context(
+            ModelDownloads(resolver, protocol_request.king, protocol_request.challenger)
         )
-        check_eval_runtime(t0)
-        king_config, king_artifacts = load_model_config(king_snapshot, req, "king", on_phase=on_phase)
-        challenger_config, challenger_artifacts = load_model_config(
-            challenger_snapshot,
-            req,
-            "challenger",
-            on_phase=on_phase,
-        )
-        check_eval_runtime(t0)
-        config_mismatches = compare_model_configs(king_config, challenger_config)
-        if config_mismatches:
-            raise RuntimeError(f"king/challenger config mismatch: {config_mismatches[:8]}")
-        req.max_document_tokens = min(int(king_config.max_position_embeddings), int(challenger_config.max_position_embeddings))
-        req.vocab_size = int(config_value(king_config, "vocab_size") or 0)
-        if req.vocab_size <= 0:
-            raise RuntimeError("model config must define a positive vocab_size")
-        attention_meta = {
-            "king": validate_and_report_attention_config(
-                king_config,
-                "king",
-                on_phase=on_phase,
-            ),
-            "challenger": validate_and_report_attention_config(
-                challenger_config,
+        prepared = {}
+
+        def check_preparation():
+            check_eval_runtime(t0)
+            downloads.check()
+
+        def prepare_models():
+            waiting = time.monotonic()
+            snapshots = downloads.result()
+            prepared["model_download_wait_seconds"] = time.monotonic() - waiting
+            validation_started = time.monotonic()
+            king_snapshot, challenger_snapshot = snapshots["king"], snapshots["challenger"]
+            req.king_repo, req.challenger_repo = str(king_snapshot), str(challenger_snapshot)
+            check_eval_runtime(t0)
+            king_snapshot = materialize_model(req.king_repo, req.king_digest, on_phase=on_phase)
+            check_eval_runtime(t0)
+            challenger_snapshot = materialize_model(req.challenger_repo, req.challenger_digest, on_phase=on_phase)
+            check_eval_runtime(t0)
+            duplicate_meta = reject_duplicate_safetensors(king_snapshot, challenger_snapshot, on_phase=on_phase)
+            local_challenger_digest = duplicate_meta["challenger_safetensors_sha256"]
+            duplicate_meta.update(
+                reject_reused_safetensors(local_challenger_digest, on_phase=on_phase)
+            )
+            check_eval_runtime(t0)
+            king_config, king_artifacts = load_model_config(king_snapshot, req, "king", on_phase=on_phase)
+            challenger_config, challenger_artifacts = load_model_config(
+                challenger_snapshot,
+                req,
                 "challenger",
                 on_phase=on_phase,
-            ),
-        }
-        attention_meta = {role: {"checkpoint_validation": report,
-                                 "scoring_backend": "TRITON_ATTN_DIFFKV"}
-                          for role, report in attention_meta.items()}
+            )
+            check_eval_runtime(t0)
+            config_mismatches = compare_model_configs(king_config, challenger_config)
+            if config_mismatches:
+                raise RuntimeError(f"king/challenger config mismatch: {config_mismatches[:8]}")
+            req.max_document_tokens = min(int(king_config.max_position_embeddings), int(challenger_config.max_position_embeddings))
+            req.vocab_size = int(config_value(king_config, "vocab_size") or 0)
+            if req.vocab_size <= 0:
+                raise RuntimeError("model config must define a positive vocab_size")
+            attention_meta = {
+                "king": validate_and_report_attention_config(
+                    king_config,
+                    "king",
+                    on_phase=on_phase,
+                ),
+                "challenger": validate_and_report_attention_config(
+                    challenger_config,
+                    "challenger",
+                    on_phase=on_phase,
+                ),
+            }
+            attention_meta = {role: {"checkpoint_validation": report,
+                                     "scoring_backend": "TRITON_ATTN_DIFFKV"}
+                              for role, report in attention_meta.items()}
 
-        from teutonic.evaluator.document_duel import run_document_duel
+            prepared.update(king_snapshot=king_snapshot, challenger_snapshot=challenger_snapshot,
+                            king_artifacts=king_artifacts, challenger_artifacts=challenger_artifacts,
+                            duplicate_meta=duplicate_meta, attention_meta=attention_meta,
+                            model_validation_seconds=time.monotonic() - validation_started)
+            return king_snapshot, challenger_snapshot
+
         verdict, public_dataset_meta, worker_meta = run_document_duel(
-            sys.modules[__name__], req, king_snapshot, challenger_snapshot, on_phase,
+            sys.modules[__name__], req, None, None, on_phase,
+            prepare_models=prepare_models, check_preparation=check_preparation,
+        )
+        king_snapshot, challenger_snapshot = prepared["king_snapshot"], prepared["challenger_snapshot"]
+        king_artifacts, challenger_artifacts = prepared["king_artifacts"], prepared["challenger_artifacts"]
+        duplicate_meta, attention_meta = prepared["duplicate_meta"], prepared["attention_meta"]
+        public_dataset_meta.update(
+            model_download_seconds=downloads.elapsed_seconds,
+            model_download_wait_seconds=prepared["model_download_wait_seconds"],
+            model_validation_seconds=prepared["model_validation_seconds"],
         )
         worker_specs = model_worker_specs(_gpu_ids)
         king_device = "|".join(f"cuda:{gpu}" for gpu in _gpu_ids[:4])

@@ -191,21 +191,32 @@ def test_evaluator_locks_caches_before_resolution_and_releases_on_failure(tmp_pa
 
     from teutonic.evaluator.document_index import DocumentIndexDownloadError, RangeDownloadError
 
+    from teutonic.evaluator import document_duel
+    import sys
+
+    def failed_duel(*args, prepare_models, **kwargs):
+        prepare_models()
+        raise AssertionError("failed download reached scoring")
+
+    monkeypatch.setattr(document_duel, "run_document_duel", failed_duel)
     namespace = {
         "EvaluationRequestV3": object, "ExitStack": ExitStack, "cache_lock": cache_lock,
         "document_index_cache_dir": document_index_cache_dir,
         "_attempts": SimpleNamespace(get=lambda _: record), "_eval_lock": Mock(), "_idle_horizon": None,
         "MODEL_CACHE_DIR": model_cache, "SHARD_CACHE_DIR": shard_cache,
         "time": time, "datetime": datetime, "timezone": timezone, "UTC": UTC,
-        "threading": SimpleNamespace(Event=threading.Event, Thread=Mock()),
+        "threading": SimpleNamespace(Event=threading.Event, RLock=threading.RLock, Thread=Mock()),
         "R2ArtifactResolver": lambda _: SimpleNamespace(resolve=resolve), "log": Mock(),
         "SafetensorsReuseLimitError": type("SafetensorsReuseLimitError", (RuntimeError,), {}),
         "DocumentIndexDownloadError": DocumentIndexDownloadError, "subprocess": subprocess,
         "RangeDownloadError": RangeDownloadError,
         "cleanup_model_cache": Mock(side_effect=cleanup),
+        "internal_request_from_v3": lambda *args: SimpleNamespace(),
+        "apply_eval_limits": lambda *args: {}, "sys": sys,
+        "check_eval_runtime": lambda *args: None,
     }
     engine_function("run_eval", namespace)(
-        "fixture", SimpleNamespace(limits={"n": 30000}, king=object()),
+        "fixture", SimpleNamespace(limits={"n": 30000}, king=object(), challenger=object()),
     )
     assert record.state == "failed"
     assert record.error == "fixture resolution failure"

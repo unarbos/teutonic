@@ -402,6 +402,8 @@ assert.strictEqual(mixedUnits.points[1].avg_king_loss, 1.9);
 assert.strictEqual(dashboard.lossUnit({}), "nats/token");
 assert.strictEqual(dashboard.lossUnit({policy_version:"token-weighted-observed-quantile-v1"}), "nats/token");
 assert.strictEqual(dashboard.lossUnit({policy_version:"horizon-deficit-bpb"}), "bits/byte");
+assert.strictEqual(dashboard.lossUnit({policy_version:"horizon-deficit-active-bpb"}), "bits/byte");
+assert.match(dashboard.decisionPresentation({accepted:true, policy_version:"horizon-deficit-active-bpb"}).detail, /excluded from the reward and bootstrap/);
 assert.match(dashboard.decisionPresentation({accepted:true, policy_version:"horizon-deficit-bpb"}).detail, /Horizon/);
 const packedCategory = dashboard.categoryScoresPresentation({category_scores:[{
     source:"codeio",n_sequences:2,avg_king_loss:.4,avg_challenger_loss:.39,mu_hat:.002,avg_reference_loss:.3

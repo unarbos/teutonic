@@ -11,7 +11,7 @@ The evaluator update samples complete UTF-8 documents deterministically from
 packed text and byte-offset indexes. Each model scores the same text with its
 native tokenizer. Reward measures improvement in the byte-weighted loss deficit
 against the pinned Horizon reference; ordinary token loss remains available for
-historical charts. The default sampling budget is 35M original MiMo tokens.
+historical charts. The default sampling budget is 60M original MiMo tokens.
 
 Horizon uses a deterministic eight-GPU layer pipeline, followed by four MiMo king
 and four challenger vLLM replicas. Large MiMo documents use two-GPU groups.
@@ -170,10 +170,14 @@ For the new rollout, miners can select `MAIN`, `MIX01`, `MIX06` or `MIX07` with
 selects MAIN. One ready submission per hotkey is shared across all competitions.
 The allocation is MAIN **40%**, MIX01/MIX06/MIX07 **20% each**. MIX02/03/05 retire
 at cutover and MIX04 stays retired; models and historical results are retained.
-Each competition uses its existing category weights and a **35M original MiMo-token**
+Each competition uses its existing category weights and a **60M original MiMo-token**
 whole-document budget. Acceptance uses a byte-weighted bootstrap LCB for reduction
 in loss above the fixed Horizon reference, in bits/byte. PostgreSQL holds the live
-configuration; repository defaults take effect only after approved migration.
+configuration. Documents where both king and challenger match or beat Horizon
+are excluded from the reward denominator and bootstrap; all sample losses are
+still recorded. If every document is excluded, the king stays. The prepared policy
+ID is `horizon-deficit-active-bpb`. Repository defaults take effect only after an
+approved rollout.
 Each MIX challenges its own current king. Historical starting kings remain pinned
 and are published as `starting_king` in `competitions.json`.
 

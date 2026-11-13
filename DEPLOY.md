@@ -4,6 +4,25 @@ This runbook describes the production two-host deployment and the order used to
 start a new competition. Run commands from the repository root unless stated
 otherwise.
 
+## Prepared 13 November update: 60M and active-document scoring
+
+The current local update selects **60M original MiMo tokens** for MAIN, MIX01,
+MIX06 and MIX07, with threshold **0.00075 bits/byte**. The live configurations
+read on 13 November still use 35M. Nothing in this preparation changes them.
+
+Use [`deployment/packed-text-60m-20261113/`](deployment/packed-text-60m-20261113/README.md)
+for this update. It contains four immutable 60M manifests, exact previous config
+versions and guarded budget-only SQL. Publish and verify these manifests after
+approval, then back up the database and apply the SQL with claimers stopped and
+active work drained. Preserve current dataset/catalog pins and category weights.
+Deploy matching validator/evaluator code with policy
+`horizon-deficit-active-bpb` on both hosts. The policy excludes documents where
+both deficits are zero from reward/LCB, while retaining every sample's diagnostics.
+The 60M sampling budget is measured before filtering; there is no replacement
+sampling. No schema migration is needed; the budget requires configuration row
+updates. The original 12 November 35M cutover below is historical, not the SQL to
+apply for this update.
+
 ## Host layout
 
 | Host | Service | PM2 name or command | Purpose |
@@ -14,6 +33,7 @@ otherwise.
 | Validator/control host | Validator scheduler | `teutonic-validator` | Evaluation queue and verdict persistence |
 | Validator/control host | Promotion worker | `teutonic-promotion-worker` | Private-to-public model promotion and crowning |
 | Validator/control host | Weight publisher | `teutonic-weight-publisher` | Durable on-chain weight publication |
+| Validator/control host | Live queue/progress publisher | `teutonic-dashboard-live` | Independent `dashboard-live.json` every 5 seconds |
 | Validator/control host | Dashboard publisher | `teutonic-dashboard-view` | Sanitized `dashboard.json` publication |
 | Remote GPU host | Evaluator | `teutonic-evaluator` | Model download and paired-loss evaluation |
 | Remote GPU host | Model cleanup | `teutonic-model-cache-cleanup` | Scheduled GPU model-cache cleanup |
@@ -200,7 +220,12 @@ storage.
 
 ### Packed-text evaluation with Horizon
 
-The current code uses `teutonic-evaluator-v3` and policy `horizon-deficit-bpb`.
+The prepared update uses `teutonic-evaluator-v3` and policy `horizon-deficit-active-bpb`.
+Set `TEUTONIC_EVALUATION_POLICY_VERSION=horizon-deficit-active-bpb` on both
+validator and GPU hosts when deploying this update, after the current evaluation
+has finished. The validator and evaluator reject the previous policy ID for new
+evaluations; historical `horizon-deficit-bpb` results remain readable. This policy
+change requires no SQL migration, new dataset or inference-cache invalidation.
 Deploy the validator and evaluator together after the new manifests and PostgreSQL
 configuration are ready. This local implementation does **not** activate itself
 against the previous configuration: the validator rejects legacy active settings.
@@ -209,7 +234,7 @@ hash-verified on 12 November 2026. Their small manifests, exact publication pins
 release scope and staged SQL are in
 [`deployment/packed-text-20261112/`](deployment/packed-text-20261112/).
 The 192 MB sampling catalog remains in R2; it is not checked into the repository.
-No production database cutover or service deployment has been performed.
+Those artifacts describe the initial 35M release; use the prepared 60M update above for the next deployment.
 
 The corrected 7M MIX06 full flow passed on 12 November 2026: 2,563 documents
 across all 25 categories, four king and four challenger TP1 replicas, and successful
@@ -233,7 +258,8 @@ reference losses were cached. After evaluation cleanup, Horizon reloads in the
 background for the next duel. The verdict does not wait for this reload; a new duel
 arriving before loading finishes waits when it reaches reference scoring.
 `/health` reports GPU readiness under `horizon_gpu`, separately from checkpoint
-verification under `horizon_download`. Failed preloads are reported there and
+verification under `horizon_download`. Horizon worker loading has a 20-minute
+timeout, including startup and post-evaluation preloads. Failed preloads are reported there and
 retried when a duel needs the reference. Shutdown prevents further preloads and
 closes the resident worker. Current and preceding load logs live under
 `TEUTONIC_HORIZON_CACHE_DIR/gpu-worker/`. This lifecycle passed the corrected 7M
@@ -244,7 +270,7 @@ text scratch space, and normal download overhead. Use a persistent NVMe path:
 
 ```dotenv
 TEUTONIC_HORIZON_CACHE_DIR=/path/to/persistent/horizon
-TEUTONIC_EVALUATION_POLICY_VERSION=horizon-deficit-bpb
+TEUTONIC_EVALUATION_POLICY_VERSION=horizon-deficit-active-bpb
 TEUTONIC_EVALUATOR_VERSION=document-evaluator-v3
 TEUTONIC_TOKENIZER_BACKEND=gigatoken
 TEUTONIC_REFERENCE_TOKENIZER_BACKEND=gigatoken
@@ -267,12 +293,37 @@ the `evaluator` and `vllm-worker` extras in one environment. The control process
 retains its existing Transformers/tokenizer environment. On the target B300 host:
 
 ```bash
+sudo apt-get install --no-install-recommends build-essential python3.12-dev
 python3.12 -m venv .venv-vllm
 .venv-vllm/bin/python -m pip install --upgrade pip
 .venv-vllm/bin/python -m pip install 'torch==2.14.0' --index-url https://download.pytorch.org/whl/cu130
 .venv-vllm/bin/python -m pip install -e '.[vllm-worker]'
 .venv-vllm/bin/python -m pip check
 .venv-vllm/bin/python -m teutonic.evaluator.vllm_score --identity
+```
+
+Triton compiles a CUDA helper during engine initialization and needs the development
+headers matching the worker's Python interpreter (`Python.h`). Test environments
+may supply private headers through `CPATH` or reuse compiled helpers; neither proves
+that a fresh production environment can compile. Check with an empty cache before
+accepting submissions; this does not load a model:
+
+```bash
+.venv-vllm/bin/python - <<'PY'
+import os
+import subprocess
+import sys
+import tempfile
+
+with tempfile.TemporaryDirectory(prefix="teutonic-triton-preflight-") as cache:
+    subprocess.run(
+        [sys.executable, "-c",
+         "from triton.backends.nvidia.driver import CudaUtils; CudaUtils(); print('Triton compilation OK')"],
+        env={**os.environ, "TRITON_CACHE_DIR": cache},
+        check=True,
+        timeout=90,
+    )
+PY
 ```
 
 The extra installs the `teutonic_mimo` vLLM plugin for shared experts; do not use
@@ -315,7 +366,7 @@ Dataset reads require authenticated R2 access to **`dataset`**, under
 Optional session-token credentials are supported. The evaluator never reads the
 old `datasets` bucket. Preserve that bucket and all existing objects unchanged.
 
-For this release, use the already-published artifacts and staged
+For the historical initial 12 November release, the already-published artifacts and staged
 [`cutover.sql`](deployment/packed-text-20261112/cutover.sql). It targets netuid 3,
 generation `teutonic-II-110B-hf-8f971f030f5d801f812540007b396058f69cc08a`,
 MAIN/MIX01/MIX06/MIX07, the expected previous 70M budget, and a new 35M budget with
@@ -352,8 +403,9 @@ Both commands write local files only. The first reads dataset metadata/ranges;
 the second has no database connection. Review `pending-publication.json` and the
 SQL before the separately approved publication/cutover. SQL guards preserve active
 category weights, source mappings, and competition identities, and explicitly
-guard the approved budget change from 70M to 35M. Repository defaults now select
-35,000,000 original MiMo input tokens; live PostgreSQL is unchanged until cutover. The old
+guard the historical budget change from 70M to 35M. Repository defaults now select
+60,000,000 original MiMo input tokens; use the new budget-only bundle above to update
+the live 35M configuration. The old
 `n=0` and `long_documents` database columns are compatibility storage, not a legacy
 runtime path. `chain.toml` category definitions supply initialization data; the
 active PostgreSQL configuration is authoritative and SQL rejects mismatches.
@@ -437,7 +489,7 @@ rollback with services stopped; do not use historical MIX activation commands be
 
 The sampling catalog supplies eligible row intervals in each length-sorted index
 partition. Selection is uniform over documents across unequal partitions and
-reproducible from the pinned manifests and seed. Use the selected 35M original-MiMo-token
+reproducible from the pinned manifests and seed. Use the selected 60M original-MiMo-token
 budget, preserving category weights and the 40/60 split between lengths 2–4096 and
 4097–16384 (approximately 14M and 21M tokens).
 Fetch selected UTF-8 byte ranges and verify their byte counts/hashes. Category index
@@ -452,6 +504,27 @@ Score targets after the first token, including EOS. Original MiMo counts govern
 sampling only; actual context lengths are checked separately. Never truncate or
 replace an over-limit document. Each document remains isolated even if its text
 contains an embedded special token. Canonical UTF-8 bytes are the bits/byte denominator.
+
+Checkpoint downloads overlap dataset preparation and Horizon scoring. The evaluator
+starts a CPU/network-only background task for the king and challenger R2 snapshots
+(king then challenger; each transfer retains its existing file concurrency).
+Horizon uses its own tokenizer and the pinned text sample, so it does not wait for
+MiMo weights. MiMo GPU loading still waits for both verified snapshots, all existing
+config/tokenizer/duplicate/reuse checks, and Horizon GPU cleanup.
+
+Download failures are checked between reference batches. On a reference failure,
+the evaluator joins the in-flight download before releasing cache locks or running
+cleanup; it skips starting the next role's download. Completed reference scores
+remain reusable under their existing cache identity. Sampling, tokenization, loss
+calculation and the reward threshold are unchanged.
+
+Result dataset metadata reports `model_download_seconds` (the overlapping task),
+`model_download_wait_seconds` (download time still remaining after Horizon),
+`model_validation_seconds`, and `model_preparation_wait_seconds` (the full gate
+before MiMo). These overlap with `reference_phase_seconds` and must not all be
+summed as sequential phases. Progress events include per-role `model_downloads`
+states. Hardware throughput and total wall-time savings require a GPU acceptance
+run; local tests verify ordering, cached-reference behavior and failure cleanup.
 
 Reference cache misses use the deterministic Horizon layer pipeline across eight
 GPUs, with layer counts `[8,8,8,8,8,9,9,3]`. Its micro-batches have a 131,072 padded
@@ -474,6 +547,57 @@ Each phase streams bounded batches of up to 128 documents while preparing the ne
 batches. Both MiMo engines receive identical token IDs. Native EOS is included in
 the scored targets; the ignored one-token generation is not part of NLL.
 
+Every completed evaluation saves aligned per-document arrays in
+`verdict.sample_results` in the evaluator JSON record and in the validator database's
+`control_plane.evaluations.verdict_summary.sample_results`. The `documents` array
+contains document IDs, source locations, text hashes and UTF-8 byte lengths; array
+index `i` refers to that same document in every score column. `reference` means
+Horizon, identified by `reference_model.repository` and its pinned revision.
+
+| Per-sample fields | Meaning |
+| --- | --- |
+| `king_nll`, `challenger_nll`, `reference_nll` | Summed negative log-likelihood in nats |
+| `king_token_loss`, `challenger_token_loss`, `reference_token_loss` | NLL divided by that model's scored-token count, in nats/token |
+| `king_bits_per_byte`, `challenger_bits_per_byte`, `reference_bits_per_byte` | NLL divided by `ln(2) * documents[i].byte_length` |
+| `scored_tokens` | Shared MiMo scored-token count for king and challenger |
+| `reference_scored_tokens` | Horizon's own scored-token count, also recovered on reference-cache hits |
+
+These diagnostics use the existing inference results and do not change scoring or
+require a database migration. Existing NLL fields remain compatible with category
+aggregation. Older records are unchanged; failed/incomplete evaluations do not
+produce a complete sample-results record. Raw document text is not stored here.
+
+The reward and bootstrap exclude a document when both king and challenger losses
+are at or below Horizon's loss. Their two capped deficits are then both zero.
+The reward denominator is the total UTF-8 bytes of the remaining documents, and
+bootstrap draws come only from that population. Equal positive deficits remain
+included, as do regressions. If no documents qualify, mean reward and LCB are zero
+and the king stays. The threshold remains 0.00075 bits/byte.
+
+All selected documents still receive inference and remain saved. The verdict
+records `n_scoring_sequences`, `n_skipped_sequences`, `scoring_bytes` and
+`skipped_bytes`; `sample_results.scoring_included` marks each document's eligibility.
+Raw average losses and historical token-loss charts continue to cover the whole
+sample. New category rewards use each category's eligible-byte denominator, while
+old records without the new policy marker retain their original denominator.
+
+During evaluation, the progress bar measures two document-scoring stages: Horizon
+occupies 0–50%, and paired king/challenger scoring occupies 50–100%. This is work
+completion, not a time estimate. The displayed document counter belongs to the
+current stage. Cached Horizon results count immediately; identical-text documents
+count individually even when one reference inference serves multiple samples.
+Downloads, model loading and validation do not advance scoring progress.
+
+At the first completed batch crossing each 10% checkpoint of paired scoring, the
+evaluator refreshes provisional `mu_hat` and LCB using the same byte-weighted
+Horizon-deficit bootstrap, seed, alpha and bootstrap count as the final verdict.
+Only fully paired documents enter that checkpoint. The last LCB remains visible
+through worker events and heartbeats, and the 100% checkpoint becomes the final
+verdict. Partial checkpoints are informational and never trigger early stopping
+or promotion. Progress uses the existing PostgreSQL `progress_summary` fields
+and dashboard views; no SQL migration is needed. Horizon-only scoring cannot
+produce a paired LCB, so the website waits for the first paired checkpoint.
+
 Cache reference losses by checkpoint, tokenizer, text, policy, scorer/adapter code,
 inference settings and dependency versions. Older Transformers cache entries cannot
 match the vLLM identity. A fully cached sample skips the reference GPU phase.
@@ -489,9 +613,9 @@ vetoes and no early stopping. A regression that remains better than Horizon is n
 The old numeric 0.0015 nats/token threshold is not an equivalent calibration.
 
 The integrated real-pair 7M test passed on **8×B300** with all 25 MIX06 categories.
-Final Horizon padding repeatability also passed; the live database preflight
-remains outstanding. The rollout budget is 35M; active production remains at 70M until
-the approved database cutover.
+Final Horizon padding repeatability also passed. The prepared next budget is 60M;
+the active configurations read on 13 November remain at 35M until the approved
+budget-only cutover. A full 60M runtime has not been measured for this update.
 The replay command reads R2/Hugging Face and
 writes local results; it never promotes a model or changes R2:
 
@@ -606,7 +730,34 @@ pm2 start ecosystem.config.js --only teutonic-validator
 pm2 start ecosystem.config.js --only teutonic-promotion-worker
 pm2 start ecosystem.config.js --only teutonic-weight-publisher
 pm2 start ecosystem.config.js --only teutonic-dashboard-view
+pm2 start ecosystem.config.js --only teutonic-dashboard-live
 ```
+
+The live publisher uses the same database and dashboard R2 credentials as the
+history publisher. **No SQL migration or new database grants are required.** It
+reads the existing sanitized queue/progress views and writes only
+`dashboard-live.json`, with a five-second cache lifetime. It has a separate
+advisory lock and process; historical queries and market APIs cannot block it.
+Individual SQL statements time out after three seconds, and projections taking
+more than five seconds are discarded. Failed refreshes retain the last good
+object and its original timestamp.
+
+For an existing deployment, start `teutonic-dashboard-live` first and verify that
+`dashboard-live.json` refreshes and contains the expected competitions and queue.
+Then publish `website/app.js`, `website/dashboard-v1.js`, and `website/index.html`
+together. No evaluator/validator restart is needed. The website polls live status
+every five seconds, marks snapshots older than 30 seconds as last-known data,
+and keeps history/charts on the existing dashboard snapshots. Until its first
+live snapshot arrives it falls back to the old snapshots; after that, queue and
+progress use the single global live snapshot to avoid mixing duel transitions.
+
+Check both `generated_at` and the publisher's `projection_and_upload_seconds` log.
+The expected visible delay is seconds, with a 15–30 second rollout acceptance
+target under normal load; measure this on the host rather than assuming the
+five-second cadence guarantees it. Historical pages can still refresh slowly;
+this change removes them from the live status path without changing their SQL.
+Rollback by restoring the three website assets together and stopping only
+`teutonic-dashboard-live`.
 
 Verify the evaluator through the tunnel:
 
@@ -641,6 +792,7 @@ pm2 logs teutonic-validator --lines 100
 pm2 logs teutonic-promotion-worker --lines 100
 pm2 logs teutonic-weight-publisher --lines 100
 pm2 logs teutonic-dashboard-view --lines 100
+pm2 logs teutonic-dashboard-live --lines 100
 ```
 
 On the GPU host:
@@ -727,7 +879,7 @@ TEUTONIC_MOCK_ENV_FILE=.env \
   pm2 start tests/ecosystem.mock.config.js --only teutonic-mock-evaluator
 
 pm2 start ecosystem.config.js --only \
-  teutonic-access-controller,teutonic-validator,teutonic-promotion-worker,teutonic-weight-publisher,teutonic-dashboard-view
+  teutonic-access-controller,teutonic-validator,teutonic-promotion-worker,teutonic-weight-publisher,teutonic-dashboard-view,teutonic-dashboard-live
 ```
 
 Verify it on the validator's configured evaluator port:

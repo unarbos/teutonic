@@ -461,6 +461,17 @@ def validate_result_v3(result: Mapping[str, Any], request: EvaluationRequestV3) 
     if (result.get("scoring_policy") != POLICY_VERSION or result.get("loss_unit") != "bits/byte"
             or result.get("aggregation") != "byte-weighted" or result.get("retention_gates") is not False):
         raise ProtocolValidationError("result does not use the reference-deficit objective")
+    if result.get("sample_filter") != "exclude-both-zero-deficits":
+        raise ProtocolValidationError("result must exclude both-zero deficits")
+    for key in ("n_sequences", "n_scoring_sequences", "n_skipped_sequences", "scoring_bytes", "skipped_bytes"):
+        if type(result.get(key)) is not int or result[key] < 0:
+            raise ProtocolValidationError(f"result {key} must be a non-negative integer")
+    if (result["n_scoring_sequences"] + result["n_skipped_sequences"] != result["n_sequences"]
+            or (result["n_scoring_sequences"] == 0) != (result["scoring_bytes"] == 0)
+            or (result["n_skipped_sequences"] == 0) != (result["skipped_bytes"] == 0)):
+        raise ProtocolValidationError("result scoring population counts are inconsistent")
+    if result["n_scoring_sequences"] == 0 and (result["mu_hat"] != 0 or result["lcb"] != 0):
+        raise ProtocolValidationError("empty scoring population must have zero reward and LCB")
     if result["delta_threshold"] != request.limits["delta_threshold"]:
         raise ProtocolValidationError("result threshold differs from request")
     accepted = result["lcb"] > result["delta_threshold"]
@@ -472,7 +483,8 @@ def validate_result_v3(result: Mapping[str, Any], request: EvaluationRequestV3) 
     if (not isinstance(sampling, Mapping) or sampling.get("early_stopped") is not False
             or type(sampling.get("requested_sequences")) is not int
             or sampling["requested_sequences"] <= 0
-            or sampling.get("completed_sequences") != sampling["requested_sequences"]):
+            or sampling.get("completed_sequences") != sampling["requested_sequences"]
+            or result["n_sequences"] != sampling["completed_sequences"]):
         raise ProtocolValidationError("result must score every selected document")
     expected_identity = {
         "protocol_version": PROTOCOL_VERSION,

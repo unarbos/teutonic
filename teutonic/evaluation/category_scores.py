@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .categories import DEFAULT_RULES_PATH, FLAT, category_of, load_rules
+from .reference_policy import POLICY_VERSION
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 
@@ -142,6 +143,8 @@ def category_scores_from_samples(
 
 
 def _packed_category_scores(samples):
+    # Older saved samples lack the new policy marker and keep their old denominator.
+    skip_both_zero = samples.get("scoring_policy") == POLICY_VERSION
     columns = [samples.get(key) for key in
                ("documents", "king_nll", "challenger_nll", "reference_nll")]
     if any(not isinstance(column, list) for column in columns):
@@ -163,16 +166,23 @@ def _packed_category_scores(samples):
         ):
             return {}
         label = dataset if dataset == category else f"{dataset}/{category}"
-        total = totals.setdefault(label, [0, 0, 0, 0, 0, 0])
+        total = totals.setdefault(label, [0, 0, 0, 0, 0, 0, 0, 0])
         total[0] += 1
         total[1] += weight
         total[2] += king / math.log(2)
         total[3] += challenger / math.log(2)
         total[4] += (max(king - reference, 0) - max(challenger - reference, 0)) / math.log(2)
         total[5] += reference / math.log(2)
+        if not skip_both_zero or king > reference or challenger > reference:
+            total[6] += 1
+            total[7] += weight
     return {label: {"n_sequences": count, "n_bytes": weight, "loss_unit": "bits/byte",
                     "avg_reference_loss": round(reference / weight, 6),
                     "avg_king_loss": round(king / weight, 6),
                     "avg_challenger_loss": round(challenger / weight, 6),
-                    "mu_hat": round(delta / weight, 6)}
-            for label, (count, weight, king, challenger, delta, reference) in sorted(totals.items())}
+                    "mu_hat": round(delta / scoring_bytes, 6) if scoring_bytes else 0.0,
+                    **({"n_scoring_sequences": scoring_count, "n_skipped_sequences": count - scoring_count,
+                        "scoring_bytes": scoring_bytes, "skipped_bytes": weight - scoring_bytes}
+                       if skip_both_zero else {})}
+            for label, (count, weight, king, challenger, delta, reference, scoring_count, scoring_bytes)
+            in sorted(totals.items())}

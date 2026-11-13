@@ -53,6 +53,65 @@
         return payload;
     }
 
+    function validateLive(payload) {
+        if (!payload || payload.schema_version !== 1 || !Number.isInteger(payload.netuid)
+            || typeof payload.generation !== "string" || !payload.generation
+            || !Number.isSafeInteger(payload.source_watermark) || payload.source_watermark < 0
+            || !Number.isFinite(Date.parse(payload.generated_at))
+            || !Array.isArray(payload.competitions) || !payload.competitions.length) {
+            throw new Error("invalid live dashboard snapshot");
+        }
+        var keys = new Set(), active = 0;
+        payload.competitions.forEach(function(item) {
+            if (!item || !/^(main|math|code|text|mix[0-9]{2})$/.test(item.key) || keys.has(item.key)
+                || typeof item.name !== "string" || !Array.isArray(item.queue)
+                || !Object.prototype.hasOwnProperty.call(item, "current_eval")
+                || !item.service_status || typeof item.service_status !== "object") {
+                throw new Error("invalid live competition");
+            }
+            keys.add(item.key);
+            if (item.current_eval !== null) active++;
+            item.queue.concat(item.current_eval === null ? [] : [item.current_eval]).forEach(function(row) {
+                if (!row || typeof row.challenge_id !== "string"
+                    || row.model_identity !== "hidden_until_promotion") {
+                    throw new Error("invalid live model identity");
+                }
+            });
+        });
+        if (!keys.has("main") || active > 1) throw new Error("inconsistent live competitions");
+        walkFinite(payload, "$");
+        return payload;
+    }
+
+    function liveEvaluationSources(sources, live, now, fetchFailed) {
+        if (!live) return sources;
+        validateLive(live);
+        // Never combine publications from different networks or chain generations.
+        var incompatible = sources.some(function(source) {
+            var chain = source.dashboard && source.dashboard.chain;
+            return chain && (chain.netuid !== live.netuid || chain.generation !== live.generation);
+        });
+        if (incompatible) return sources;
+        var stamp = Date.parse(live.generated_at);
+        if (stamp > now + 30000) return sources;
+        var stale = !!fetchFailed || now - stamp > 30000;
+        return live.competitions.map(function(item) {
+            var source = sources.find(function(entry) { return entry.key === item.key; });
+            var base = source && source.dashboard;
+            // Keep the global live snapshot atomic. Mixing a newer full snapshot
+            // from one competition with older snapshots can show two active duels.
+            return {
+                key: item.key, failed: stale,
+                dashboard: Object.assign({}, base || {}, {
+                    generated_at: live.generated_at, updated_at: live.generated_at,
+                    source_watermark: live.source_watermark,
+                    queue: item.queue, current_eval: item.current_eval,
+                    service_status: item.service_status
+                })
+            };
+        });
+    }
+
     function identityLabel(record) {
         return record && record.model_identity === "hidden_until_promotion" ? HIDDEN : null;
     }
@@ -93,7 +152,7 @@
     }
 
     function lossUnit(record) {
-        return record && (record.loss_unit === "bits/byte" || record.policy_version === "horizon-deficit-bpb") ? "bits/byte" : "nats/token";
+        return record && (record.loss_unit === "bits/byte" || record.policy_version === "horizon-deficit-bpb" || record.policy_version === "horizon-deficit-active-bpb") ? "bits/byte" : "nats/token";
     }
 
     function lossChartPresentation(history) {
@@ -325,6 +384,8 @@
         );
         var won = record.accepted === true || verdict === "accepted" || verdict === "challenger";
         var lost = record.accepted === false || verdict === "rejected" || verdict === "king";
+        var filteredDetail = record.policy_version === "horizon-deficit-active-bpb"
+            ? " Documents where both models match or beat Horizon are excluded from the reward and bootstrap." : "";
 
         if (verdict === "error") {
             return {
@@ -342,7 +403,7 @@
                     ? "The challenger cleared the promotion policy."
                     : "LCB " + lcb.toFixed(6) + " > REQUIRED " + threshold.toFixed(6)
                         + " · MARGIN +" + (lcb - threshold).toFixed(6),
-                detail: lossUnit(record) === "bits/byte" ? "The byte-weighted reduction in loss above Horizon cleared the required confidence bound. Improvements beyond Horizon parity earn no extra reward." : "The confidence-adjusted improvement was high enough to replace the king."
+                detail: lossUnit(record) === "bits/byte" ? "The byte-weighted reduction in loss above Horizon cleared the required confidence bound. Improvements beyond Horizon parity earn no extra reward." + filteredDetail : "The confidence-adjusted improvement was high enough to replace the king."
             };
         }
         if (lost) {
@@ -353,7 +414,7 @@
                     ? "The challenger did not clear the promotion policy."
                     : "LCB " + lcb.toFixed(6) + " ≤ REQUIRED " + threshold.toFixed(6)
                         + " · SHORTFALL " + Math.max(0, threshold - lcb).toFixed(6),
-                detail: lossUnit(record) === "bits/byte" ? "The byte-weighted reduction in loss above Horizon did not clear the required confidence bound." : "The measured improvement was not confident enough to replace the king."
+                detail: lossUnit(record) === "bits/byte" ? "The byte-weighted reduction in loss above Horizon did not clear the required confidence bound." + filteredDetail : "The measured improvement was not confident enough to replace the king."
             };
         }
         return {
@@ -650,6 +711,8 @@
     return {
         HIDDEN: HIDDEN,
         validate: validate,
+        validateLive: validateLive,
+        liveEvaluationSources: liveEvaluationSources,
         presentation: presentation,
         currentEvaluationPresentation: currentEvaluationPresentation,
         historyPresentation: historyPresentation,

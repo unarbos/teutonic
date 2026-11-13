@@ -74,6 +74,12 @@ module.exports = {
     },
     {
       ...longRunning,
+      name: "teutonic-dashboard-live",
+      script: "scripts/dashboard_live.py",
+      env: commonEnv,
+    },
+    {
+      ...longRunning,
       name: "teutonic-dashboard-view",
       script: "scripts/dashboard_view.py",
       env: commonEnv,

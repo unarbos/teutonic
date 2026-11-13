@@ -94,7 +94,9 @@ def test_result_requires_complete_reference_objective_and_consistent_decision():
     verdict.update(wall_time_s=1, result_artifact_sha256='a'*64)
     validate_result_v3(verdict, parsed)
     for field, value in [('accepted',False),('lcb',float('nan')),('delta_threshold',.5),
-                          ('retention_gates',True),('scoring_policy','legacy')]:
+                          ('retention_gates',True),('scoring_policy','horizon-deficit-bpb'),
+                          ('sample_filter','none'),('n_scoring_sequences',0),
+                          ('n_skipped_sequences',1),('scoring_bytes',0),('n_sequences',3)]:
         with pytest.raises(ProtocolValidationError):
             validate_result_v3({**verdict,field:value}, parsed)
     broken = copy.deepcopy(verdict)
@@ -149,5 +151,15 @@ def test_packed_category_scores_use_bytes_and_reference_deficits():
     assert score["avg_king_loss"] == 2.5
     assert score["avg_challenger_loss"] == 1.875
     assert score["mu_hat"] == .75  # The first document stays below Horizon and is neutral.
+    samples['scoring_policy'] = POLICY_VERSION
+    score = category_scores_from_samples(samples, {})['test/a']
+    assert score['mu_hat'] == 1.0  # Only the second document enters the reward denominator.
+    assert score['n_scoring_sequences'] == 1 and score['n_skipped_sequences'] == 1
+    assert score['scoring_bytes'] == 30 and score['skipped_bytes'] == 10
+    assert score['avg_king_loss'] == 2.5 and score['n_bytes'] == 40
+    samples['king_nll'] = samples['reference_nll'][:]
+    samples['challenger_nll'] = samples['reference_nll'][:]
+    score = category_scores_from_samples(samples, {})['test/a']
+    assert score['mu_hat'] == score['scoring_bytes'] == score['n_scoring_sequences'] == 0
     samples["reference_nll"].pop()
     assert category_scores_from_samples(samples, {}) == {}

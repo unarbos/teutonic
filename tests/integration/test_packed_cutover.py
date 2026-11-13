@@ -127,3 +127,61 @@ def test_published_release_cutover_guards_idempotence_and_rollback():
         finally:
             db.execute('ROLLBACK')
             db.execute('TRUNCATE control_plane.competitions, control_plane.registrations CASCADE')
+
+
+def test_60m_budget_update_preserves_pins_and_rejects_drift():
+    release = RELEASE.with_name('packed-text-60m-20261113')
+    scope = json.loads((release / 'scope.json').read_text())
+    configs = json.loads((release / 'previous-configs.json').read_text())
+    sql = (release / 'cutover.sql').read_text()
+    entries = json.loads((release / 'pending-publication.json').read_text())
+    mixes = {name: json.loads((release / f'{name}.json').read_text()) for name in configs}
+    for entry in entries:
+        if entry['local'] != 'sampling.json':
+            assert hashlib.sha256((release / entry['local']).read_bytes()).hexdigest() == entry['sha256']
+    with psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row) as db:
+        assert db.execute('SELECT current_database() AS name').fetchone()['name'] == 'teutonic_test'
+        db.execute('TRUNCATE control_plane.competitions, control_plane.registrations CASCADE')
+        before = {}
+        try:
+            for name, mix in mixes.items():
+                old = {**mix, 'token_budget': 35_000_000}
+                cid = db.execute('INSERT INTO control_plane.competitions(netuid,chain_generation,name,competition_key) '
+                                 'VALUES (%s,%s,%s,%s) RETURNING competition_id',
+                                 (scope['netuid'], scope['chain_generation'], name, name)).fetchone()['competition_id']
+                eid = db.execute('INSERT INTO control_plane.evaluation_configs '
+                                 '(competition_id,config_version,dataset_label,eval_n,delta_threshold,shards_per_dataset,long_documents,active) '
+                                 'VALUES (%s,%s,%s,0,.00075,1,%s,true) RETURNING evaluation_config_id',
+                                 (cid, configs[name], name, Jsonb(old))).fetchone()['evaluation_config_id']
+                db.execute('INSERT INTO control_plane.dataset_manifests '
+                           '(evaluation_config_id,position,name,manifest_url,manifest_sha256,manifest_json,sample_proportion) '
+                           'VALUES (%s,0,%s,%s,%s,%s,1)',
+                           (eid, name, f'https://fixture.invalid/{name}', 'a'*64, Jsonb(old)))
+                db.execute('INSERT INTO control_plane.evaluation_early_stopping_policies(competition_id,enabled) VALUES (%s,true)', (cid,))
+                before[name] = (eid, old)
+            # Last competition drift must roll back all preceding updates.
+            eid, old = before['mix07']
+            for field, value in [('token_budget', 36_000_000),
+                                 ('dataset', {**old['dataset'], 'sha256': 'b'*64}),
+                                 ('categories', [{**c, 'weight': c['weight'] / 2} for c in old['categories']])]:
+                changed = {**old, field: value}
+                db.execute('UPDATE control_plane.evaluation_configs SET long_documents=%s WHERE evaluation_config_id=%s', (Jsonb(changed), eid))
+                db.execute('UPDATE control_plane.dataset_manifests SET manifest_json=%s WHERE evaluation_config_id=%s', (Jsonb(changed), eid))
+                with pytest.raises(psycopg.errors.RaiseException, match='Active category weights'):
+                    db.execute(sql)
+                db.execute('ROLLBACK')
+                assert db.execute('SELECT count(*) AS n FROM control_plane.evaluation_configs').fetchone()['n'] == 4
+            db.execute('UPDATE control_plane.evaluation_configs SET long_documents=%s WHERE evaluation_config_id=%s', (Jsonb(old), eid))
+            db.execute('UPDATE control_plane.dataset_manifests SET manifest_json=%s WHERE evaluation_config_id=%s', (Jsonb(old), eid))
+            for _ in range(2):
+                db.execute(sql)
+                active = db.execute('SELECT c.competition_key,ec.long_documents FROM control_plane.competitions c '
+                                    'JOIN control_plane.evaluation_configs ec USING(competition_id) WHERE ec.active').fetchall()
+                assert {r['competition_key']: r['long_documents'] for r in active} == mixes
+                assert db.execute('SELECT count(*) AS n FROM control_plane.evaluation_configs').fetchone()['n'] == 8
+                assert all(r['enabled'] for r in db.execute('SELECT enabled FROM control_plane.evaluation_early_stopping_policies'))
+                for eid, old in before.values():
+                    assert db.execute('SELECT long_documents FROM control_plane.evaluation_configs WHERE evaluation_config_id=%s', (eid,)).fetchone()['long_documents'] == old
+        finally:
+            db.execute('ROLLBACK')
+            db.execute('TRUNCATE control_plane.competitions, control_plane.registrations CASCADE')
