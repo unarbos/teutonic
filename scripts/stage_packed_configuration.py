@@ -18,7 +18,7 @@ def literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def stage(bundle, *, netuid, generation, threshold, previous_token_budget=None):
+def stage(bundle, *, netuid, generation, threshold, previous_token_budget=None, previous_configs=None):
     import math
     if not math.isfinite(threshold) or threshold < 0:
         raise ValueError("threshold must be finite non-negative bits/byte")
@@ -28,6 +28,15 @@ def stage(bundle, *, netuid, generation, threshold, previous_token_budget=None):
     validate_bundle(bundle)
     root = Path(bundle)
     entries = json.loads((root / "pending-publication.json").read_text())
+    if previous_configs is not None:
+        import re
+        if (not isinstance(previous_configs, dict) or not previous_configs
+                or any(not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{64}", v)
+                       for v in previous_configs.values())):
+            raise ValueError("previous configs must map competitions to exact config-version hashes")
+        if previous_token_budget is not None:
+            raise ValueError("pin-only migration cannot change the token budget")
+    staged = set()
     blocks = ["-- Apply allow_packed_text_manifests.sql first. Verify R2 publication before applying.\nBEGIN;"]
     for entry in entries:
         if not entry["key"].startswith("teutonic-text/splits/"):
@@ -49,6 +58,26 @@ def stage(bundle, *, netuid, generation, threshold, previous_token_budget=None):
         weights = {c["category"]: c["weight"] for c in mix["categories"]}
         sources = {c["category"]: c["dataset"] for c in mix["categories"]}
         content = literal(canonical(mix).decode())
+        staged.add(mix['competition'])
+        if previous_configs is not None:
+            if mix['competition'] not in previous_configs:
+                raise ValueError("missing previous configuration for competition")
+            source_guard = f"""
+   AND ec.config_version IN ({literal(previous_configs[mix['competition']])},{literal(version)})
+   AND ec.delta_threshold={threshold} AND ec.dataset_label={literal(mix['competition'])}
+   AND ec.shards_per_dataset=1 AND dm.position=0
+   AND dm.manifest_json->>'format'='teutonic-packed-text-mix'
+   AND ec.long_documents=dm.manifest_json
+   AND (dm.manifest_json - 'dataset' - 'sampling')=({content}::jsonb - 'dataset' - 'sampling')
+"""
+        else:
+            source_guard = f"""
+   AND ((ec.long_documents->>'token_budget')::bigint={previous_token_budget or mix['token_budget']}
+        OR (ec.long_documents={content}::jsonb AND ec.config_version={literal(version)}))
+   AND ((dm.manifest_json->'category_weights'={literal(json.dumps(weights))}::jsonb
+         AND dm.manifest_json->'category_sources'={literal(json.dumps(sources))}::jsonb)
+        OR dm.manifest_json={content}::jsonb)
+"""
         # Guard both the category weights and input-token budget against live state.
         blocks.append(f"""
 DO $migration$
@@ -75,12 +104,8 @@ BEGIN
    JOIN control_plane.dataset_manifests dm USING (evaluation_config_id)
    WHERE ec.evaluation_config_id=previous AND ec.eval_n=0
    AND (SELECT count(*) FROM control_plane.dataset_manifests WHERE evaluation_config_id=previous)=1
-   AND ((ec.long_documents->>'token_budget')::bigint={previous_token_budget or mix['token_budget']}
-        OR (ec.long_documents={content}::jsonb AND ec.config_version={literal(version)}))
    AND dm.sample_proportion=1
-   AND ((dm.manifest_json->'category_weights'={literal(json.dumps(weights))}::jsonb
-         AND dm.manifest_json->'category_sources'={literal(json.dumps(sources))}::jsonb)
-        OR dm.manifest_json={content}::jsonb)
+   {source_guard}
  ) THEN RAISE EXCEPTION 'Active category weights, sources or budget differ; review migration'; END IF;
  SELECT evaluation_config_id INTO eid FROM control_plane.evaluation_configs
  WHERE competition_id=cid AND config_version={literal(version)};
@@ -105,12 +130,19 @@ BEGIN
  END IF;
  UPDATE control_plane.evaluation_configs SET active=false WHERE competition_id=cid AND active;
  UPDATE control_plane.evaluation_configs SET active=true WHERE evaluation_config_id=eid;
- INSERT INTO control_plane.evaluation_early_stopping_policies (competition_id, enabled)
- VALUES (cid,false) ON CONFLICT (competition_id) DO UPDATE SET enabled=false;
+ -- Only the legacy token-to-text cutover changes the early-stopping policy.
+ IF EXISTS (SELECT 1 FROM control_plane.dataset_manifests
+            WHERE evaluation_config_id=previous
+            AND manifest_json->>'format' IS DISTINCT FROM 'teutonic-packed-text-mix') THEN
+   INSERT INTO control_plane.evaluation_early_stopping_policies (competition_id, enabled)
+   VALUES (cid,false) ON CONFLICT (competition_id) DO UPDATE SET enabled=false;
+ END IF;
 END $migration$;
 """)
     if len(blocks) == 1:
         raise ValueError("bundle has no competition manifests")
+    if previous_configs is not None and set(previous_configs) != staged:
+        raise ValueError("previous configurations and bundle competitions differ")
     return "\n".join(blocks) + "\nCOMMIT;\n"
 
 
@@ -123,11 +155,15 @@ def main():
                    help="explicit new-unit threshold; do not silently reuse nats/token")
     p.add_argument("--previous-token-budget", type=int,
                    help="explicit expected live budget when changing the budget at cutover")
+    p.add_argument("--previous-configs", type=Path,
+                   help="JSON competition-to-config-version map; allow only dataset/sampling pin changes")
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args()
     args.output.write_text(stage(args.bundle_dir, netuid=args.netuid,
                                generation=args.chain_generation, threshold=args.delta_bpb,
-                               previous_token_budget=args.previous_token_budget))
+                               previous_token_budget=args.previous_token_budget,
+                               previous_configs=json.loads(args.previous_configs.read_text())
+                               if args.previous_configs else None))
     print("Prepared local SQL only; no database or R2 operations performed.")
 
 
