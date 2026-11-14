@@ -125,7 +125,7 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
             check_preparation()
 
     check()
-    reader = DatasetReader(read_client())
+    reader = DatasetReader(read_client(max_pool_connections=64))
     mix = req.packed_dataset
     dataset = PackedDataset(reader, mix["dataset"], text_cache=cache_dir)
     catalog = reader.json(mix["sampling"])

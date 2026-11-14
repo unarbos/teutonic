@@ -12,8 +12,8 @@ from teutonic.evaluation.categories import apportion, category_seed
 from teutonic.evaluation.packed_text import BUCKETS, CATALOG_FORMAT, digest, validate_mix
 
 
-def sample_documents(dataset, catalog, mix, seed, *, candidate_batch_size=64, index_workers=8):
-    if candidate_batch_size < 1 or not 1 <= index_workers <= 32:
+def sample_documents(dataset, catalog, mix, seed, *, candidate_batch_size=64, index_workers=64):
+    if candidate_batch_size < 1 or not 1 <= index_workers <= 64:
         raise ValueError("invalid sampling read bounds")
     validate_mix(mix)
     if mix["dataset"] != dataset.pin or catalog.get("dataset") != dataset.pin:

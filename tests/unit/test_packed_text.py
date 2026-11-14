@@ -113,11 +113,13 @@ def test_deterministic_partition_sampling_and_population():
     (999, 190000, "3fd5a8bfd4ccb7f1c4e0fe99e542e263c32f7916196913e94e47e3ec23f7577d"),
 ])
 @pytest.mark.parametrize("batch_size", [1, 3, 64, 2048])
-def test_parallel_sampling_preserves_previous_sampler_digests(seed, budget, expected, batch_size):
+@pytest.mark.parametrize("index_workers", [8, 64])
+def test_parallel_sampling_preserves_previous_sampler_digests(seed, budget, expected, batch_size, index_workers):
     # Golden digests recorded from the serial implementation, before this change.
     _, dataset, catalog, mix = fixture()
     mix["token_budget"] = budget
-    _, meta = sample_documents(dataset, catalog, mix, seed, candidate_batch_size=batch_size)
+    _, meta = sample_documents(dataset, catalog, mix, seed, candidate_batch_size=batch_size,
+                               index_workers=index_workers)
     assert meta["digest"] == expected
 
 

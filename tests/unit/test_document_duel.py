@@ -25,7 +25,7 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(tmp_path, monkeypatch,
     snapshot = tmp_path / 'model'
     snapshot.mkdir()
     (snapshot / 'tokenizer.json').write_text('{}')
-    monkeypatch.setattr(duel, 'read_client', lambda: client)
+    monkeypatch.setattr(duel, 'read_client', lambda **kwargs: client)
     original_batches = duel.prepared_batches
     def small_batches(*args, **kwargs):
         return original_batches(*args, **{**kwargs, 'batch_documents': 2})
