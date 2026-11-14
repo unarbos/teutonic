@@ -192,15 +192,21 @@ Configured competitions: https://teutonic.ai/competitions.json
 MAIN: https://teutonic.ai/dashboard.json
 MIXes: https://teutonic.ai/competitions/<mix01..mix07>/dashboard.json (MIX04 historical)
 Dataset policy: corresponding `datasets/manifest.json` under each prefix.
-Raw inventories use immutable `splits/<main|mix01..mix07>/versions/<sha256>.json`
-paths under the public datasets bucket; release URLs are pinned in `chain.toml`.
+Packed dataset inventory: https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/manifest.json
+Current split manifests use `teutonic-text/splits/<competition>/<sha256>.json`
+in the `dataset` bucket. Read their exact pins from the active competition configuration.
+The old `datasets` bucket was deleted; its token-shard and `doc_index` URLs no longer work.
 
 
 ### 3.1 Packed UTF-8 evaluation
 
 Read immutable manifest pins from the selected competition configuration.
-The evaluator uses authenticated range reads from `dataset/teutonic-text/`;
-public website summaries are not credentials or a public data download endpoint.
+Public dataset downloads use
+`https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/`.
+Start with `manifest.json`; resolve its object paths relative to this prefix.
+The evaluator continues to use authenticated, checksum-pinned range reads from
+`s3://dataset/teutonic-text/`. Website dataset summaries describe the configuration;
+the packed manifest above is the actual data inventory.
 Packed UTF-8 text and length-sorted byte-offset indexes locate whole documents.
 Original MiMo token counts control selection only. Native model tokenizers encode
 raw text without a chat template or BOS and append their native EOS. Score all
@@ -211,7 +217,7 @@ separate documents. Context overflow fails evaluation without truncation or repl
 Fetch/tokenize bounded batches ahead of inference and reuse temporary text across
 phases. Horizon losses are cached by text, checkpoint, tokenizer, policy and pinned
 scorer/dependency identity. Reference cache hits skip its GPU phase. The old
-`datasets` bucket and `doc_index` remain historical artifacts, unused by this flow.
+`datasets` bucket has been deleted; this flow does not use it or its old `doc_index`.
 
 The validated backend is vLLM 0.33.0, BF16, V1 runner, batch invariance enabled,
 eager execution and no prefix caching. MiMo uses the shared-expert adapter,
@@ -530,7 +536,7 @@ the coldkey.
 - netuid 3, network finney; hotkey MUST be Ed25519
 - dashboard: https://teutonic.ai/dashboard.json
 - dataset config: https://teutonic.ai/datasets/manifest.json
-- source shards: https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/<source>/manifest.json
+- packed dataset: https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/manifest.json
 - document indexes: use the authenticated packed-data pins in the exact request
 - king download: https://pub-0821d4e196224864af220294345fd141.r2.dev/models/sha256/<king_digest>/
 - accept rule: paired-bootstrap LCB of byte-weighted Horizon-deficit reduction
@@ -554,8 +560,8 @@ the coldkey.
 - [Acceptance math](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluation/policy.py): `paired_bootstrap_verdict`.
 - [Evaluator engine](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/engine.py): model loading and scoring.
 - [Document masking](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/document_masking.py): attention boundaries and reset positions.
-- [Whole-document sampler](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/long_documents.py): reconstruction, competition mix and sample provenance.
-- [Document-index manifest](https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/doc_index/manifest-bb93856956e924c6139bebf73601c72cd58007ce916e6095b9929dd1b1d450c7.json): immutable release inventory including DCLM.
+- [Packed-text reader and sampler](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluation/packed_text.py): document byte ranges, indexes and sample provenance.
+- [Packed dataset manifest](https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/manifest.json): packed-text dataset inventory including DCLM.
 - [Ready-signal schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/ready-signal-v1.schema.json): `r2ready:v1` contract.
 - [Mailbox envelope schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/mailbox-envelope-v1.schema.json): encrypted credential contract.
 - [Dashboard schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/dashboard-v1.schema.json): dashboard JSON contract.

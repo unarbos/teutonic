@@ -13,6 +13,11 @@ native tokenizer. Reward measures improvement in the byte-weighted loss deficit
 against the pinned Horizon reference; ordinary token loss remains available for
 historical charts. The default sampling budget is 60M original MiMo tokens.
 
+The [public dataset manifest](https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/manifest.json)
+lists the packed documents and byte-offset indexes. Resolve object paths relative
+to its `teutonic-text/` prefix. The evaluator uses authenticated, pinned reads
+from the same `dataset` bucket. The old `datasets` bucket has been deleted.
+
 Horizon uses a deterministic eight-GPU layer pipeline, followed by four MiMo king
 and four challenger vLLM replicas. Large MiMo documents use two-GPU groups.
 Horizon preloads at startup and after each duel, remaining on the GPUs while idle;

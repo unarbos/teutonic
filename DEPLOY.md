@@ -70,7 +70,13 @@ Provision these buckets before starting a packed-text competition:
 | `teutonic-private-models-enam` | Private | One isolated upload prefix per miner registration |
 | `teutonic-models-enam` | Public | Genesis and promoted immutable models |
 | `teutonic-dash-enam` | Public read | Dashboard state and encrypted credential mailboxes |
-| `dataset` | Private | Packed UTF-8 documents, indexes, sampling catalog and split manifests |
+| `dataset` | Public read; authenticated evaluator access | Packed UTF-8 documents, indexes, sampling catalog and split manifests |
+
+Public dataset inventory:
+https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/manifest.json
+Resolve object paths relative to `https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/`.
+The old `datasets` bucket was deleted. Its public URLs and the legacy rollout
+commands below are historical references, not working download locations.
 
 The validator-host R2 key needs the object permissions used by seed upload,
 verification, promotion, cleanup, and dashboard publication. The Cloudflare API
@@ -364,7 +370,8 @@ Dataset reads require authenticated R2 access to **`dataset`**, under
 `teutonic-text/`. Configure `TEUTONIC_EVALUATOR_R2_ENDPOINT`,
 `TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID`, and `TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY`.
 Optional session-token credentials are supported. The evaluator never reads the
-old `datasets` bucket. Preserve that bucket and all existing objects unchanged.
+old `datasets` bucket, which has been deleted. Public downloads use the packed
+manifest linked in the R2 layout above; evaluator access remains authenticated.
 
 For the historical initial 12 November release, the already-published artifacts and staged
 [`cutover.sql`](deployment/packed-text-20261112/cutover.sql). It targets netuid 3,
@@ -893,8 +900,10 @@ Do not add the mock evaluator to either production ecosystem file.
 
 ## MAIN and MIX category competitions
 
-The rollout commands below are historical. For the current evaluator use the packed-text
-section above; legacy token-inventory tools were moved to `scripts/legacy/`.
+The rollout commands below are historical and cannot run against the deleted
+`datasets` bucket. For the current evaluator use the packed-text section above;
+legacy token-inventory tools were moved to `scripts/legacy/`. Old token-inventory
+URLs in `chain.toml` are not the active PostgreSQL packed-text manifest pins.
 
 
 PostgreSQL remains the runtime source of truth. `chain.toml` defines the category
