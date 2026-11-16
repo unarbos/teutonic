@@ -1,10 +1,12 @@
 import hashlib
 import io
-from dataclasses import replace
+import random
+from dataclasses import asdict, replace
 
 import numpy as np
 import pytest
 
+from teutonic.evaluation.categories import category_seed
 from teutonic.evaluation.packed_text import (
     BUCKET,
     CATALOG_FORMAT,
@@ -18,12 +20,17 @@ from teutonic.evaluation.packed_text import (
     PackedDataset,
     build_catalog,
     canonical,
+    digest,
     validate_mix,
     validate_pin,
 )
 from teutonic.evaluation.reference_policy import reference_verdict
 from teutonic.evaluator.text_pipeline import prepared_batches
-from teutonic.evaluator.text_sampling import sample_documents
+from teutonic.evaluator.text_sampling import (
+    prefetched_document_batches,
+    sample_document_batches,
+    sample_documents,
+)
 
 
 class ReadOnlyR2:
@@ -114,13 +121,16 @@ def test_deterministic_partition_sampling_and_population():
 ])
 @pytest.mark.parametrize("batch_size", [1, 3, 64, 2048])
 @pytest.mark.parametrize("index_workers", [8, 64])
-def test_parallel_sampling_preserves_previous_sampler_digests(seed, budget, expected, batch_size, index_workers):
-    # Golden digests recorded from the serial implementation, before this change.
+def test_parallel_sampling_preserves_previous_membership(seed, budget, expected, batch_size, index_workers):
+    # Apply the retired shuffle only in this test to compare old golden selections.
     _, dataset, catalog, mix = fixture()
     mix["token_budget"] = budget
-    _, meta = sample_documents(dataset, catalog, mix, seed, candidate_batch_size=batch_size,
-                               index_workers=index_workers)
-    assert meta["digest"] == expected
+    docs, meta = sample_documents(dataset, catalog, mix, seed, candidate_batch_size=batch_size,
+                                  index_workers=index_workers)
+    assert (docs, meta) == sample_documents(dataset, catalog, mix, seed)
+    legacy_order = list(docs)
+    random.Random(category_seed(seed, "packed-document-order")).shuffle(legacy_order)
+    assert digest([asdict(d) for d in legacy_order]) == expected
 
 
 def test_small_quota_does_not_prefetch_thousands_of_unused_index_rows(monkeypatch):
@@ -171,6 +181,44 @@ def test_grouped_index_reads_overlap_and_restore_request_order(monkeypatch):
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert dataset.documents(references[::-1], pool) == expected[::-1]
     assert len(client.calls) == 2
+
+
+def test_stream_yields_before_finishing_selection():
+    _, dataset, catalog, mix = fixture()
+    summaries = []
+    stream = sample_document_batches(dataset, catalog, mix, 123, summaries=summaries, batch_documents=2)
+    first = next(stream)
+    assert len(first) == 2
+    assert summaries == []  # First bucket is still being sampled.
+    documents = first + [doc for group in stream for doc in group]
+    expected, metadata = sample_documents(dataset, catalog, mix, 123)
+    assert documents == expected
+    assert summaries == metadata['categories']
+
+
+def test_prefetch_bounds_work_and_closes_producer_on_consumer_failure():
+    produced, closed = [], []
+    def batches():
+        try:
+            for i in range(100):
+                produced.append(i)
+                yield [i]
+        finally:
+            closed.append(True)
+    with pytest.raises(RuntimeError, match='scorer failed'), prefetched_document_batches(batches()) as groups:
+        assert next(groups) == [0]
+        raise RuntimeError('scorer failed')
+    assert len(produced) <= 3  # Current batch plus two batches of lookahead.
+    assert closed == [True]
+
+
+def test_prefetch_propagates_sampling_failure():
+    def batches():
+        yield ['first']
+        raise ValueError('corrupt later index')
+    with pytest.raises(ValueError, match='corrupt later index'), prefetched_document_batches(batches()) as groups:
+        assert next(groups) == ['first']
+        next(groups)
 
 
 def test_shared_index_cache_coalesces_ranges_and_bounds_memory():

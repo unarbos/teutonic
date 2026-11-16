@@ -212,21 +212,28 @@ def run(args):
     challenger_config, _ = engine.load_model_config(challenger, req, "challenger")
     if engine.compare_model_configs(config, challenger_config):
         raise ValueError("king/challenger model configs differ")
-    original_sample = document_duel.sample_documents
+    original_sample = document_duel.sample_document_batches
     started = time.monotonic()
 
     def sample(*a, **kw):
         from dataclasses import asdict
 
-        documents, metadata = original_sample(*a, **kw)
+        documents = []
+        for group in original_sample(*a, **kw):
+            documents.extend(group)
+            yield group
+        metadata = document_duel.sampling_metadata(documents, kw["summaries"])
         selection = {"metadata": metadata, "documents": [asdict(d) for d in documents]}
         (args.output_dir / "selection.json").write_text(json.dumps(selection, indent=2))
         if args.expected_selection is not None:
-            if selection != json.loads(args.expected_selection.read_text()):
-                raise AssertionError("parallel sampler differs from serial baseline")
+            expected = json.loads(args.expected_selection.read_text())
+            if (sorted(selection["documents"], key=lambda d: d["doc_id"])
+                    != sorted(expected["documents"], key=lambda d: d["doc_id"])
+                    or any(metadata[key] != expected["metadata"][key]
+                           for key in ("categories", "n_documents", "input_tokens"))):
+                raise AssertionError("streaming sampler changes the baseline selection")
             progress({"phase": "serial_sample_match", "documents": len(documents),
                       "digest": metadata["digest"]})
-        return documents, metadata
 
     def progress(info):
         event = {"elapsed_seconds": time.monotonic() - started, **info}
@@ -237,7 +244,7 @@ def run(args):
     try:
         progress({"phase": "sampling", "token_budget": mix["token_budget"]})
         with patch.object(document_duel, "read_client", return_value=client), \
-                patch.object(document_duel, "sample_documents", sample):
+                patch.object(document_duel, "sample_document_batches", sample):
             verdict, metadata, workers = document_duel.run_document_duel(
                 engine, req, snapshot, challenger, progress)
         report = {"seconds": time.monotonic() - started, "verdict": verdict,

@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 import time
 from collections import Counter
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import asdict
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
@@ -26,7 +26,11 @@ from teutonic.evaluator.horizon_pipeline_runtime import (
 )
 from teutonic.evaluator.mimo_pool import MiMoPool
 from teutonic.evaluator.text_pipeline import TextTokenizer, prepared_batches
-from teutonic.evaluator.text_sampling import sample_documents
+from teutonic.evaluator.text_sampling import (
+    prefetched_document_batches,
+    sample_document_batches,
+    sampling_metadata,
+)
 from teutonic.evaluator.vllm_runtime import runtime_identity, wait_for_gpu_release
 from teutonic.evaluator.vllm_score import BACKEND as MIMO_BACKEND
 
@@ -125,16 +129,17 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
             check_preparation()
 
     check()
+    progress = DocumentProgress(0, on_phase, token_budget=req.packed_dataset["token_budget"])
+    on_phase = progress
+    on_phase({"phase": "dataset_loading"})
     reader = DatasetReader(read_client(max_pool_connections=64))
     mix = req.packed_dataset
     dataset = PackedDataset(reader, mix["dataset"], text_cache=cache_dir)
     catalog = reader.json(mix["sampling"])
-    sampling_started = time.monotonic()
-    documents, metadata = sample_documents(dataset, catalog, mix, base.dataset_seed(req))
-    metadata["sampling_seconds"] = time.monotonic() - sampling_started
-    progress = DocumentProgress(len(documents), on_phase)
-    on_phase = progress
-    on_phase({"phase": "documents_selected", "total": len(documents), "digest": metadata["digest"]})
+    documents, summaries, keys = [], [], []
+    sampling_timing = {"seconds": 0.0}
+    batches = sample_document_batches(dataset, catalog, mix, base.dataset_seed(req), summaries=summaries)
+    on_phase({"phase": "sampling_documents"})
     check()
     horizon = base._horizon_downloader.wait_ready(on_phase)
     tokenizer_hash = file_hash(horizon / "tokenizer.json")
@@ -145,7 +150,6 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
     scorer_hash = digest({"runtime": reference_runtime,
                           "tokenization": file_hash(Path(__file__).with_name("text_pipeline.py"))})
     runtime_hash = digest(reference_runtime)
-    keys = [reference_key(d, tokenizer_hash, scorer_hash, runtime_hash) for d in documents]
     # Retire any baseline workers before allocating the vLLM engines.
     if base._model_worker_pool is not None:
         base._model_worker_pool.close()
@@ -158,43 +162,69 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
     tok = None
     reference_started = time.monotonic()
     try:
-        # Identical text has the same reference key; score it only once, retaining
-        # every sampled document independently in the final paired verdict.
+        # Score accepted batches while the bounded producer selects later documents.
+        # Duplicate text is scored once, retaining every occurrence in the verdict.
         missing = {}
-        for doc, key in zip(documents, keys, strict=True):
-            if cache.get(key) is None:
-                missing.setdefault(key, doc)
-        key_counts = Counter(keys)
-        reference_done = len(documents) - sum(key_counts[key] for key in missing)
-        progress.reference_scored(reference_done)
-        if missing:
-            check()
-            on_phase({"phase": "reference_prepare", "missing_documents": len(missing)})
-            tok = TextTokenizer(horizon, backend=os.environ.get("TEUTONIC_REFERENCE_TOKENIZER_BACKEND", "gigatoken"))
-            key_by_id = {doc.doc_id: key for key, doc in missing.items()}
-            try:
-                lease = (nullcontext(resident.acquire(horizon, reference_runtime, on_phase)) if resident is not None
-                         else HorizonWorker("horizon", horizon, base._gpu_ids, cache_dir, reference_runtime, on_phase))
-                with lease as worker:
-                    on_phase({"phase": "reference_scoring", "missing_documents": len(missing)})
-                    for group, sequences in reference_batches(dataset, list(missing.values()), tok):
+        reference_done = reference_tokens = 0
+        worker = None
+        with ExitStack() as resources:
+            groups = resources.enter_context(prefetched_document_batches(batches, timing=sampling_timing))
+            for batch in groups:
+                check()
+                documents.extend(batch)
+                batch_keys = [reference_key(d, tokenizer_hash, scorer_hash, runtime_hash) for d in batch]
+                keys.extend(batch_keys)
+                progress.selected(len(documents))
+                on_phase({"phase": "sampling_documents"})
+                key_counts = Counter(batch_keys)
+                key_tokens = Counter()
+                pending = {}
+                for doc, key in zip(batch, batch_keys, strict=True):
+                    key_tokens[key] += doc.original_mimo_token_count
+                    if cache.get(key) is None:
+                        pending.setdefault(key, doc)
+                    else:
+                        reference_done += 1
+                        reference_tokens += doc.original_mimo_token_count
+                if pending:
+                    missing.update(pending)
+                    if worker is None:
+                        on_phase({"phase": "reference_prepare", "missing_documents": len(pending)})
+                        tok = TextTokenizer(horizon, backend=os.environ.get("TEUTONIC_REFERENCE_TOKENIZER_BACKEND", "gigatoken"))
+                        lease = (nullcontext(resident.acquire(horizon, reference_runtime, on_phase)) if resident is not None
+                                 else HorizonWorker("horizon", horizon, base._gpu_ids, cache_dir, reference_runtime, on_phase))
+                        worker = resources.enter_context(lease)
+                    on_phase({"phase": "reference_scoring", "missing_documents": len(pending)})
+                    key_by_id = {doc.doc_id: key for key, doc in pending.items()}
+                    for group, sequences in reference_batches(dataset, list(pending.values()), tok):
                         check()
                         for row in worker.score(group, sequences):
                             key = key_by_id[row["id"]]
                             cache.put(key, row["nll"], row["scored_tokens"])
                             reference_done += key_counts[key]
-                        progress.reference_scored(reference_done)
+                            reference_tokens += key_tokens[key]
+                        progress.reference_scored(reference_done, input_tokens=reference_tokens)
                         check()
-                    reports["horizon"] = dict(worker.report)
-            except BaseException:
-                if resident is not None:
-                    log_path = resident.directory / "horizon.log"
-                    if log_path.exists():
-                        shutil.copyfile(log_path, Path(cache_dir) / "horizon.log")
-                raise
+                else:
+                    progress.reference_scored(reference_done, input_tokens=reference_tokens)
+            if worker is not None:
+                reports["horizon"] = dict(worker.report)
+        metadata = sampling_metadata(documents, summaries)
+        metadata["sampling_seconds"] = sampling_timing["seconds"]
+        if reference_done != len(documents):
+            raise ValueError("incomplete streamed reference scores")
+        progress.finish_sampling(len(documents))
+        on_phase({"phase": "documents_selected", "total": len(documents), "digest": metadata["digest"]})
+        progress.reference_scored(reference_done, input_tokens=reference_tokens)
         reference_scores = [cache.get(key) for key in keys]
         reference = [score[0] for score in reference_scores]
         reference_counts = [score[1] for score in reference_scores]
+    except BaseException:
+        if resident is not None:
+            log_path = resident.directory / "horizon.log"
+            if log_path.exists():
+                shutil.copyfile(log_path, Path(cache_dir) / "horizon.log")
+        raise
     finally:
         cache.close()
         # Also unload a preloaded Horizon when all reference scores were cached.

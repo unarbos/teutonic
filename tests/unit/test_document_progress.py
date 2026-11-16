@@ -11,6 +11,28 @@ from teutonic.evaluator.document_progress import DocumentProgress
 from teutonic.validator.repository import _bounded_progress
 
 
+def test_streaming_progress_uses_tokens_until_final_document_count():
+    events = []
+    progress = DocumentProgress(0, events.append, token_budget=100)
+    progress({'phase': 'dataset_loading'})
+    assert events[-1]['percent'] == 0
+    progress.selected(2)
+    progress.reference_scored(2, input_tokens=40)
+    assert events[-1]['percent'] == 20
+    progress.selected(6)
+    progress({'phase': 'sampling_documents'})
+    assert events[-1]['percent'] == 20
+    progress.reference_scored(6, input_tokens=101)
+    assert events[-1]['percent'] == 49.9
+    progress.finish_sampling(6)
+    progress.reference_scored(6)
+    assert events[-1]['percent'] == 50
+    progress.begin_paired()
+    progress.paired_scored(6, {})
+    assert events[-1]['percent'] == 100
+    assert [e['percent'] for e in events] == sorted(e['percent'] for e in events)
+
+
 def test_two_stage_progress_and_lcb_survive_worker_events_and_heartbeats():
     # Run the production callback without importing the GPU model stack.
     path = Path(__file__).parents[2] / "teutonic/evaluator/engine.py"

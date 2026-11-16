@@ -75,6 +75,21 @@ def test_reference_token_windows_preserve_order_and_all_documents(monkeypatch):
     assert [t for _,tokens in batches for t in tokens]==sequences
 
 
+@pytest.mark.parametrize('horizon_tokens', [16385, 32769, 524287, 524288])
+def test_reference_context_uses_horizon_tokens_not_original_mimo_bucket(horizon_tokens):
+    doc = SimpleNamespace(doc_id='expanded', byte_length=1, original_mimo_token_count=16384)
+    dataset = SimpleNamespace(text=lambda _: 'x')
+    tokens = [3]*(horizon_tokens-1) + [1]
+    tokenizer = SimpleNamespace(encode=lambda _: [tokens])
+    if horizon_tokens >= scorer.settings()['max_model_len']:
+        with pytest.raises(ValueError, match='no truncation'):
+            list(document_duel.reference_batches(dataset, [doc], tokenizer))
+    else:
+        batches = list(document_duel.reference_batches(dataset, [doc], tokenizer))
+        assert batches == [([doc], [tokens])]
+        scorer.validate_rows([{'id': doc.doc_id, 'tokens': tokens}], scorer.settings(), 10)
+
+
 def test_worker_environment_pins_determinism_and_never_forwards_credentials(tmp_path,monkeypatch):
     monkeypatch.setenv('TEUTONIC_HORIZON_KERNEL_CACHE_DIR',str(tmp_path/'kernels'))
     monkeypatch.setenv('TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY','never-forward')

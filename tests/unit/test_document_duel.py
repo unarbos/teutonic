@@ -18,6 +18,7 @@ from teutonic.evaluator.model_downloads import ModelDownloads
 @pytest.mark.parametrize("deferred", [False, True])
 def test_cache_miss_hit_and_shared_text_with_read_only_r2(tmp_path, monkeypatch, failure, preloaded, deferred):
     reference_gate, download_started, prepared = threading.Event(), threading.Event(), threading.Event()
+    first_reference_batch = threading.Event()
     client, _, catalog, mix = fixture()
     raw = canonical(catalog)
     client.objects[mix['sampling']['key']] = raw
@@ -30,6 +31,13 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(tmp_path, monkeypatch,
     def small_batches(*args, **kwargs):
         return original_batches(*args, **{**kwargs, 'batch_documents': 2})
     monkeypatch.setattr(duel, 'prepared_batches', small_batches)
+    original_sampling = duel.sample_document_batches
+    def streaming_sampling(*args, **kwargs):
+        for i, group in enumerate(original_sampling(*args, **{**kwargs, 'batch_documents': 2})):
+            if i == 1:
+                assert first_reference_batch.wait(5), 'Horizon waited for full sample selection'
+            yield group
+    monkeypatch.setattr(duel, 'sample_document_batches', streaming_sampling)
     events = []
     tokenizer_options = []
     class Tokenizer:
@@ -65,6 +73,8 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(tmp_path, monkeypatch,
                 from pathlib import Path
                 (Path(directory) / f"{role}.log").write_text("fixture scorer failure")
         def score(self, documents, sequences):
+            if self.role == "horizon":
+                first_reference_batch.set()
             if deferred and self.role == "horizon":
                 assert download_started.is_set()
                 reference_gate.set()  # A real resolver thread was blocked until inference.
@@ -162,7 +172,7 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(tmp_path, monkeypatch,
         assert reference_events[-1]['percent'] == 50
         assert reference_events[-1]['done'] == size
         if not expected_misses:
-            assert reference_events[0]['done'] == size
+            assert reference_events[0]['done'] > 0
         checkpoints = [e for e in events if e['phase'] == 'paired_scoring' and 'provisional_lcb' in e]
         assert len(checkpoints) > 1
         assert checkpoints[-1]['percent'] == 100
