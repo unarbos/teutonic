@@ -44,7 +44,7 @@ def runtime_identity():
 
 
 class HorizonWorker(Worker):
-    def __init__(self, *args, load_timeout=1200, **kwargs):
+    def __init__(self, *args, load_timeout=1800, **kwargs):
         super().__init__(*args, load_timeout=load_timeout, **kwargs)
 
     def _settings(self, role, gpu_ids, max_model_len):

@@ -264,8 +264,9 @@ reference losses were cached. After evaluation cleanup, Horizon reloads in the
 background for the next duel. The verdict does not wait for this reload; a new duel
 arriving before loading finishes waits when it reaches reference scoring.
 `/health` reports GPU readiness under `horizon_gpu`, separately from checkpoint
-verification under `horizon_download`. Horizon worker loading has a 20-minute
-timeout, including startup and post-evaluation preloads. Failed preloads are reported there and
+verification under `horizon_download`. Horizon and MiMo worker loading have a
+30-minute timeout, including Horizon startup and post-evaluation preloads.
+Failed preloads are reported there and
 retried when a duel needs the reference. Shutdown prevents further preloads and
 closes the resident worker. Current and preceding load logs live under
 `TEUTONIC_HORIZON_CACHE_DIR/gpu-worker/`. This lifecycle passed the corrected 7M
