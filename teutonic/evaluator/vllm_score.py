@@ -16,6 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
+from teutonic.evaluator.gpu_profile import gpu_profile, mimo_tensor_parallel_size
+
 BACKEND = "vllm-0.33-v1-bf16-batch-invariant-replicas-v2"
 PINS = {"vllm": "0.33.0", "torch": "2.14.0", "transformers": "5.20.2"}
 SINGLE_GPU_MAX_TOKENS = 128_974
@@ -25,9 +27,12 @@ def settings(role, tensor_parallel_size=None, max_model_len=None):
     if role not in {"horizon", "king", "challenger"}:
         raise ValueError("unknown scorer role")
     horizon = role == "horizon"
-    tp = tensor_parallel_size if tensor_parallel_size is not None else (8 if horizon else 1)
+    tp = tensor_parallel_size if tensor_parallel_size is not None else (8 if horizon else mimo_tensor_parallel_size())
     if tp not in ((8,) if horizon else (1, 2)):
         raise ValueError("Horizon requires TP8; MiMo requires TP1 replicas or TP2 large-document groups")
+    h200 = gpu_profile() == "h200"
+    if h200 and not horizon and tp != 2:
+        raise ValueError("H200 MiMo requires two GPUs per instance")
     value = {
         "trust_remote_code": True, "model_impl": "vllm", "dtype": "bfloat16",
         "tensor_parallel_size": tp, "enable_expert_parallel": True,
@@ -47,6 +52,9 @@ def settings(role, tensor_parallel_size=None, max_model_len=None):
         value["max_model_len"] = max_model_len
     if not horizon:
         value["attention_config"] = {"backend": "TRITON_ATTN_DIFFKV"}
+        if h200:
+            value["kv_cache_memory_bytes"] = 16 * 1024**3
+            value["gpu_memory_utilization"] = 0.9
     return value
 
 
@@ -64,7 +72,7 @@ def deterministic_env(role):
 
 def code_identity():
     return {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ("vllm_score.py", "mimo_vllm.py")}
+            for name in ("vllm_score.py", "mimo_vllm.py", "gpu_profile.py")}
 
 
 def identity():

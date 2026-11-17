@@ -16,7 +16,10 @@ from teutonic.evaluator.model_downloads import ModelDownloads
 @pytest.mark.parametrize("failure", [None, "horizon", "challenger"])
 @pytest.mark.parametrize("preloaded", [False, True])
 @pytest.mark.parametrize("deferred", [False, True])
-def test_cache_miss_hit_and_shared_text_with_read_only_r2(tmp_path, monkeypatch, failure, preloaded, deferred):
+@pytest.mark.parametrize("profile,tp", [("b300", 1), ("h200", 2)])
+def test_cache_miss_hit_and_shared_text_with_read_only_r2(
+        tmp_path, monkeypatch, failure, preloaded, deferred, profile, tp):
+    monkeypatch.setenv('TEUTONIC_EVALUATOR_GPU_PROFILE', profile)
     reference_gate, download_started, prepared = threading.Event(), threading.Event(), threading.Event()
     first_reference_batch = threading.Event()
     client, _, catalog, mix = fixture()
@@ -57,7 +60,11 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(tmp_path, monkeypatch,
     monkeypatch.setattr(duel, 'wait_for_gpu_release', lambda ids: None)
     class ModelWorker:
         def __init__(self, role, snapshot, ids, directory, identity, on_phase, **kwargs):
-            assert ids == list(range(8)) if role == 'horizon' else (len(ids) == 1 and ids[0] in (range(4) if role == 'king' else range(4, 8)))
+            if role == 'horizon':
+                assert ids == list(range(8))
+            else:
+                assert len(ids) == tp
+                assert all(i in (range(4) if role == 'king' else range(4, 8)) for i in ids)
             assert identity == (reference_identity if role == 'horizon' else mimo_identity)
             assert old_pool.closed
             if deferred and role != "horizon":
@@ -213,7 +220,7 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(tmp_path, monkeypatch,
     assert len(subprocess_calls) == (2 if preloaded else 1)
     assert old_pool.closed
     assert closed.count("horizon") == (2 if preloaded else 1)
-    assert closed.count("king") == closed.count("challenger") == 8
+    assert closed.count("king") == closed.count("challenger") == 8 // tp
     assert sum(options.get('eos_token_id') == 151645 for options in tokenizer_options) == 2
     # MiMo changes must not invalidate cached reference inference; Horizon changes must.
     mimo_identity['build'] = 'updated-mimo'

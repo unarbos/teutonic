@@ -1,7 +1,8 @@
-"""Four replicas per side, with two-GPU groups only for large documents."""
+"""Profile-specific MiMo replicas, with TP2 required for large documents."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from teutonic.evaluator.gpu_profile import mimo_tensor_parallel_size
 from teutonic.evaluator.vllm_runtime import Worker, wait_for_gpu_release
 from teutonic.evaluator.vllm_score import SINGLE_GPU_MAX_TOKENS
 
@@ -26,6 +27,7 @@ class MiMoPool:
         self.executor = ThreadPoolExecutor(max_workers=8)
         self.engines, self.reports = {}, []
         self.tp, self.context, self.generation = None, None, 0
+        self.minimum_tp = mimo_tensor_parallel_size()
 
     def _release(self):
         engines, self.engines = self.engines, {}
@@ -66,12 +68,14 @@ class MiMoPool:
             raise ValueError("unaligned or empty replica batch")
         results = {"king": [None] * len(documents), "challenger": [None] * len(documents)}
         # Large documents never cause ordinary documents to run on a different topology.
-        for tp in (1, 2):
+        for tp in ((2,) if self.minimum_tp == 2 else (1, 2)):
             indices = [i for i, tokens in enumerate(sequences)
-                       if (len(tokens) <= SINGLE_GPU_MAX_TOKENS) == (tp == 1)]
+                       if self.minimum_tp == 2 or (len(tokens) <= SINGLE_GPU_MAX_TOKENS) == (tp == 1)]
             if not indices:
                 continue
             context = SINGLE_GPU_MAX_TOKENS + 1 if tp == 1 else max(len(sequences[i]) for i in indices) + 1
+            if self.minimum_tp == 2:
+                context = max(131073, context)
             self._ensure(tp, context)
             groups = balanced_groups(indices, sequences, 4 // tp)
             futures = {}

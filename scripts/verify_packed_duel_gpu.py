@@ -122,6 +122,7 @@ def main():
 
     from teutonic.evaluation.masking import DOCUMENT_EOS_TOKEN_ID
     from teutonic.evaluator import document_duel, engine
+    from teutonic.evaluator.gpu_profile import mimo_tensor_parallel_size
     from teutonic.evaluator.text_pipeline import TextTokenizer, prepared_batches
 
     snapshot = str(args.mimo_snapshot.resolve())
@@ -172,8 +173,9 @@ def main():
                 if samples["king_nll"] != samples["challenger_nll"]:
                     raise AssertionError("same-checkpoint replica losses differ")
                 replicas = workers["roles"]["mimo_replicas"]
-                if len(replicas) != 8 or any(len(r["gpu_ids"]) != 1 for r in replicas):
-                    raise AssertionError("ordinary fixture did not use eight independent GPU replicas")
+                tp = mimo_tensor_parallel_size()
+                if len(replicas) != 8 // tp or any(len(r["gpu_ids"]) != tp for r in replicas):
+                    raise AssertionError("fixture did not use the configured MiMo replica topology")
                 expected = metadata["n_documents"] if name == "cache-miss" else 0
                 if metadata["reference_misses"] != expected:
                     raise AssertionError("unexpected reference-cache behavior")

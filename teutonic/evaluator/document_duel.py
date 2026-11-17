@@ -17,6 +17,7 @@ from teutonic.evaluation.masking import DOCUMENT_EOS_TOKEN_ID
 from teutonic.evaluation.packed_text import DatasetReader, PackedDataset, digest, read_client
 from teutonic.evaluation.reference_policy import reference_verdict
 from teutonic.evaluator.document_progress import DocumentProgress
+from teutonic.evaluator.gpu_profile import parallel_strategy
 from teutonic.evaluator.horizon import REPO, REVISION, file_hash
 from teutonic.evaluator.horizon_pipeline import BACKEND as REFERENCE_BACKEND
 from teutonic.evaluator.horizon_pipeline import MAX_REQUEST_DOCUMENTS, MAX_REQUEST_TOKENS
@@ -278,7 +279,7 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
     reports["mimo_replicas"] = pool.reports
     combined_runtime = {"horizon": reference_runtime, "mimo": runtime}
     workers = {"backend": {"horizon": REFERENCE_BACKEND, "mimo": MIMO_BACKEND}, "runtime": combined_runtime, "roles": reports,
-               "model_parallel_strategy": "replicas_with_large_document_tp2",
+               "model_parallel_strategy": parallel_strategy(),
                "scored_tokens": counts}
     # The 100% checkpoint uses all selected documents and is the final verdict.
     # Earlier checkpoints are display-only; they never stop or promote a duel.

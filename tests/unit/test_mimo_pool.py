@@ -44,14 +44,16 @@ def test_balancing_is_deterministic_and_keeps_every_document():
     assert all(group == sorted(group) for group in groups)
 
 
-def test_partial_loading_failure_closes_started_replicas(monkeypatch, tmp_path):
+@pytest.mark.parametrize('profile,tp', [('b300', 1), ('h200', 2)])
+def test_partial_loading_failure_closes_started_replicas(monkeypatch, tmp_path, profile, tp):
+    monkeypatch.setenv('TEUTONIC_EVALUATOR_GPU_PROFILE', profile)
     closed = []
     class Worker:
         def __init__(self, role, snapshot, ids, *a, **kw):
             self.report = {"gpu_ids": ids}
             self.ids = ids
         def wait_ready(self):
-            if self.ids == [3]:
+            if 3 in self.ids:
                 raise RuntimeError("load failure")
         def close(self):
             closed.append(self.ids)
@@ -60,4 +62,4 @@ def test_partial_loading_failure_closes_started_replicas(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="load failure"), \
             mimo_pool.MiMoPool("k", "c", list(range(8)), tmp_path, {}, lambda e: None) as pool:
         pool.score([SimpleNamespace(doc_id="0")], [[1, 151645]])
-    assert sorted(closed) == [[i] for i in range(8)]
+    assert sorted(closed) == [list(range(i, i + tp)) for i in range(0, 8, tp)]

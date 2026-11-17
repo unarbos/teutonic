@@ -20,6 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
+from teutonic.evaluator.gpu_profile import gpu_profile
+
 BACKEND = "horizon-layer-pipeline-bf16-deterministic-v1"
 PINS = {"torch": "2.15.0", "transformers": "5.15.1", "accelerate": "1.15.0"}
 MAX_REQUEST_DOCUMENTS = 1024
@@ -27,12 +29,15 @@ MAX_REQUEST_TOKENS = 4 * 1024 * 1024
 
 
 def settings():
-    return {"dtype": "bfloat16", "pipeline_parallel_size": 8, "attention": "sdpa",
+    value = {"dtype": "bfloat16", "pipeline_parallel_size": 8, "attention": "sdpa",
             "batch_tokens": 131072, "min_batch_tokens": 8192, "max_batch": 128, "moe_chunk": 32768,
             "head_chunk": 8192, "queue_depth": 2, "max_model_len": 524288,
             "max_request_documents": MAX_REQUEST_DOCUMENTS, "max_request_tokens": MAX_REQUEST_TOKENS,
             "seed": 42, "deterministic_algorithms": True, "reduction": "fp32-ce-cpu-fsum",
             "length_sort": "stable-longest-batches-first", "eos_token_id": 1}
+    if gpu_profile() == "h200":
+        value.update(batch_tokens=32768, max_batch=32, moe_chunk=8192, head_chunk=2048, queue_depth=1)
+    return value
 
 
 def deterministic_env():
@@ -42,7 +47,7 @@ def deterministic_env():
 
 def code_identity():
     return {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ("horizon_pipeline.py", "horizon_pipeline_runtime.py", "vllm_runtime.py")}
+            for name in ("horizon_pipeline.py", "horizon_pipeline_runtime.py", "vllm_runtime.py", "gpu_profile.py")}
 
 
 def identity():
@@ -169,6 +174,24 @@ def _moe_forward(self, hidden_states):
     return final, router_logits
 
 
+def pack_experts_incrementally(module):
+    """Keep at most one packed layer extra while replacing individual expert weights."""
+    import torch
+    first = module.experts[0]
+    count = len(module.experts)
+    gate, down = first.gate_proj.weight, first.down_proj.weight
+    module.w13 = torch.empty((count, gate.shape[0] * 2, gate.shape[1]), dtype=gate.dtype, device=gate.device)
+    module.w2 = torch.empty((count, *down.shape), dtype=down.dtype, device=down.device)
+    width = gate.shape[0]
+    with torch.no_grad():
+        for i, expert in enumerate(module.experts):
+            module.w13[i, :width].copy_(expert.gate_proj.weight)
+            module.w13[i, width:].copy_(expert.up_proj.weight)
+            module.w2[i].copy_(expert.down_proj.weight)
+            for linear in (expert.gate_proj, expert.up_proj, expert.down_proj):
+                linear.weight.data = torch.empty(0, dtype=linear.weight.dtype, device=linear.weight.device)
+
+
 class HorizonPipeline:
     def __init__(self, snapshot):
         import torch
@@ -197,10 +220,13 @@ class HorizonPipeline:
                 m = layer.mlp
                 if not hasattr(m, "experts"):
                     continue
-                m.w13 = torch.stack([torch.cat([e.gate_proj.weight, e.up_proj.weight], 0)
-                                     for e in m.experts]).contiguous()
-                m.w2 = torch.stack([e.down_proj.weight for e in m.experts]).contiguous()
                 m.moe_inter = m.experts[0].gate_proj.weight.shape[0]
+                if gpu_profile() == "h200":
+                    pack_experts_incrementally(m)
+                else:
+                    m.w13 = torch.stack([torch.cat([e.gate_proj.weight, e.up_proj.weight], 0)
+                                         for e in m.experts]).contiguous()
+                    m.w2 = torch.stack([e.down_proj.weight for e in m.experts]).contiguous()
                 m._pipeline_moe_chunk = self.configuration["moe_chunk"]
                 for expert in m.experts:
                     for linear in (expert.gate_proj, expert.up_proj, expert.down_proj):

@@ -11,6 +11,7 @@ import time
 import weakref
 from pathlib import Path
 
+from teutonic.evaluator.gpu_profile import ENVIRONMENT_KEY, gpu_profile
 from teutonic.evaluator.vllm_score import code_identity, deterministic_env, input_hash, settings
 
 _workers = weakref.WeakSet()
@@ -43,10 +44,20 @@ def worker_env(role, gpu_ids):
                "CUDA_PATH", "CUDA_CACHE_PATH", "HF_HOME", "HF_HUB_CACHE", "XDG_CACHE_HOME"}
     env = {key: value for key, value in os.environ.items() if key in allowed}
     env.update(deterministic_env(role))
+    env[ENVIRONMENT_KEY] = gpu_profile()
     env["PATH"] = str(Path(worker_python()).absolute().parent) + os.pathsep + env.get("PATH", "")
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
+    triton_root = os.environ.get("TEUTONIC_VLLM_TRITON_CACHE_DIR")
+    if triton_root is None and gpu_profile() == "h200":
+        triton_root = "/tmp/teutonic/vllm-triton"
+    if triton_root:
+        # Keep independent engines out of the same cache. On H200 pods HOME
+        # may be a FUSE mount; use local storage for compiler metadata instead.
+        cache = Path(triton_root) / f"{role}-gpus-{'-'.join(map(str, gpu_ids)) or 'identity'}"
+        cache.mkdir(parents=True, exist_ok=True)
+        env["TRITON_CACHE_DIR"] = str(cache)
     if root := os.environ.get("TEUTONIC_VLLM_CACHE_DIR"):
         workspace = Path(root) / ("horizon" if role == "horizon" else "mimo")
         workspace.mkdir(parents=True, exist_ok=True)

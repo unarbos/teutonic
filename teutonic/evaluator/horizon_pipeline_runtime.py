@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from teutonic.evaluator import horizon_pipeline as scorer
+from teutonic.evaluator.gpu_profile import ENVIRONMENT_KEY, gpu_profile
 from teutonic.evaluator.vllm_runtime import Worker
 
 
@@ -20,6 +21,7 @@ def worker_env(gpu_ids):
                "CUDA_PATH", "HF_HOME", "HF_HUB_CACHE", "XDG_CACHE_HOME"}
     env = {key: value for key, value in os.environ.items() if key in allowed}
     env.update(scorer.deterministic_env())
+    env[ENVIRONMENT_KEY] = gpu_profile()
     env["PATH"] = str(Path(worker_python()).absolute().parent) + os.pathsep + env.get("PATH", "")
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
     env["PYTHONDONTWRITEBYTECODE"] = "1"

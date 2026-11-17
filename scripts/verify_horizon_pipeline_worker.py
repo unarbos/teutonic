@@ -27,6 +27,10 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--small-batches-only', action='store_true',
                    help='Check short and mixed-length groups of 1/2/3/8; skip the throughput cases')
+    p.add_argument('--compare-hardware', action='store_true',
+                   help='Report saved-baseline differences; require exact repeats against this hardware initial pass')
+    p.add_argument('--processes', type=int, choices=(1, 2), default=1,
+                   help='Use two fresh workers to additionally check repeatability across model reloads')
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     fixture = json.loads(args.fixture.read_text())
@@ -36,7 +40,9 @@ def main():
             for i in range(128)]
     runtime = runtime_identity()
     report = {'runtime': runtime, 'cases': [], 'workers': [], 'passed': False,
+              'compare_hardware': args.compare_hardware,
               'scope': 'small-batch-repeatability' if args.small_batches_only else 'full-acceptance'}
+    hardware_expected = {}
     stop = threading.Event()
     peaks = [0] * 8
 
@@ -63,7 +69,7 @@ def main():
     telemetry = threading.Thread(target=monitor, daemon=True)
     telemetry.start()
     try:
-        for process in range(1):
+        for process in range(args.processes):
             wait_for_gpu_release(list(range(8)), timeout=180)
             with HorizonWorker('horizon', args.snapshot, list(range(8)), args.output, runtime,
                                lambda event: print(json.dumps(event), flush=True),
@@ -79,19 +85,32 @@ def main():
                         values.extend(worker.score(docs, [r['tokens'] for r in group]))
                     elapsed = time.monotonic()-started
                     deltas = [r['nll']-expected[int(r['id'].split('-')[1]) % 128] for r in values]
+                    if args.compare_hardware and not hardware_expected:
+                        hardware_expected.update({int(r['id'].split('-')[1]): r['nll'] for r in values})
+                    repeat_deltas = ([r['nll'] - hardware_expected[int(r['id'].split('-')[1]) % 128]
+                                      for r in values] if args.compare_hardware else deltas)
                     count = sum(r['scored_tokens'] for r in values)
+                    byte_count = sum(fixture[(int(r['id'].split('-')[1]) % 128) % len(fixture)].get('byte_length', 0)
+                                     for r in values)
                     scoring = worker.report['scoring_seconds']-before
                     case = {'process': process, 'name': name, 'documents': len(values),
                             'scored_tokens': count, 'wall_seconds': elapsed, 'scoring_seconds': scoring,
                             'scored_tokens_per_second': count/scoring,
                             'wall_tokens_per_second': count/elapsed,
                             'different_document_nll': sum(d != 0 for d in deltas),
-                            'max_abs_document_nll_delta': max(map(abs, deltas), default=0)}
+                            'max_abs_document_nll_delta': max(map(abs, deltas), default=0),
+                            'baseline_mean_nats_per_token_delta': math.fsum(deltas)/count,
+                            'baseline_mean_bits_per_byte_delta': math.fsum(deltas)/(math.log(2)*byte_count)
+                                if byte_count else None,
+                            'baseline_max_abs_document_nats_per_token_delta': max(
+                                (abs(d)/r['scored_tokens'] for d, r in zip(deltas, values, strict=True)), default=0),
+                            'different_repeat_document_nll': sum(d != 0 for d in repeat_deltas),
+                            'max_abs_repeat_document_nll_delta': max(map(abs, repeat_deltas), default=0)}
                     report['cases'].append(case)
                     (args.output/f'{process}-{name}.json').write_text(json.dumps(values))
                     save()
                     print(json.dumps(case), flush=True)
-                    if any(deltas):
+                    if any(repeat_deltas):
                         raise AssertionError(f'Production worker differs from deterministic baseline: {case}')
 
                 run('initial', [rows])

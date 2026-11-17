@@ -367,6 +367,63 @@ Existing vLLM reference entries are preserved but cannot be reused by this backe
 Its acceptance script is `scripts/verify_horizon_pipeline_worker.py`; comparisons
 against saved losses run only in validation, never inside live evaluations.
 
+For an eight-H200 host, set `TEUTONIC_EVALUATOR_GPU_PROFILE=h200` in the
+evaluator environment. The default remains `b300`. H200 uses two MiMo replicas
+per side, each spanning two GPUs, for all document sizes. It reserves 16 GiB of
+KV cache per GPU with a 90% memory-utilization target. Horizon still uses all eight
+GPUs, with 32,768 padded tokens, at most 32 documents per micro-batch, an 8,192-token
+MoE chunk, a 2,048-token output-head chunk, and one queued micro-batch per stage.
+Expert weights are packed incrementally to reduce loading peaks. Small-batch
+padding, full-document context checks, BF16 weights and scoring units are preserved.
+H200 MiMo Triton caches default to `/tmp/teutonic/vllm-triton`, separated by
+role and GPU group. Override with `TEUTONIC_VLLM_TRITON_CACHE_DIR` on local storage.
+This avoids sharing compiler metadata through the pod's encrypted FUSE home
+directory, where a repeat test encountered a missing kernel metadata file.
+
+The profile propagates to both worker environments and changes the reference
+cache identity; do not reuse B300 reference-loss caches as H200 acceptance results.
+Use the same pinned dependency environments above and qualify the installed GPU
+driver with actual worker kernels. Run `scripts/verify_packed_duel_gpu.py` on the
+new host before routing validator traffic there. This tests both GPU phases,
+same-checkpoint replica agreement, deterministic sample selection, cache miss/hit
+behavior, and fresh MiMo worker agreement. Hardware acceptance is separate from
+the CPU profile tests; do not infer cross-hardware bitwise equality from the profile.
+
+H200 preparation does not require a database migration or a different competition
+manifest. The validator's scoring policy, threshold and token budget remain the same.
+Set these paths alongside the existing R2 configuration in `.gpu.env`:
+
+```dotenv
+TEUTONIC_EVALUATOR_GPU_PROFILE=h200
+TEUTONIC_PYTHON=/root/teutonic/.venv/bin/python
+TEUTONIC_VLLM_PYTHON=/root/teutonic/.venv-vllm/bin/python
+TEUTONIC_HORIZON_PYTHON=/root/teutonic/.venv-horizon/bin/python
+```
+
+For manual GPU acceptance, export that environment into the test shell; these
+scripts do not load `.gpu.env` themselves. With the checkpoint paths supplied:
+
+```bash
+set -a
+source .gpu.env
+set +a
+.venv/bin/python scripts/verify_packed_duel_gpu.py \
+  --mimo-snapshot "$MIMO_SNAPSHOT" \
+  --horizon-snapshot "$HORIZON_SNAPSHOT" \
+  --output-dir "$ACCEPTANCE_OUTPUT/full-duel"
+```
+
+When a saved Horizon fixture and baseline are available, also run
+`scripts/verify_horizon_pipeline_worker.py` with `--snapshot`, `--fixture`,
+`--baseline` and a fresh `--output` directory, adding
+`--small-batches-only --compare-hardware --processes 2`. This reports differences
+from the saved hardware baseline separately from exact repeatability on the H200
+host, including groups of 1/2/3/8 documents and a fresh model process.
+Review those differences before accepting the new hardware. The small fixture
+does not establish throughput at the full competition budget or memory safety at
+the maximum context length. A reachable `/health` endpoint alone is not GPU
+acceptance; inspect the test reports before switching validator traffic.
+
 Dataset reads require authenticated R2 access to **`dataset`**, under
 `teutonic-text/`. Configure `TEUTONIC_EVALUATOR_R2_ENDPOINT`,
 `TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID`, and `TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY`.

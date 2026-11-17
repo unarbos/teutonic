@@ -71,6 +71,7 @@ from teutonic.evaluator import replica_loading, sequence_parallel
 from teutonic.evaluator.cache_lock import cache_lock
 from teutonic.evaluator.document_index import DocumentIndexDownloadError, RangeDownloadError
 from teutonic.evaluator.document_masking import masked_model_inputs
+from teutonic.evaluator.gpu_profile import gpu_profile, mimo_tensor_parallel_size, parallel_strategy
 from teutonic.evaluator.horizon import HorizonDownload
 from teutonic.evaluator.module_cache import transformers_module_cache_lock
 from teutonic.storage.artifacts import R2ArtifactResolver
@@ -270,15 +271,17 @@ def device_plan_for_gpus(gpu_ids: list[int]) -> str:
 
 
 def model_worker_specs(gpu_ids: list[int]) -> list[dict]:
-    """Give each duel side four independent, single-GPU model replicas."""
+    """Split each side's four GPUs into the deployment's independent replicas."""
     if len(gpu_ids) != 8 or len(set(gpu_ids)) != 8 or any(gpu < 0 for gpu in gpu_ids):
         raise RuntimeError(
             f"MiMo duel requires exactly 8 GPUs with distinct non-negative IDs, got {gpu_ids}"
         )
+    tp = mimo_tensor_parallel_size()
     return [
-        {"worker_id": f"{role}-{replica}", "role": role, "gpu_ids": [gpu_ids[offset + replica]]}
+        {"worker_id": f"{role}-{replica}", "role": role,
+         "gpu_ids": gpu_ids[offset + replica * tp:offset + (replica + 1) * tp]}
         for role, offset in (("king", 0), ("challenger", MODEL_INSTANCES_PER_SIDE))
-        for replica in range(MODEL_INSTANCES_PER_SIDE)
+        for replica in range(MODEL_INSTANCES_PER_SIDE // tp)
     ]
 
 
@@ -2345,7 +2348,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV3) -> None:
             "king_device": king_device,
             "challenger_device": challenger_device,
             "parallel_models": use_parallel,
-            "gpu_memory_fraction": 0.8,
+            "gpu_memory_fraction": 0.9 if gpu_profile() == "h200" else 0.8,
             "limits": limits_meta,
             "model_artifacts": {
                 "king": king_artifacts,
@@ -2355,11 +2358,11 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV3) -> None:
                 "workers": worker_meta,
             },
             "max_model_len": corpus_max_seq_len,
-            "gpus_per_model_instance": 1,
-            "model_instances_per_side": 4,
-            "worker_processes": 8,
-            "tensor_parallel_size": 1,
-            "model_parallel_strategy": "replicas_with_large_document_tp2",
+            "gpus_per_model_instance": mimo_tensor_parallel_size(),
+            "model_instances_per_side": 4 // mimo_tensor_parallel_size(),
+            "worker_processes": 8 // mimo_tensor_parallel_size(),
+            "tensor_parallel_size": mimo_tensor_parallel_size(),
+            "model_parallel_strategy": parallel_strategy(),
             "grouped_moe": True,
             "dataset": public_dataset_meta,
             "shards_used": public_dataset_meta.get("shards_used", []),
@@ -2379,10 +2382,10 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV3) -> None:
                 hardware={
                     "gpu_ids": list(_gpu_ids),
                     "workers": [spec["worker_id"] for spec in worker_specs],
-                    "model_parallel_strategy": "replicas_with_large_document_tp2",
+                    "model_parallel_strategy": parallel_strategy(),
                     "reference_tensor_parallel_size": 1,
                     "reference_pipeline_parallel_size": 8,
-                    "duel_tensor_parallel_size": 1,
+                    "duel_tensor_parallel_size": mimo_tensor_parallel_size(),
                 },
             )
         )
@@ -2448,6 +2451,7 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV3) -> None:
 async def lifespan(app: FastAPI):
     global _gpu_ids, _model_worker_pool, _horizon_downloader, _idle_horizon
     setup_logging()
+    profile = gpu_profile()  # Reject invalid profiles before starting workers or downloads.
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     EVAL_RECORD_DIR.mkdir(parents=True, exist_ok=True)
     COMPLETED_SAFETENSORS_SHA_FILE.touch(exist_ok=True)
@@ -2464,8 +2468,9 @@ async def lifespan(app: FastAPI):
     if len(_gpu_ids) != 8 or len(set(_gpu_ids)) != 8:
         raise RuntimeError("document evaluation requires eight distinct GPUs")
     log.info(
-        "Pair eval server starting; arch=%s gpus=%s model_cache=%s shard_cache=%s records=%s",
+        "Pair eval server starting; arch=%s profile=%s gpus=%s model_cache=%s shard_cache=%s records=%s",
         chain_config.ARCH_MODULE,
+        profile,
         _gpu_ids,
         MODEL_CACHE_DIR,
         SHARD_CACHE_DIR,
@@ -2537,17 +2542,18 @@ async def health():
             "max_completed_evals": MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA,
         },
         "defaults": {
+            "gpu_profile": gpu_profile(),
             "batch_size": DEFAULT_BATCH_SIZE,
             "alpha": DEFAULT_ALPHA,
             "batch_token_budget": DEFAULT_BATCH_TOKEN_BUDGET,
             "attn_implementation": "TRITON_ATTN_DIFFKV",
-            "gpus_per_model_instance": 1,
-            "model_instances_per_side": 4,
-            "worker_processes": 8,
-            "tensor_parallel_size": 1,
+            "gpus_per_model_instance": mimo_tensor_parallel_size(),
+            "model_instances_per_side": 4 // mimo_tensor_parallel_size(),
+            "worker_processes": 8 // mimo_tensor_parallel_size(),
+            "tensor_parallel_size": mimo_tensor_parallel_size(),
             "reference_tensor_parallel_size": 1,
             "reference_pipeline_parallel_size": 8,
-            "model_parallel_strategy": "replicas_with_large_document_tp2",
+            "model_parallel_strategy": parallel_strategy(),
             "grouped_moe": True,
             "persistent_model_workers": True,
             "persistent_mimo_workers": False,
