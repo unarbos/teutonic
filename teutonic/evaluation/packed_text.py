@@ -190,7 +190,12 @@ class DatasetReader:
                     del self._objects[key]
 
     def _read(self, key, consume, *, bucket=None, **kwargs):
-        from botocore.exceptions import ClientError, ConnectionClosedError, ReadTimeoutError
+        from botocore.exceptions import (
+            ClientError,
+            ConnectionClosedError,
+            IncompleteReadError,
+            ReadTimeoutError,
+        )
 
         bucket = self.bucket if bucket is None else bucket
         with self._object((bucket, key)):
@@ -207,7 +212,7 @@ class DatasetReader:
                     if attempt == 7 or (status not in {429, 500, 502, 503, 504}
                                        and code not in {"ServiceUnavailable", "SlowDown"}):
                         raise
-                except (ConnectionClosedError, ReadTimeoutError):
+                except (ConnectionClosedError, IncompleteReadError, ReadTimeoutError):
                     if attempt == 7:
                         raise
                 delay = min(30, 2**attempt)
@@ -225,6 +230,8 @@ class DatasetReader:
         return json.loads(raw)
 
     def read(self, obj, offset, length):
+        from botocore.exceptions import IncompleteReadError
+
         path = relative_path(obj["path"])
         if offset < 0 or length < 0 or offset + length > obj["size_bytes"]:
             raise ValueError("range outside object")
@@ -237,8 +244,10 @@ class DatasetReader:
             if response.get("ETag") != obj["etag"]:
                 raise ValueError("dataset object changed")
             raw = body.read(length + 1)
-            if len(raw) != length:
-                raise ValueError("short or oversized range response")
+            if len(raw) < length:
+                raise IncompleteReadError(actual_bytes=len(raw), expected_bytes=length)
+            if len(raw) > length:
+                raise ValueError("oversized range response")
             return raw
         return self._read(self.prefix + path, consume, Range=f"bytes={offset}-{end}", IfMatch=obj["etag"])
 

@@ -29,7 +29,10 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(
     snapshot = tmp_path / 'model'
     snapshot.mkdir()
     (snapshot / 'tokenizer.json').write_text('{}')
-    monkeypatch.setattr(duel, 'read_client', lambda **kwargs: client)
+    def read_client(**kwargs):
+        assert kwargs['max_pool_connections'] >= 64 + 16
+        return client
+    monkeypatch.setattr(duel, 'read_client', read_client)
     original_batches = duel.prepared_batches
     batch_generators = []
     def small_batches(*args, **kwargs):

@@ -3,11 +3,38 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, IncompleteReadError
 from botocore.response import StreamingBody
 from urllib3.exceptions import ReadTimeoutError
 
 from teutonic.evaluation import packed_text
+
+
+@pytest.mark.parametrize('partial', [b'', b'ab'])
+@pytest.mark.parametrize('persistent', [False, True])
+def test_incomplete_body_retries_same_range_with_bounded_attempts(monkeypatch, partial, persistent):
+    calls, bodies, sleeps = [], [], []
+
+    class Client:
+        def get_object(self, **kwargs):
+            calls.append(kwargs)
+            raw = io.BytesIO(partial if persistent or len(calls) == 1 else b'abcd')
+            bodies.append(raw)
+            return {'Body': StreamingBody(raw, 4), 'ETag': '"pin"',
+                    'ContentRange': 'bytes 5-8/100'}
+
+    monkeypatch.setattr(packed_text.time, 'sleep', sleeps.append)
+    reader = packed_text.DatasetReader(Client())
+    obj = {'path': 'text/a.utf8', 'etag': '"pin"', 'size_bytes': 100}
+    if persistent:
+        with pytest.raises(IncompleteReadError):
+            reader.read(obj, 5, 4)
+    else:
+        assert reader.read(obj, 5, 4) == b'abcd'
+    assert calls == [{'Bucket': 'dataset', 'Key': 'teutonic-text/text/a.utf8',
+                      'Range': 'bytes=5-8', 'IfMatch': '"pin"'}] * (8 if persistent else 2)
+    assert sleeps == ([1, 2, 4, 8, 16, 30, 30] if persistent else [1])
+    assert all(body.closed for body in bodies) and not reader._objects
 
 
 def test_streaming_body_timeout_retries_pinned_range(monkeypatch):

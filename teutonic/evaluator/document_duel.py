@@ -27,6 +27,7 @@ from teutonic.evaluator.horizon_pipeline_runtime import (
 )
 from teutonic.evaluator.mimo_pool import MiMoPool
 from teutonic.evaluator.text_pipeline import TextTokenizer, prepared_batches
+from teutonic.evaluator.text_prefetch import prefetched_text_batches
 from teutonic.evaluator.text_sampling import (
     prefetched_document_batches,
     sample_document_batches,
@@ -134,7 +135,9 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
     progress = DocumentProgress(0, on_phase, token_budget=req.packed_dataset["token_budget"])
     on_phase = progress
     on_phase({"phase": "dataset_loading"})
-    reader = DatasetReader(read_client(max_pool_connections=64))
+    # 64 index readers and 16 text-prefetch readers share this client. Leave
+    # headroom so completed requests can reuse connections instead of discarding them.
+    reader = DatasetReader(read_client(max_pool_connections=96))
     mix = req.packed_dataset
     dataset = PackedDataset(reader, mix["dataset"], text_cache=cache_dir)
     catalog = reader.json(mix["sampling"])
@@ -171,6 +174,7 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
         worker = None
         with ExitStack() as resources:
             groups = resources.enter_context(prefetched_document_batches(batches, timing=sampling_timing))
+            groups = resources.enter_context(prefetched_text_batches(dataset, groups))
             for batch in groups:
                 check()
                 documents.extend(batch)
