@@ -3,7 +3,7 @@
   var ENDPOINT = "/dashboard.json";
   var DATASET_MANIFEST_URL = "/datasets/inventory.json";
   var BENCHMARK_STORAGE_BASE = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev/";
-  var BENCHMARK_COMPETITIONS = ["main", "mix01", "mix02", "mix03", "mix04", "mix05", "mix06", "mix07"];
+  var BENCHMARK_COMPETITIONS = ["main", "main2", "mix01", "mix02", "mix03", "mix04", "mix05", "mix06", "mix07", "mix08", "mix09"];
   var MODEL_STORAGE_BASE = "https://pub-0821d4e196224864af220294345fd141.r2.dev/";
   var POLL_MS = 15000;
   var DATASET_POLL_MS = 60000;
@@ -275,7 +275,16 @@
     }
   }
 
+  function primaryDashboard(d) {
+    var next = (specialists || []).find(function (s) { return s.key === "main2" && s.active !== false; });
+    if (!next) return d;
+    var view = next.dashboard || {};
+    return Object.assign({}, d, view, { king: view.king || next.startingKing || null,
+      history: view.history || [], primaryCompetition: "MAIN2" });
+  }
   function renderHeader(d) {
+    d = primaryDashboard(d);
+    text("primary-king-label", (d.primaryCompetition || "MAIN") + " KING:");
     var chain = d.chain || {}, king = d.king || {}, market = d.market || {};
     text("tao-price", finite(market.tao_price_usd) == null ? "--" : usd(market.tao_price_usd));
     var change = finite(market.tao_change_24h), changeNode = el("tao-change");
@@ -301,7 +310,7 @@
     document.title = (chain.name || "Teutonic") + " — Dashboard";
   }
   function competitionSources() {
-    return [{ key: "main", dashboard: lastPayload, failed: mainQueueFailed }].concat(specialists || []);
+    return [{ key: "main", dashboard: lastPayload, failed: mainQueueFailed, active: mainMixState ? mainMixState.active : true }].concat(specialists || []);
   }
   function evaluationSources() {
     return TeutonicDashboardV1.liveEvaluationSources(competitionSources(), livePayload, Date.now(), liveFailed);
@@ -438,7 +447,8 @@
   function renderReigns() {
     var body = el("reigns-body"), rows = [];
     competitionSources().forEach(function (source) {
-      var rewardMixes = (mainMixState && mainMixState.rewardTransition || {}).mixes || {};
+      var rewardState = mainMixState && mainMixState.rewardTransition || {};
+      var rewardMixes = rewardState.kings || rewardState.mixes || {};
       if (source.active === false && !rewardMixes[source.key]) return;
       var d = source.dashboard;
       if (!d) return;
@@ -453,6 +463,8 @@
         });
       } else if (d.king) {
         rows.push(Object.assign({}, d.king, d.king_payout || {}, { competition: source.key }));
+      } else if (source.startingKing) {
+        rows.push(Object.assign({}, source.startingKing, { competition: source.key, pinned: true }));
       } else {
         rows.push({ competition: source.key, awaitingWinner: true });
       }
@@ -468,20 +480,21 @@
         ["--", "--", "--", "--", "AWAITING FIRST WINNER", "--", "--", "--", "--"].forEach(function (value) { cell(tr, value); });
         body.appendChild(tr); return;
       }
-      cell(tr, "#" + number(item.reign_number)); cell(tr, item.uid); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); var modelCell = cell(tr, identity(item), "", item.model_digest); if (item.model_reference) { var link = document.createElement("a"); link.href = new URL(item.model_reference + "manifest.json", MODEL_STORAGE_BASE).href; link.target = "_blank"; link.rel = "noopener"; link.textContent = identity(item); link.title = "Open model manifest"; modelCell.textContent = ""; modelCell.appendChild(link); } cell(tr, percent(item.weight)); cell(tr, metric(item.alpha_per_hour, 3)); cell(tr, usd(item.usd_per_hour)); cell(tr, date(item.crowned_at)); body.appendChild(tr);
+      cell(tr, item.pinned ? "PINNED" : "#" + number(item.reign_number)); cell(tr, item.uid); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); var modelCell = cell(tr, identity(item), "", item.model_digest); if (item.model_reference) { var link = document.createElement("a"); link.href = new URL(item.model_reference + "manifest.json", MODEL_STORAGE_BASE).href; link.target = "_blank"; link.rel = "noopener"; link.textContent = identity(item); link.title = "Open model manifest"; modelCell.textContent = ""; modelCell.appendChild(link); } cell(tr, percent(item.weight)); cell(tr, metric(item.alpha_per_hour, 3)); cell(tr, usd(item.usd_per_hour)); cell(tr, date(item.crowned_at)); body.appendChild(tr);
     });
   }
   function renderWeightStatus(d) {
     var weight = d.weight_status || {}; text("weight-state", String(weight.state || weight.latest_attempt_state || "NOT SCHEDULED").toUpperCase()); text("weight-block", number(weight.latest_finalized_block || weight.last_attempted_block)); text("weight-next", number(weight.next_due_block)); text("weight-finalized", date(weight.finalized_at));
   }
   function renderChart(d) {
+    d = primaryDashboard(d);
     var svg = el("loss-chart"), tooltip = el("dataset-change-tooltip");
     tooltip.hidden = true;
     var amount = finite(el("smooth-slider").value) || 0;
     var smoothLabel = amount > 0 ? "SMOOTH " + smoothMode.toUpperCase() + " " + amount.toFixed(2) : "SMOOTH OFF";
     text("smooth-status", smoothLabel);
     var chart = TeutonicDashboardV1.lossChartPresentation(d.history || []), points = chart.points;
-    text("performance-heading", "MAIN LOSS HISTORY");
+    text("performance-heading", (d.primaryCompetition || "MAIN") + " LOSS HISTORY");
     text("chart-count", points.length + (points.length === 1 ? " EVALUATION" : " EVALUATIONS"));
     el("chart-empty").hidden = points.length > 0;
     if (!points.length) { svg.innerHTML = ""; return; }
@@ -557,6 +570,30 @@
   updateSmoothControls();
   smoothSlider.addEventListener("input", function () { localStorage.setItem("smoothing", smoothSlider.value); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("smooth-mode-toggle").addEventListener("click", function () { smoothMode = smoothMode === "lowess" ? "normal" : "lowess"; localStorage.setItem("smoothMode", smoothMode); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
+  var chartTabs = Array.from(document.querySelectorAll('.history-chart-tabs [role="tab"]'));
+  function selectChartTab(tab) {
+    chartTabs.forEach(function (item) {
+      var active = item === tab;
+      item.setAttribute('aria-selected', String(active));
+      item.tabIndex = active ? 0 : -1;
+      el(item.getAttribute('aria-controls')).hidden = !active;
+    });
+    if (tab.id === 'performance-heading' && lastPayload) renderChart(lastPayload);
+    if (tab.id === 'horizon-history-tab') window.HorizonComparison.render();
+  }
+  chartTabs.forEach(function (tab, index) {
+    tab.addEventListener('click', function () { selectChartTab(tab); });
+    tab.addEventListener('keydown', function (event) {
+      var next;
+      if (event.key === 'ArrowRight') next = (index + 1) % chartTabs.length;
+      else if (event.key === 'ArrowLeft') next = (index + chartTabs.length - 1) % chartTabs.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = chartTabs.length - 1;
+      else return;
+      event.preventDefault(); selectChartTab(chartTabs[next]); chartTabs[next].focus();
+    });
+  });
+  if (window.location && window.location.hash === '#horizon-history-panel') selectChartTab(chartTabs[1]);
   el("history-errors-toggle").addEventListener("click", function () { historyShowErrors = !historyShowErrors; renderHistory(); });
   var historyFilterContainer = el("history-competition-filters");
   historyFilterContainer.addEventListener("click", function (event) {
@@ -589,7 +626,7 @@
       var index = await fetchJson("/competitions.json");
       index.competitions.forEach(function (item) {
         var key = item.competition;
-        if (!/^(main|math|code|text|mix(0[1-9]|[1-9][0-9]))$/.test(key)) return;
+        if (!/^(main|main2|math|code|text|mix(0[1-9]|[1-9][0-9]))$/.test(key)) return;
         var state = key === "main" ? mainMixState : specialists.find(function (s) { return s.key === key; });
         if (!state) {
           state = { key: key, prefix: key === "main" ? "/" : "/competitions/" + key + "/", dashboard: null, failed: false, polling: false, loadingDataset: false, dataset: null, datasetFailed: false, datasetRow: document.createElement("tr") };
@@ -602,6 +639,7 @@
           }
         }
         state.active = item.active !== false; state.hasKing = item.has_king;
+        state.startingKing = item.starting_king;
         state.rewardTransition = item.reward_transition;
         state.documentTokens = item.document_tokens;
         renderCompetitionDataset(state);
@@ -616,8 +654,9 @@
     try {
       var d = await fetchJson(state.prefix + "dashboard.json");
       TeutonicDashboardV1.validate(d); state.dashboard = d; state.failed = false;
+      if (state.key === "main2") window.HorizonComparison.updateMain2(d);
     } catch (error) { state.failed = true; }
-    finally { state.polling = false; scheduleSharedRender(); }
+    finally { state.polling = false; scheduleSharedRender(); if (state.key === "main2" && lastPayload) { renderHeader(lastPayload); renderChart(lastPayload); } }
   }
   function renderCompetitionDataset(state) {
     if (state.active === false) { state.datasetRow.remove(); return; }
@@ -633,12 +672,12 @@
     var categoryCell = cell(row, "");
     if (view) {
       var details = document.createElement("details"), summary = document.createElement("summary"), list = document.createElement("ul");
-      summary.textContent = view.rows.length + " categories"; details.appendChild(summary);
+      summary.textContent = view.rows.length + (view.rows.length === 1 ? " category" : " categories"); details.appendChild(summary);
       view.rows.forEach(function (source) { var li = document.createElement("li"); li.textContent = source.name + ": " + (source.normalizedWeight * 100).toFixed(4) + "%"; list.appendChild(li); });
       details.appendChild(list); categoryCell.appendChild(details);
     }
     cell(row, number(manifest && manifest.token_budget || state.documentTokens));
-    cell(row, state.hasKing ? "OWN KING" : state.key === "mix07" ? "PINNED MIX05 KING" : "PINNED MAIN KING");
+    cell(row, state.hasKing ? "OWN KING" : ["mix08", "mix09"].includes(state.key) ? "PINNED 5EEZ-V9" : state.key === "mix07" ? "PINNED MIX05 KING" : "PINNED MAIN KING");
     cell(row, manifest ? "> " + metric(manifest.delta_threshold, 5) + " " + (manifest.loss_unit || "nats/token") : "--");
     datasetCell(row, "MANIFEST", "", state.prefix + "datasets/manifest.json");
   }

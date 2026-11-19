@@ -106,3 +106,10 @@ assert.throws(() => dashboard.mergeBenchmarkSources([{ competition: "mix01", det
 assert.throws(() => dashboard.mergeBenchmarkSources([{ competition: "mix01", results: { schema_version: "invalid", kings: [] } }]), /unsupported benchmark/);
 
 console.log("Benchmark sources: eight historical scopes, complete averages, running updates, stale publications, and detail identities passed.");
+
+const newScopes = ["main2", "mix08", "mix09"];
+const newHistory = dashboard.benchmarkPresentation(dashboard.mergeBenchmarkSources(
+    newScopes.map(competition => ({ competition, results: publication([result("new-king", .6)]) }))));
+assert.equal(newHistory.kingCount, 3);
+newScopes.forEach(key => assert.equal(dashboard.benchmarkDetailsKey(key, "new-king"),
+    "competitions/" + key + "/kings/new-king/results.json"));

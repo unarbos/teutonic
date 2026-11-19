@@ -150,49 +150,47 @@ Active manifests and thresholds are controlled by PostgreSQL. The public
 dataset summaries reflect those configurations; changing chain.toml alone
 does not change active evaluations.
 
-After the four-competition cutover, the active competitions are MAIN, MIX01,
-MIX06 and MIX07. Select one with
-`teutonic-miner ready --competition MIX01` or
-`teutonic-miner submit ... --competition MIX01`. Names are case-insensitive;
-omission means MAIN. Selection is fixed at the ready commitment. One ready
-submission per hotkey applies globally across all competitions. The wire format
-reserves MIX01–MIX99; MIX02/03/04/05 are retired. MATH, CODE and
-TEXT are retired: their histories remain readable, but they accept no new submissions.
+After the RefineCode cutover, the active competitions are MAIN2, MIX07, MIX08
+and MIX09. Select one using `teutonic-miner ready --competition MIX08` or
+`teutonic-miner submit ... --competition MIX08`. Names are case-insensitive;
+omission means MAIN2. One ready submission per hotkey applies globally.
+MAIN, MIX01 and MIX06 retire, preserving their historical results and models.
+MIX02/03/04/05 and MATH/CODE/TEXT remain retired.
 
-Each mix is an explicit flat list of unique categories. The same sampler uses
-its category weights as targets for the 60M original-MiMo-token document budget; they are not fixed contributions to the final score. MAIN contains 24
-categories, proportional to token inventory. MIX06 contains all 25, adding
-`dclm-baseline-1.0` as one category. Follow each MIX's published category list
-and percentages rather than expanding retired competition names. MIX02 has no
-special sampling path and overlapping categories receive no extra weight.
-MIX07 contains only `dclm-baseline-1.0`, with category weight 100%.
+MAIN2 combines MAIN's 24 categories with RefineCode (refinecode/the-stack-v2).
+Weights are proportional to token inventory: 93.325739% original MAIN and
+6.674261% RefineCode. DCLM is not added to MAIN2. MIX07 remains 100% DCLM.
+MIX08 is 50% DCLM / 50% RefineCode. MIX09 is 100% RefineCode.
+These percentages allocate input-token budgets, not fixed score contributions.
+Each evaluation retains the 60M original-MiMo-token budget and 0.0005 bits/byte LCB threshold.
 
-All MIXes start kingless. MIX07's first challengers face the MIX05 king pinned at
-cutover. Original MIX01–06 use a FIXED starting MAIN king. Every MIX uses its own
-categories and threshold. This starting king is pinned once
-at initialization (or when the fixed-baseline migration is applied to an existing
-kingless MIX). Later source-competition promotions do not change this opponent, including during an
-evaluation or retry. Read `starting_king` in `competitions.json` for the pinned
-model digest and public model reference. After its first crown, a MIX uses its
-own current king. All duels run sequentially. Merged models
-may enter MAIN if they satisfy the same contract and beat MAIN's king.
+MAIN2 pins the current MAIN king at cutover. MIX08 and MIX09 pin the verified
+stored model `teutonic-II-110B-A7B-5Eez-v9`. MIX07 keeps its existing king.
+Pins do not follow later source-competition wins. Read `starting_king` in
+`competitions.json` for the exact digest and model reference. After its first
+crown, a new competition uses its own current king. All duels run sequentially.
 
-Uploading or losing does not change incentives. After the four-competition cutover,
-MAIN receives 40% and MIX01, MIX06 and MIX07 receive 20% each. MIX02/03/05
-receive no reward allocation and accept no new submissions or evaluations; MIX04
-remains retired. Their models, categories and history are preserved.
+The `refinecode-competitions-v5` policy allocates MAIN2 40%, and MIX07, MIX08
+and MIX09 20% each. These competition allocations are fixed. Shared hotkeys
+receive the sum of their positions, including the two v9 starting positions.
+Uploading or losing does not change incentives. Old policy versions retain
+their historical allocations. Repository changes alone do not activate this rollout.
 
-A new winner takes only its competition's allocation. The outgoing king does not
-retain a reward position for that competition. Positions held by the same hotkey
+A new winner takes its competition's fixed allocation. The outgoing king does
+not retain a reward position for the
+competition it lost. Positions held by the same hotkey
 add together; retiring one position does not remove its other entitlements.
 On-chain weights retain UID eligibility normalization and the existing 101-block
-publication cadence. Older 25%/12.5% allocations remain historical records.
+publication cadence. Older 25%/12.5% and fixed MAIN 40% allocations remain
+historical records. The existing fixed 40/20/20/20 policy stays live until the
+new PostgreSQL reward policy is explicitly activated.
 
 Configured competitions: https://teutonic.ai/competitions.json
 MAIN: https://teutonic.ai/dashboard.json
 MIXes: https://teutonic.ai/competitions/<mix01..mix07>/dashboard.json (MIX04 historical)
 Dataset policy: corresponding `datasets/manifest.json` under each prefix.
 Packed dataset inventory: https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/manifest.json
+RefineCode inventory: https://pub-64e3f687d8a2411ca8595bc760d31654.r2.dev/refinecode-text-v2/manifest.json
 Current split manifests use `teutonic-text/splits/<competition>/<sha256>.json`
 in the `dataset` bucket. Read their exact pins from the active competition configuration.
 The old `datasets` bucket was deleted; its token-shard and `doc_index` URLs no longer work.
@@ -207,6 +205,11 @@ Start with `manifest.json`; resolve its object paths relative to this prefix.
 The evaluator continues to use authenticated, checksum-pinned range reads from
 `s3://dataset/teutonic-text/`. Website dataset summaries describe the configuration;
 the packed manifest above is the actual data inventory.
+RefineCode public downloads use `https://pub-64e3f687d8a2411ca8595bc760d31654.r2.dev/refinecode-text-v2/`;
+start with its `manifest.json` and resolve object paths relative to that prefix.
+After RefineCode cutover, MAIN2/MIX08/MIX09 use a collection that pins both
+`s3://dataset/teutonic-text/` and `s3://code/refinecode-text-v2/`. The evaluator
+reads each source directly with authenticated, checksum-pinned range reads.
 Packed UTF-8 text and length-sorted byte-offset indexes locate whole documents.
 Original MiMo token counts control selection only. Native model tokenizers encode
 raw text without a chat template or BOS and append their native EOS. Score all
@@ -376,7 +379,7 @@ teutonic-miner ready --hotkey h0 --competition MIX01
 1. START FROM THE KING. Download the current king from the public model
    bucket (section 2) at its pinned digest for your selected competition.
    Your challenger's byte-weighted Horizon-deficit reduction must have an LCB
-   strictly above the competition's bits/byte threshold (rollout setting 0.00075).
+   strictly above the competition's bits/byte threshold (rollout setting 0.0005).
    For a kingless MIX, use its fixed `starting_king` from competitions.json.
 2. MATCH THE EVAL DISTRIBUTION. Use the selected category weights and complete
    documents, retaining independent document contexts and native tokenizer/EOS rules.
@@ -537,19 +540,20 @@ the coldkey.
 - dashboard: https://teutonic.ai/dashboard.json
 - dataset config: https://teutonic.ai/datasets/manifest.json
 - packed dataset: https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/manifest.json
+- RefineCode dataset: https://pub-64e3f687d8a2411ca8595bc760d31654.r2.dev/refinecode-text-v2/manifest.json
 - document indexes: use the authenticated packed-data pins in the exact request
 - king download: https://pub-0821d4e196224864af220294345fd141.r2.dev/models/sha256/<king_digest>/
 - accept rule: paired-bootstrap LCB of byte-weighted Horizon-deficit reduction
-  exceeds the competition's threshold in bits/byte (rollout setting 0.00075)
+  exceeds the competition's threshold in bits/byte (rollout setting 0.0005)
 - sample: 60M original MiMo tokens in whole documents, 40/60 short/long quotas;
   alpha=0.001, B=10000, bootstrap seed 0; no windows or early stopping
-- competitions: MAIN, MIX01, MIX06 and MIX07 after cutover; MIX07 is 100% DCLM;
-  MIX02/03/04/05 are retired, with history preserved.
+- competitions after RefineCode cutover: MAIN2, MIX07, MIX08, MIX09;
+  MAIN and MIX01–06 are retired, with history preserved.
 - submission: `teutonic-miner register` -> `auth` -> `upload` -> `ready`
   (one shot per hotkey, forever)
 - contract: six genesis files byte-locked; weights only; <=250 GB
-- rewards: MAIN 40%, MIX01/06/07 20% each; new winners take their competition's
-  allocation; publication retains the 101-block cadence
+- rewards after RefineCode activation: MAIN2 40%; MIX07/MIX08/MIX09 20% each;
+  publication retains the 101-block cadence
 - code: https://github.com/unarbos/teutonic
 
 ## Reference links
@@ -562,6 +566,7 @@ the coldkey.
 - [Document masking](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/document_masking.py): attention boundaries and reset positions.
 - [Packed-text reader and sampler](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluation/packed_text.py): document byte ranges, indexes and sample provenance.
 - [Packed dataset manifest](https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/manifest.json): packed-text dataset inventory including DCLM.
+- [RefineCode dataset manifest](https://pub-64e3f687d8a2411ca8595bc760d31654.r2.dev/refinecode-text-v2/manifest.json): additional packed-text inventory for MAIN2, MIX08 and MIX09 after cutover.
 - [Ready-signal schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/ready-signal-v1.schema.json): `r2ready:v1` contract.
 - [Mailbox envelope schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/mailbox-envelope-v1.schema.json): encrypted credential contract.
 - [Dashboard schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/dashboard-v1.schema.json): dashboard JSON contract.

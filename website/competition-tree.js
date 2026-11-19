@@ -49,7 +49,7 @@
       var rows = document.getElementById("tree-details-rows");
       var currentNodes = new Map(), selection = null;
       var requestedRoot = new URL(window.location.href).searchParams.get("competition");
-      var rootKey = /^(main|mix[0-9]{2})$/.test(requestedRoot || "") ? requestedRoot : "mix06";
+      var rootKey = /^(main|main2|mix[0-9]{2})$/.test(requestedRoot || "") ? requestedRoot : "mix06";
       var categoryButton = document.getElementById("tree-root-categories");
       var comparePicker = document.getElementById("tree-compare-picker");
       var svg = null, edgeLayer = null, nodeLayer = null, animationFrame = null, layoutFrame = null;

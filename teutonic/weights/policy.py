@@ -14,6 +14,9 @@ MAIN_SHARES = {
 }
 
 FOUR_COMPETITION_POLICY = "four-competition-v3"
+LATEST_KING_POLICY = "latest-king-bonus-v4"
+REFINECODE_POLICY = "refinecode-competitions-v5"
+REFINECODE_COMPETITIONS = ("main2", "mix07", "mix08", "mix09")
 
 
 def competition_rewards(main_history: Sequence[str], split_kings: Mapping[str, str]):
@@ -35,13 +38,23 @@ def competition_rewards(main_history: Sequence[str], split_kings: Mapping[str, s
 
 
 def validate_transition(state):
-    from teutonic.competitions import MIX_COMPETITIONS
-    if isinstance(state, dict) and state.get("version") == FOUR_COMPETITION_POLICY:
+    MIX_COMPETITIONS = tuple(f"mix{i:02d}" for i in range(1, 8))  # Historical policies.
+    if isinstance(state, dict) and state.get("version") == REFINECODE_POLICY:
+        kings = state.get("kings")
+        if (not isinstance(kings, dict) or set(kings) != set(REFINECODE_COMPETITIONS)
+                or any(not isinstance(h, str) or not h for h in kings.values())):
+            raise ValueError("RefineCode rewards require MAIN2/MIX07/MIX08/MIX09 kings")
+        return
+    if isinstance(state, dict) and state.get("version") in {FOUR_COMPETITION_POLICY, LATEST_KING_POLICY}:
         if (set(state.get("mixes", {})) != {"mix01", "mix06", "mix07"}
                 or not state.get("main", {}).get("hotkey")
                 or any(not isinstance(h, str) or not h for h in state["mixes"].values())
                 or state.get("legacy") != []):
             raise ValueError("four-competition rewards require MAIN and three crowned MIX kings")
+        if state["version"] == LATEST_KING_POLICY and state.get("latest_competition") not in {
+            "main", "mix01", "mix06", "mix07"
+        }:
+            raise ValueError("latest king bonus requires an active competition")
         return
     if not isinstance(state, dict) or state.get("version") not in {
         "mix-replacement-v1", "mix-successor-v2"
@@ -70,11 +83,22 @@ def validate_transition(state):
 def replacement_rewards(state):
     """Calculate the versioned allocation, retaining historical policy semantics."""
     validate_transition(state)
-    if state["version"] == FOUR_COMPETITION_POLICY:
-        from teutonic.competitions import ACTIVE_INCENTIVES
-        recipients = {"main": state["main"]["hotkey"], **state["mixes"]}
+    if state["version"] == REFINECODE_POLICY:
         combined = {}
-        for key, share in ACTIVE_INCENTIVES.items():
+        for key in REFINECODE_COMPETITIONS:
+            hotkey = state["kings"][key]
+            combined[hotkey] = combined.get(hotkey, 0) + (.4 if key == "main2" else .2)
+        return tuple(combined), tuple(combined.values())
+    if state["version"] in {FOUR_COMPETITION_POLICY, LATEST_KING_POLICY}:
+        recipients = {"main": state["main"]["hotkey"], **state["mixes"]}
+        # V3 must keep its original meaning for old durable states and replays.
+        shares = ({"main": .4, "mix01": .2, "mix06": .2, "mix07": .2}
+                  if state["version"] == FOUR_COMPETITION_POLICY else
+                  {"main": .2, "mix01": .2, "mix06": .2, "mix07": .2})
+        if state["version"] == LATEST_KING_POLICY:
+            shares[state["latest_competition"]] += .2
+        combined = {}
+        for key, share in shares.items():
             hotkey = recipients[key]
             combined[hotkey] = combined.get(hotkey, 0) + share
         return tuple(combined), tuple(combined.values())
@@ -92,10 +116,16 @@ def replacement_rewards(state):
 
 def replacement_after_win(state, competition, hotkey):
     """Pure preview used both before promotion and in the crowning transaction."""
-    from teutonic.competitions import MIX_COMPETITIONS
+    MIX_COMPETITIONS = tuple(f"mix{i:02d}" for i in range(1, 8))  # Historical policies.
     validate_transition(state)
     result = deepcopy(state)
-    if result["version"] == FOUR_COMPETITION_POLICY:
+    if result["version"] == REFINECODE_POLICY:
+        if competition not in result["kings"] or not isinstance(hotkey, str) or not hotkey:
+            raise ValueError("retired competition or empty winner cannot receive rewards")
+        result["kings"][competition] = hotkey
+        validate_transition(result)
+        return result
+    if result["version"] in {FOUR_COMPETITION_POLICY, LATEST_KING_POLICY}:
         if not isinstance(hotkey, str) or not hotkey:
             raise ValueError("winner hotkey is empty")
         if competition == "main":
@@ -104,6 +134,9 @@ def replacement_after_win(state, competition, hotkey):
             result["mixes"][competition] = hotkey
         else:
             raise ValueError("retired or unknown competition cannot receive rewards")
+        if result["version"] == LATEST_KING_POLICY:
+            result["latest_competition"] = competition
+        validate_transition(result)
         return result
     if competition == "main":
         result["main"]["hotkey"] = hotkey
@@ -130,7 +163,7 @@ def replacement_after_win(state, competition, hotkey):
 def begin_mix07_replacement(state):
     """Retain MIX04's full reward slot until MIX07 is actually crowned."""
     validate_transition(state)
-    if state["version"] == FOUR_COMPETITION_POLICY:
+    if state["version"] in {FOUR_COMPETITION_POLICY, LATEST_KING_POLICY, REFINECODE_POLICY}:
         raise ValueError("MIX07 replacement is already complete; four-competition policy is active")
     result = deepcopy(state)
     if result["version"] == "mix-successor-v2":
@@ -145,6 +178,8 @@ def begin_mix07_replacement(state):
 def begin_four_competition_policy(state):
     """Retire three reward slots without inventing kings or changing old state."""
     validate_transition(state)
+    if state["version"] in {LATEST_KING_POLICY, REFINECODE_POLICY}:
+        raise ValueError("cannot downgrade the latest king policy through the old cutover")
     if state["version"] == FOUR_COMPETITION_POLICY:
         return deepcopy(state)
     if state["legacy"] or not {"mix01", "mix06", "mix07"} <= set(state["mixes"]):
@@ -157,6 +192,31 @@ def begin_four_competition_policy(state):
     }
     result.pop("successors", None)
     validate_transition(result)
+    return result
+
+
+def begin_refinecode_policy(state, kings):
+    """Explicit cutover; never reinterpret an older durable reward policy."""
+    validate_transition(state)
+    if state["version"] not in {FOUR_COMPETITION_POLICY, LATEST_KING_POLICY, REFINECODE_POLICY}:
+        raise ValueError("RefineCode cutover requires an existing four-competition policy")
+    result = {"version": REFINECODE_POLICY, "kings": dict(kings)}
+    validate_transition(result)
+    if state["version"] == REFINECODE_POLICY and result != state:
+        raise ValueError("RefineCode policy is already active with different recipients")
+    return result
+
+
+def begin_latest_king_policy(state, latest_competition):
+    """Activate the bonus using the durable last-crowned competition."""
+    validate_transition(state)
+    if state["version"] not in {FOUR_COMPETITION_POLICY, LATEST_KING_POLICY}:
+        raise ValueError("latest king bonus requires the four-competition policy")
+    result = deepcopy(state)
+    result.update(version=LATEST_KING_POLICY, latest_competition=latest_competition)
+    validate_transition(result)
+    if state["version"] == LATEST_KING_POLICY and result != state:
+        raise ValueError("latest king differs from the persisted bonus recipient")
     return result
 
 

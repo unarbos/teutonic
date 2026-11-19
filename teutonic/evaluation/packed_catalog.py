@@ -73,6 +73,8 @@ def partition_rows(reader, obj, *, page_bytes=4096):
 
 def build_resumable_catalog(dataset, state_path, *, workers=64, page_bytes=4096,
                             on_progress=lambda event: None, shard_index=0, shard_count=1):
+    if getattr(dataset, "sources", None):
+        raise ValueError('build each source catalog separately, then combine the collection')
     if workers < 1 or workers > 512:
         raise ValueError('catalog workers must be in 1..512')
     if not 0 <= shard_index < shard_count:

@@ -443,7 +443,7 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             "INSERT INTO control_plane.competitions(netuid,chain_generation,name,competition_key,main_competition_id) VALUES (306,'test',%s,%s,%s) RETURNING competition_id",
             (key, key, self.competition_id),
         ).fetchone()[0]
-        if key.startswith("mix"):
+        if key == "main2" or key.startswith("mix"):
             self.connection.execute(
                 "UPDATE control_plane.competitions SET starting_reign_id=%s WHERE competition_id=%s",
                 (self.genesis_reign_id, competition),
@@ -1836,6 +1836,139 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         self.assertEqual(len(stored["evictions"]), 1)
         self.assertEqual(stored["mixes"], {"mix02": "hotkey-3"})
         self.assertEqual(self.connection.execute("SELECT policy_weights FROM control_plane.weight_publications").fetchone()[0], list(weights))
+
+    def test_latest_king_bonus_moves_atomically_with_crown_and_is_not_repeated(self):
+        from psycopg.types.json import Jsonb
+
+        from teutonic.validator.repository import SchedulerInvariantError
+        from teutonic.weights.policy import LATEST_KING_POLICY
+
+        mix06 = self._stale_fixture("mix06")
+        self._replace_test_king(mix06, "c" * 64)
+        self._replace_test_king(self._create_specialist("mix01"), "d" * 64)
+        latest = self._replace_test_king(self._create_specialist("mix07"), "e" * 64)
+        state = {"version": LATEST_KING_POLICY,
+                 "main": {"id": "main", "hotkey": "genesis-hotkey", "weight": .4},
+                 "legacy": [], "mixes": {k: "replacement" for k in ("mix01", "mix06", "mix07")},
+                 "latest_competition": "mix07"}
+        self.connection.execute(
+            "UPDATE control_plane.competitions SET reward_transition=%s,reward_reign_id=%s WHERE competition_id=%s",
+            (Jsonb(state), latest, self.competition_id),
+        )
+        claim = self.repository.claim_next(now=NOW, policy=policy())
+        promotion = self._accept_and_promote(claim)
+        hotkeys, weights = self.repository.promotion_weight_policy(str(promotion))
+        self.assertEqual(dict(zip(hotkeys, weights)),
+                         {"genesis-hotkey": .2, "replacement": .4, "hotkey-3": .4})
+
+        def crown(shares):
+            return self.repository.crown_promoted_winner(
+                str(promotion), now=NOW, crowned_finalized_block=111,
+                policy_hotkeys=hotkeys, policy_weights=shares,
+                target_hotkeys=hotkeys, target_uids=[0, 99, 3], normalized_weights=weights)
+
+        with self.assertRaises(SchedulerInvariantError):
+            crown([.4, .4, .2])
+        self.assertEqual(self.connection.execute(
+            "SELECT reward_transition FROM control_plane.competitions WHERE competition_id=%s",
+            (self.competition_id,),
+        ).fetchone()[0], state)
+        reign = crown(weights)
+        self.assertEqual(crown(weights), reign)
+        stored, reward_reign = self.connection.execute(
+            "SELECT reward_transition,reward_reign_id FROM control_plane.competitions WHERE competition_id=%s",
+            (self.competition_id,),
+        ).fetchone()
+        self.assertEqual(stored["latest_competition"], "mix06")
+        self.assertEqual(stored["mixes"]["mix06"], "hotkey-3")
+        self.assertEqual(str(reward_reign), reign)
+        self.assertEqual(self.connection.execute(
+            "SELECT policy_weights FROM control_plane.weight_publications WHERE source_reign_id=%s", (reign,),
+        ).fetchone()[0], list(weights))
+
+    def test_refinecode_competitions_claim_and_crown_with_retired_main_parent(self):
+        from psycopg.types.json import Jsonb
+        from teutonic.weights.policy import REFINECODE_POLICY
+
+        for key in ("main2", "mix08", "mix09"):
+            with self.subTest(key=key):
+                competition = self._stale_fixture(key)
+                state = {"version": REFINECODE_POLICY,
+                         "kings": {k: "genesis-hotkey" for k in ("main2", "mix07", "mix08", "mix09")}}
+                self.connection.execute(
+                    "UPDATE control_plane.competitions SET active=false,reward_transition=%s WHERE competition_id=%s",
+                    (Jsonb(state), self.competition_id))
+                # A retired MAIN crown changing cannot move the pinned opponent.
+                self._replace_test_king(self.competition_id)
+                claim = self.repository.claim_next(now=NOW, policy=policy())
+                self.assertEqual(claim.claimed_king_reign_id, str(self.genesis_reign_id))
+                self.assertEqual(self.repository.dispatch_baseline(claim.evaluation_id), "current")
+                promotion = self._accept_and_promote(claim)
+                hotkeys, weights = self.repository.promotion_weight_policy(str(promotion))
+                self.assertAlmostEqual(dict(zip(hotkeys, weights))["hotkey-3"], .4 if key == "main2" else .2)
+                reign = self.repository.crown_promoted_winner(
+                    str(promotion), now=NOW, crowned_finalized_block=111,
+                    policy_hotkeys=hotkeys, policy_weights=weights,
+                    target_hotkeys=hotkeys, target_uids=[3 if h == "hotkey-3" else 0 for h in hotkeys],
+                    normalized_weights=weights)
+                self.assertIsNotNone(reign)
+                stored = self.connection.execute(
+                    "SELECT reward_transition FROM control_plane.competitions WHERE competition_id=%s",
+                    (self.competition_id,)).fetchone()[0]
+                self.assertNotIn("latest_competition", stored)
+                self.assertEqual(stored["kings"][key], "hotkey-3")
+                self.assertEqual(self.connection.execute(
+                    "SELECT starting_reign_id FROM control_plane.competitions WHERE competition_id=%s",
+                    (competition,)).fetchone()[0], self.genesis_reign_id)
+
+    def test_refinecode_cutover_is_atomic_and_preserves_existing_reigns(self):
+        from copy import deepcopy
+        from psycopg.rows import dict_row
+        from scripts.activate_refinecode_competitions import apply_cutover
+        from teutonic.weights.contracts import weight_payload_digest
+        from teutonic.weights.policy import REFINECODE_POLICY
+
+        old_ids = {k: self._create_specialist(k) for k in ("mix01", "mix06", "mix07")}
+        configs = {}
+        for key in ("main2", "mix08", "mix09"):
+            p = policy(competition=key)
+            configs[key] = dict(dataset_label=key, n=0, delta_threshold=.0005,
+                                manifests=p.dataset_manifests, shards_per_dataset=1, long_documents=p.long_documents)
+        before = self.connection.execute("SELECT * FROM control_plane.king_reigns ORDER BY reign_id").fetchall()
+        root = {"competition_id": self.competition_id, "netuid": 306, "chain_generation": "test"}
+        uids, weights = [0], [1.0]
+        publication = self.connection.execute(
+            """INSERT INTO control_plane.weight_publications
+               (competition_id,source_reign_id,policy_version,policy_hotkeys,policy_weights,
+                target_hotkeys,target_uids,normalized_weights,payload_sha256,mapping_finalized_block,idempotency_key,state)
+               VALUES (%s,%s,'fixture',ARRAY['genesis-hotkey'],%s,ARRAY['genesis-hotkey'],%s,%s,%s,100,'cutover-fixture','requested')
+               RETURNING weight_publication_id""",
+            (self.competition_id, self.genesis_reign_id, weights, uids, weights, weight_payload_digest(uids, weights))).fetchone()[0]
+        plan = {"changed": True, "transition": {"version": REFINECODE_POLICY,
+                "kings": {k: "genesis-hotkey" for k in ("main2", "mix07", "mix08", "mix09")}},
+                "starting_reigns": {k: self.genesis_reign_id for k in configs},
+                "retired_ids": [self.competition_id, old_ids["mix01"], old_ids["mix06"]],
+                "policy_hotkeys": ["genesis-hotkey"], "policy_weights": weights,
+                "target_hotkeys": ["genesis-hotkey"], "target_uids": uids,
+                "normalized_weights": weights, "payload_sha256": weight_payload_digest(uids, weights)}
+        original_factory = self.connection.row_factory
+        self.connection.row_factory = dict_row
+        try:
+            bad = deepcopy(configs)
+            bad["mix09"]["n"] = -1
+            with self.assertRaises(ValueError), self.connection.transaction():
+                apply_cutover(self.connection, root, {"weight_publication_id": publication}, plan, bad)
+            self.assertEqual(self.connection.execute(
+                "SELECT count(*) AS n FROM control_plane.competitions WHERE competition_key IN ('main2','mix08','mix09')").fetchone()["n"], 0)
+            with self.connection.transaction():
+                apply_cutover(self.connection, root, {"weight_publication_id": publication}, plan, configs)
+            active = self.connection.execute("SELECT competition_key FROM control_plane.competitions WHERE active ORDER BY competition_key").fetchall()
+            self.assertEqual([r["competition_key"] for r in active], ["main2", "mix07", "mix08", "mix09"])
+            self.assertEqual(self.connection.execute(
+                "SELECT count(*) AS n FROM control_plane.evaluation_configs WHERE active AND competition_id IN (SELECT competition_id FROM control_plane.competitions WHERE competition_key IN ('main2','mix08','mix09'))").fetchone()["n"], 3)
+        finally:
+            self.connection.row_factory = original_factory
+        self.assertEqual(self.connection.execute("SELECT * FROM control_plane.king_reigns ORDER BY reign_id").fetchall(), before)
 
     def test_kingless_mix_keeps_starting_main_when_main_changes(self):
         for phase in ("before_claim", "before_dispatch", "before_crown"):

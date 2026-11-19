@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 import time
 from collections import Counter
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, closing, nullcontext
 from dataclasses import asdict
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
@@ -41,20 +41,21 @@ TEXT_POLICY = "raw-text-native-eos-no-bos-first-unscored"
 
 def reference_batches(dataset, documents, tokenizer):
     """Enough micro-batches to fill eight stages, bounded by text and token sizes."""
-    for group, sequences in prepared_batches(dataset, documents, tokenizer,
-                                             batch_documents=MAX_REQUEST_DOCUMENTS, max_tokens=524287):
-        chunk_docs, chunk_tokens, total = [], [], 0
-        for doc, tokens in zip(group, sequences, strict=True):
-            if chunk_docs and total + len(tokens) > MAX_REQUEST_TOKENS:
+    with closing(prepared_batches(dataset, documents, tokenizer,
+                                  batch_documents=MAX_REQUEST_DOCUMENTS, max_tokens=524287)) as batches:
+        for group, sequences in batches:
+            chunk_docs, chunk_tokens, total = [], [], 0
+            for doc, tokens in zip(group, sequences, strict=True):
+                if chunk_docs and total + len(tokens) > MAX_REQUEST_TOKENS:
+                    yield chunk_docs, chunk_tokens
+                    chunk_docs, chunk_tokens, total = [], [], 0
+                if len(tokens) > MAX_REQUEST_TOKENS:
+                    raise ValueError("Horizon document exceeds request bound; no truncation")
+                chunk_docs.append(doc)
+                chunk_tokens.append(tokens)
+                total += len(tokens)
+            if chunk_docs:
                 yield chunk_docs, chunk_tokens
-                chunk_docs, chunk_tokens, total = [], [], 0
-            if len(tokens) > MAX_REQUEST_TOKENS:
-                raise ValueError("Horizon document exceeds request bound; no truncation")
-            chunk_docs.append(doc)
-            chunk_tokens.append(tokens)
-            total += len(tokens)
-        if chunk_docs:
-            yield chunk_docs, chunk_tokens
 
 
 class ReferenceCache:
@@ -197,15 +198,16 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
                         worker = resources.enter_context(lease)
                     on_phase({"phase": "reference_scoring", "missing_documents": len(pending)})
                     key_by_id = {doc.doc_id: key for key, doc in pending.items()}
-                    for group, sequences in reference_batches(dataset, list(pending.values()), tok):
-                        check()
-                        for row in worker.score(group, sequences):
-                            key = key_by_id[row["id"]]
-                            cache.put(key, row["nll"], row["scored_tokens"])
-                            reference_done += key_counts[key]
-                            reference_tokens += key_tokens[key]
-                        progress.reference_scored(reference_done, input_tokens=reference_tokens)
-                        check()
+                    with closing(reference_batches(dataset, list(pending.values()), tok)) as prepared:
+                        for group, sequences in prepared:
+                            check()
+                            for row in worker.score(group, sequences):
+                                key = key_by_id[row["id"]]
+                                cache.put(key, row["nll"], row["scored_tokens"])
+                                reference_done += key_counts[key]
+                                reference_tokens += key_tokens[key]
+                            progress.reference_scored(reference_done, input_tokens=reference_tokens)
+                            check()
                 else:
                     progress.reference_scored(reference_done, input_tokens=reference_tokens)
             if worker is not None:
@@ -253,29 +255,29 @@ def _run_document_duel(base, req, king_snapshot, challenger_snapshot, on_phase, 
     started = time.monotonic()
     with MiMoPool(king_snapshot, challenger_snapshot, base._gpu_ids,
                   cache_dir, runtime, on_phase) as pool:
-        batches = prepared_batches(dataset, documents, tokenizer, batch_documents=128,
-                                   max_tokens=req.max_document_tokens - 1)
-        for group, sequences in batches:
-            maximum_length = max(maximum_length, max(map(len, sequences)))
-            k, c = pool.score(group, sequences)
-            king.extend(row["nll"] for row in k)
-            challenger.extend(row["nll"] for row in c)
-            counts.extend(len(t) - 1 for t in sequences)
-            provisional = {}
-            if len(king) * 10 >= next_checkpoint * len(documents):
-                checkpoint_verdict = reference_verdict(
-                    king, challenger, reference[:len(king)], byte_counts[:len(king)],
-                    bootstrap_seed=req.bootstrap_seed, n_bootstrap=req.n_bootstrap,
-                    alpha=req.alpha, delta_threshold=req.delta_threshold,
-                )
-                provisional = {
-                    "provisional_mu_hat": checkpoint_verdict["mu_hat"],
-                    "provisional_lcb": checkpoint_verdict["lcb"],
-                    "provisional_n_sequences": len(king),
-                    "provisional_n_bootstrap": req.n_bootstrap,
-                }
-                next_checkpoint = len(king) * 10 // len(documents) + 1
-            progress.paired_scored(len(king), provisional)
+        with closing(prepared_batches(dataset, documents, tokenizer, batch_documents=128,
+                                      max_tokens=req.max_document_tokens - 1)) as batches:
+            for group, sequences in batches:
+                maximum_length = max(maximum_length, max(map(len, sequences)))
+                k, c = pool.score(group, sequences)
+                king.extend(row["nll"] for row in k)
+                challenger.extend(row["nll"] for row in c)
+                counts.extend(len(t) - 1 for t in sequences)
+                provisional = {}
+                if len(king) * 10 >= next_checkpoint * len(documents):
+                    checkpoint_verdict = reference_verdict(
+                        king, challenger, reference[:len(king)], byte_counts[:len(king)],
+                        bootstrap_seed=req.bootstrap_seed, n_bootstrap=req.n_bootstrap,
+                        alpha=req.alpha, delta_threshold=req.delta_threshold,
+                    )
+                    provisional = {
+                        "provisional_mu_hat": checkpoint_verdict["mu_hat"],
+                        "provisional_lcb": checkpoint_verdict["lcb"],
+                        "provisional_n_sequences": len(king),
+                        "provisional_n_bootstrap": req.n_bootstrap,
+                    }
+                    next_checkpoint = len(king) * 10 // len(documents) + 1
+                progress.paired_scored(len(king), provisional)
     reports["mimo_replicas"] = pool.reports
     combined_runtime = {"horizon": reference_runtime, "mimo": runtime}
     workers = {"backend": {"horizon": REFERENCE_BACKEND, "mimo": MIMO_BACKEND}, "runtime": combined_runtime, "roles": reports,

@@ -38,7 +38,7 @@
     },
     "competition": {
       "type": "string",
-      "pattern": "^(main|math|code|text|mix(0[1-9]|[1-9][0-9]))$",
+      "pattern": "^(main|main2|math|code|text|mix(0[1-9]|[1-9][0-9]))$",
       "default": "main"
     }
   }

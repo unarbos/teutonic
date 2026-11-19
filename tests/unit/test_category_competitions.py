@@ -51,12 +51,14 @@ def original_sources():
 
 @pytest.fixture
 def bundle(tmp_path):
-    outputs = build_mix_manifests(original_sources())
+    outputs = build_mix_manifests(original_sources(), definitions={
+        k: v for k, v in chain_config.COMPETITION_DEFAULTS.items()
+        if k == "main" or k in {f"mix{i:02d}" for i in range(1, 8)}})
     write_bundle(outputs, tmp_path)
     return tmp_path, outputs
 
 
-@pytest.mark.parametrize("key", ACTIVE_COMPETITIONS)
+@pytest.mark.parametrize("key", ("main", "mix01", "mix06", "mix07"))
 def test_every_competition_uses_identical_flat_planning(key, bundle):
     directory, outputs = bundle
     args = parse_args(

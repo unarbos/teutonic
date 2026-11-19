@@ -22,7 +22,7 @@ function node(key, entries) {
 // of the old containment tree. Source dataset and category jointly identify data.
 const nodes = Object.entries(config).map(([key, entries]) => node(key, entries));
 const links = buildGraph(nodes);
-assert.equal(links.length, 24);
+assert.equal(links.length, 38);
 const byKey = new Map(nodes.map(value => [value.key, value]));
 const seen = new Set();
 for (const link of links) {
@@ -76,4 +76,9 @@ assert.deepEqual(buildGraph([
 ]), []);
 assert.deepEqual(buildGraph([]), []);
 assert.deepEqual(buildGraph([node("a", entries("one"))]), []);
-console.log("Competition graph: 24 real overlaps, MAIN/DCLM relationships, unique categories, and exact source identities passed.");
+console.log("Competition graph: 38 real overlaps, MAIN/DCLM relationships, unique categories, and exact source identities passed.");
+
+const activeGraph = buildGraph(["main2", "mix07", "mix08", "mix09"].map(key => byKey.get(key)));
+assert.equal(activeGraph.length, 4);
+assert.equal(compareMixes(byKey.get("mix08"), byKey.get("mix09")).weight, .5);
+assert.equal(compareMixes(byKey.get("main2"), byKey.get("mix07")).shared.length, 0);

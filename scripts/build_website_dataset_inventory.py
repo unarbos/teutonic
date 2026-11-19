@@ -12,11 +12,11 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from teutonic.evaluation.packed_text import FORMAT, DatasetReader, read_client
+from teutonic.evaluation.packed_text import DATASET_FORMATS, COLLECTION_FORMAT, DatasetReader, read_client, validate_collection
 
 
 def inventory(manifest, pin):
-    if manifest.get("format") != FORMAT:
+    if manifest.get("format") != DATASET_FORMATS.get(pin["bucket"]):
         raise ValueError("expected a packed-text dataset manifest")
     shards, documents, sizes = Counter(), Counter(), Counter()
     for obj in manifest["objects"]:
@@ -52,13 +52,31 @@ def inventory(manifest, pin):
             "sources": sources}
 
 
+def read_inventory(reader, pin):
+    manifest = reader.json(pin)
+    if manifest.get("format") != COLLECTION_FORMAT:
+        return inventory(manifest, pin)
+    sources, seen = [], set()
+    for source_pin in validate_collection(manifest).values():
+        result = inventory(reader.json(source_pin), source_pin)
+        for source in result["sources"]:
+            identity = (source["dataset"], source["name"])
+            if identity in seen:
+                raise ValueError("duplicate collection inventory category")
+            seen.add(identity)
+            sources.append(source)
+    return {"schema_version": 1, "format": "teutonic-packed-text-inventory-v1", "dataset": pin,
+            "dataset_label": "Packed-text collection", "token_count_basis": "original_mimo_token_count",
+            "sources": sorted(sources, key=lambda s: (s["dataset"], s["name"]))}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--publication", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     pin = json.loads(args.publication.read_text())["dataset"]
-    result = inventory(DatasetReader(read_client()).json(pin), pin)
+    result = read_inventory(DatasetReader(read_client()), pin)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(f"Verified {len(result['sources'])} categories; wrote {args.output}")

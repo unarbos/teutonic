@@ -14,7 +14,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from teutonic.competitions import ACTIVE_COMPETITIONS
+ACTIVE_COMPETITIONS = ("main", "mix01", "mix06", "mix07")  # Historical cutover roster.
 from teutonic.weights.contracts import weight_payload_digest
 from teutonic.weights.policy import (
     FOUR_COMPETITION_POLICY,
@@ -79,10 +79,11 @@ def apply_plan(connection, main, publication, plan):
         "UPDATE control_plane.competitions SET reward_transition=%s, updated_at=clock_timestamp() WHERE competition_id=%s",
         (Jsonb(plan["transition"]), main["competition_id"]),
     )
-    connection.execute(
-        "UPDATE control_plane.competitions SET active=false, updated_at=clock_timestamp() WHERE competition_id=ANY(%s::uuid[])",
-        (plan["retired_ids"],),
-    )
+    if plan["retired_ids"]:
+        connection.execute(
+            "UPDATE control_plane.competitions SET active=false, updated_at=clock_timestamp() WHERE competition_id=ANY(%s::uuid[])",
+            (plan["retired_ids"],),
+        )
     connection.execute(
         """UPDATE control_plane.weight_publications
            SET policy_hotkeys=%s, policy_weights=%s, target_hotkeys=%s, target_uids=%s,

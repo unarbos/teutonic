@@ -15,12 +15,14 @@ from teutonic.evaluation.packed_text import (
     BUCKET,
     BUCKETS,
     CATALOG_FORMAT,
+    COLLECTION_FORMAT,
     PREFIX,
     DatasetReader,
     PackedDataset,
     read_client,
     validate_mix,
     validate_pin,
+    validate_collection,
 )
 
 
@@ -29,12 +31,14 @@ def validate_bundle(directory):
     entries = json.loads((root / "pending-publication.json").read_text())
     if not isinstance(entries, list) or len(entries) < 2:
         raise ValueError("bundle needs a sampling catalog and competition manifests")
-    artifacts, catalogs, mixes = [], [], []
+    artifacts, catalogs, mixes, collections = [], [], [], []
     keys, names = set(), set()
     for entry in entries:
         if set(entry) != {"local", "bucket", "key", "sha256"}:
             raise ValueError("invalid publication entry")
         pin = validate_pin({k: entry[k] for k in ("bucket", "key", "sha256")})
+        if pin["bucket"] != BUCKET:
+            raise ValueError("evaluation bundles publish only to dataset/teutonic-text/")
         name = entry["local"]
         path = root / name
         if Path(name).name != name or path.is_symlink() or pin["key"] in keys or name in names:
@@ -45,7 +49,12 @@ def validate_bundle(directory):
         if hashlib.sha256(raw).hexdigest() != pin["sha256"]:
             raise ValueError("bundle hash mismatch")
         value = json.loads(raw)
-        if value.get("format") == CATALOG_FORMAT:
+        if value.get("format") == COLLECTION_FORMAT:
+            validate_collection(value)
+            if pin["key"] != f"{PREFIX}collections/{pin['sha256']}/manifest.json":
+                raise ValueError("collection must use its immutable hash path")
+            collections.append((pin, value))
+        elif value.get("format") == CATALOG_FORMAT:
             if pin["key"] != f"{PREFIX}sampling/{pin['sha256']}/manifest.json":
                 raise ValueError("catalog must use its immutable hash path")
             validate_pin(value["dataset"])
@@ -61,6 +70,8 @@ def validate_bundle(directory):
     if len(catalogs) != 1 or not mixes or len({m["competition"] for m in mixes}) != len(mixes):
         raise ValueError("bundle needs exactly one catalog and unique competitions")
     catalog_pin, catalog = catalogs[0]
+    if len(collections) > 1 or (collections and catalog["dataset"] != collections[0][0]):
+        raise ValueError("collection and catalog pins differ")
     for mix in mixes:
         if mix["sampling"] != catalog_pin or mix["dataset"] != catalog["dataset"]:
             raise ValueError("bundle dependency pins differ")
@@ -69,7 +80,13 @@ def validate_bundle(directory):
 
 def run(directory, client, *, publish=True):
     artifacts, catalog, mixes = validate_bundle(directory)
-    dataset = PackedDataset(DatasetReader(client), catalog["dataset"])
+    local = {(entry['bucket'], entry['key'], entry['sha256']): raw for entry, raw in artifacts}
+    class Reader(DatasetReader):
+        def json(self, pin):
+            validate_pin(pin)
+            raw = local.get((pin['bucket'], pin['key'], pin['sha256']))
+            return json.loads(raw) if raw is not None else super().json(pin)
+    dataset = PackedDataset(Reader(client), catalog["dataset"])
     available, seen = set(), set()
     for row in catalog["partitions"]:
         obj = dataset.objects.get(row["path"], {})
@@ -89,7 +106,10 @@ def run(directory, client, *, publish=True):
                 raise ValueError("missing category length bucket")
     # All local content/dependencies are checked before the first conditional PUT.
     if publish:
-        for entry, raw in sorted(artifacts, key=lambda pair: "/splits/" in pair[0]["key"]):
+        def order(pair):
+            key = pair[0]["key"]
+            return 0 if "/collections/" in key else 1 if "/sampling/" in key else 2
+        for entry, raw in sorted(artifacts, key=order):
             publish_immutable(client, BUCKET, entry["key"], raw, entry["sha256"])
     receipt = {"state": "published-and-verified" if publish else "validated-read-only",
                "dataset": dataset.pin, "objects": [entry for entry, _ in artifacts],

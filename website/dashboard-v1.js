@@ -63,7 +63,7 @@
         }
         var keys = new Set(), active = 0;
         payload.competitions.forEach(function(item) {
-            if (!item || !/^(main|math|code|text|mix[0-9]{2})$/.test(item.key) || keys.has(item.key)
+            if (!item || !/^(main|main2|math|code|text|mix[0-9]{2})$/.test(item.key) || keys.has(item.key)
                 || typeof item.name !== "string" || !Array.isArray(item.queue)
                 || !Object.prototype.hasOwnProperty.call(item, "current_eval")
                 || !item.service_status || typeof item.service_status !== "object") {
@@ -542,7 +542,7 @@
     }
 
     function benchmarkDetailsKey(competition, kingId, key) {
-        if (!/^(main|mix0[1-7])$/.test(competition || "") || !/^[A-Za-z0-9_-]+$/.test(kingId || "")) return null;
+        if (!/^(main|main2|mix0[1-9])$/.test(competition || "") || !/^[A-Za-z0-9_-]+$/.test(kingId || "")) return null;
         var prefix = competition === "main" ? "king-benchmark-daily" : "competitions/" + competition;
         var expected = prefix + "/kings/" + kingId + "/results.json";
         return !key || key === expected ? expected : null;
@@ -568,7 +568,7 @@
         var merged = new Map(), generatedAt = null;
         sources.forEach(function(source) {
             var competition = source.competition, payload = source.results || {}, latest = source.latest || {};
-            if (!/^(main|mix0[1-7])$/.test(competition || "")) throw new Error("unsupported benchmark competition");
+            if (!/^(main|main2|mix0[1-9])$/.test(competition || "")) throw new Error("unsupported benchmark competition");
             if (source.results && (["teutonic-king-benchmark-all-results.v1", "teutonic-king-benchmark-all-results.v2"].indexOf(payload.schema_version) === -1 || !Array.isArray(payload.kings))) throw new Error("unsupported benchmark results schema");
             var candidates = (payload.kings || []).filter(function(item) { return item && typeof item === "object"; });
             var latestResult = latest.latest_result;
@@ -631,7 +631,7 @@
             var result = item.result || {};
             var model = result.model || {};
             var competition = item.competition || model.competition_key || model.competition || "main";
-            if (!/^mix0[1-7]$/.test(competition)) competition = "main";
+            if (!/^mix0[1-9]$/.test(competition)) competition = "main";
             var byName = {};
             (Array.isArray(result.benchmarks) ? result.benchmarks : []).forEach(function(row) {
                 if (row && typeof row.name === "string") byName[benchmarkKey(row.name)] = row;

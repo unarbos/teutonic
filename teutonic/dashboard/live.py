@@ -36,7 +36,7 @@ def _validator():
                 "type": "object", "additionalProperties": False,
                 "required": ["key", "name", "queue", "current_eval", "service_status"],
                 "properties": {
-                    "key": {"type": "string", "pattern": "^(main|math|code|text|mix[0-9]{2})$"},
+                    "key": {"type": "string", "pattern": "^(main|main2|math|code|text|mix[0-9]{2})$"},
                     "name": {"type": "string", "minLength": 1},
                     "queue": {"type": "array", "items": {"$ref": "#/$defs/queue_entry"}},
                     "current_eval": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/current_eval"}]},

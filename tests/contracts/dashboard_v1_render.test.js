@@ -255,10 +255,13 @@ assert.throws(() => dashboard.datasetPresentation({}, {}), /sources must be an a
 // The corpus panel uses the verified inventory, not a competition sampling mix.
 const packedInventory = require("../../website/datasets/inventory.json");
 const packedCorpus = dashboard.mainDatasetPresentation(packedInventory);
-assert.strictEqual(packedCorpus.rows.length, 6);
-assert.strictEqual(packedCorpus.totalTokens, 18175749974177);
-assert.strictEqual(packedCorpus.totalShards, 560169);
+assert.strictEqual(packedCorpus.rows.length, 7);
+assert.strictEqual(packedCorpus.totalTokens, 19208694265566);
+assert.strictEqual(packedCorpus.totalShards, 584155);
 assert.strictEqual(packedCorpus.tokenCountBasis, "original_mimo_token_count");
+const refineCode = packedCorpus.rows.find(row => row.name === "refinecode");
+assert.strictEqual(refineCode.totalTokens, 1032944291389);
+assert.strictEqual(refineCode.totalShards, 23986);
 const packedCode = packedCorpus.rows.find(row => row.name === "code-reasoning");
 assert.strictEqual(packedCode.totalTokens, 2453219624332);
 assert.strictEqual(packedCode.totalShards, 72466);

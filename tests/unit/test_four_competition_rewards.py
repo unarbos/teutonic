@@ -28,7 +28,7 @@ def test_cutover_preserves_history_and_pays_only_four_positions():
     }
     assert set(new["retired_rewards"]) == {"mix02", "mix03", "mix05"}
     assert begin_four_competition_policy(new) == new
-    assert ACTIVE_COMPETITIONS == ("main", "mix01", "mix06", "mix07")
+    assert ACTIVE_COMPETITIONS == ("main2", "mix07", "mix08", "mix09")
     assert {k: v["incentive"] for k, v in chain_config.COMPETITION_DEFAULTS.items() if v["incentive"]} == ACTIVE_INCENTIVES
 
 

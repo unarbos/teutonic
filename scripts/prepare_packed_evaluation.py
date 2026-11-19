@@ -13,14 +13,17 @@ if __package__ in (None, ""):
 
 from teutonic.evaluation.packed_text import (
     BUCKET,
+    COLLECTION_FORMAT,
     MIX_FORMAT,
     PREFIX,
     DatasetReader,
     PackedDataset,
     build_catalog,
     canonical,
+    combine_catalogs,
     read_client,
     validate_mix,
+    validate_collection,
 )
 
 
@@ -36,6 +39,12 @@ def prepare(dataset, definitions, registry, output, *, catalog=None):
     (output / "sampling.json").write_bytes(raw)
     catalog_pin = {"bucket": BUCKET, "key": catalog_key, "sha256": catalog_hash}
     entries = []
+    if dataset.manifest.get("format") == COLLECTION_FORMAT:
+        collection_raw = canonical(dataset.manifest)
+        if hashlib.sha256(collection_raw).hexdigest() != dataset.pin["sha256"]:
+            raise ValueError("collection pin differs from canonical content")
+        (output / "collection.json").write_bytes(collection_raw)
+        entries.append({"local": "collection.json", **dataset.pin})
     entries.append({"local": "sampling.json", **catalog_pin})
     available = {(r["dataset"], r["category"], r["bucket"]) for r in catalog["partitions"]}
     for key, definition in sorted(definitions.items()):
@@ -61,7 +70,11 @@ def prepare(dataset, definitions, registry, output, *, catalog=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-pin", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--dataset-pin", type=Path)
+    source.add_argument("--collection", type=Path, help="local collection of pinned source datasets")
+    parser.add_argument("--source-catalog", action="append", default=[], metavar="NAME=PATH",
+                        help="reuse an existing source catalog; missing catalogs are built read-only")
     parser.add_argument("--definitions", type=Path, default=Path("chain.toml"),
                         help="reviewed TOML; use active DB weights for a production migration")
     from teutonic.competitions import ACTIVE_COMPETITIONS
@@ -74,11 +87,21 @@ def main():
     parser.add_argument("--dataset-manifest-file", type=Path,
                         help="reuse a local manifest after checking the dataset-pin SHA-256")
     args = parser.parse_args()
+    if args.collection and (args.dataset_manifest_file or args.catalog_state):
+        parser.error("collection preparation uses per-source manifests and checkpoints")
     config = tomllib.loads(args.definitions.read_text())
     definitions = {key: config["competitions"][key] for key in args.competition}
-    pin = json.loads(args.dataset_pin.read_text())
+    collection = json.loads(args.collection.read_text()) if args.collection else None
+    if collection is not None:
+        validate_collection(collection)
+        sha = hashlib.sha256(canonical(collection)).hexdigest()
+        pin = {"bucket": BUCKET, "key": f"{PREFIX}collections/{sha}/manifest.json", "sha256": sha}
+    else:
+        pin = json.loads(args.dataset_pin.read_text())
     class Reader(DatasetReader):
         def json(self, requested):
+            if collection is not None and requested == pin:
+                return collection
             if args.dataset_manifest_file is None:
                 return super().json(requested)
             raw = args.dataset_manifest_file.read_bytes()
@@ -87,10 +110,24 @@ def main():
             return json.loads(raw)
     dataset = PackedDataset(Reader(read_client(max_pool_connections=max(32,args.workers))), pin)
     from teutonic.evaluation.packed_catalog import build_resumable_catalog
-    catalog = build_resumable_catalog(
-        dataset, args.catalog_state or args.output_dir/'catalog-state.sqlite',
-        workers=args.workers, page_bytes=args.page_bytes,
-        on_progress=lambda event: print(json.dumps(event),flush=True))
+    def build(source, state):
+        return build_resumable_catalog(source, state, workers=args.workers, page_bytes=args.page_bytes,
+            on_progress=lambda event: print(json.dumps(event), flush=True))
+    if collection is not None:
+        supplied = {}
+        for item in args.source_catalog:
+            name, path = item.split("=", 1)
+            if name not in dataset.sources or name in supplied:
+                raise ValueError("unknown or duplicate source catalog")
+            supplied[name] = json.loads(Path(path).read_text())
+        catalogs = {name: supplied[name] if name in supplied else
+                    build(source, args.output_dir/f"catalog-{name}.sqlite")
+                    for name, source in dataset.sources.items()}
+        catalog = combine_catalogs(pin, collection, catalogs)
+    else:
+        if args.source_catalog:
+            raise ValueError("source catalogs require a collection")
+        catalog = build(dataset, args.catalog_state or args.output_dir/'catalog-state.sqlite')
     entries = prepare(dataset, definitions, config["categories"], args.output_dir, catalog=catalog)
     print(json.dumps({"prepared_files": len(entries), "remote_writes": 0}))
 

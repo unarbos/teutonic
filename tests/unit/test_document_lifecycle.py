@@ -70,7 +70,7 @@ def test_startup_preloads_and_shutdown_stops_idle_horizon_first(tmp_path, monkey
     factory = Mock(return_value=resident)
     monkeypatch.setattr(idle_horizon, "IdleHorizon", factory)
     namespace = {
-        "FastAPI": object, "setup_logging": Mock(), "log": Mock(),
+        "FastAPI": object, "setup_logging": Mock(), "log": Mock(), "gpu_profile": lambda: "b300",
         "parse_gpu_ids": lambda: list(range(8)), "_model_worker_pool": None,
         "chain_config": SimpleNamespace(ARCH_MODULE="fixture"),
         "HorizonDownload": SimpleNamespace(from_env=Mock(return_value=downloader)),
@@ -105,7 +105,7 @@ def test_failed_evaluation_rewarms_and_releases_admission(cleanup_failure):
     namespace = {
         "EvaluationRequestV3": SimpleNamespace, "_attempts": SimpleNamespace(get=lambda _: record),
         "_eval_lock": lock, "_idle_horizon": resident, "time": time, "datetime": datetime, "UTC": UTC,
-        "threading": SimpleNamespace(Event=threading.Event, Thread=Mock()), "ExitStack": ExitStack,
+        "threading": SimpleNamespace(Event=threading.Event, RLock=threading.RLock, Thread=Mock()), "ExitStack": ExitStack,
         "cache_lock": lambda _: nullcontext(), "MODEL_CACHE_DIR": Path("/tmp"), "SHARD_CACHE_DIR": Path("/tmp"),
         "R2ArtifactResolver": Mock(side_effect=RuntimeError("artifact unavailable")), "log": Mock(),
         "cleanup_model_cache": cleanup, "subprocess": subprocess,

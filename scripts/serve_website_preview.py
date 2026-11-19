@@ -101,14 +101,14 @@ def public_data_url(path: str) -> str | None:
     if path == "/benchmarks/results.json":
         return PUBLIC_BENCHMARK_URL
     if re.fullmatch(
-        r"/benchmarks/(?:king-benchmark-daily|competitions/mix0[1-7])/"
+        r"/benchmarks/(?:king-benchmark-daily|competitions/(?:main2|mix0[1-9]))/"
         r"(?:all-kings/(?:results|latest)|kings/[A-Za-z0-9_-]+/results)\.json", path
     ):
         return PUBLIC_BENCHMARK_ORIGIN + path.removeprefix("/benchmarks")
     if path in {"/dashboard.json", "/competitions.json", "/datasets/manifest.json"}:
         return PUBLIC_DASHBOARD_ORIGIN + path
     if re.fullmatch(
-        r"/competitions/(main|math|code|text|mix(?:0[1-9]|[1-9][0-9]))/"
+        r"/competitions/(main|main2|math|code|text|mix(?:0[1-9]|[1-9][0-9]))/"
         r"(dashboard\.json|datasets/manifest\.json)", path
     ):
         return PUBLIC_DASHBOARD_ORIGIN + path

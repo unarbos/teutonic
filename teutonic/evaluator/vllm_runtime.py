@@ -114,7 +114,7 @@ class Worker:
         return worker_env(role, gpu_ids)
 
     def __init__(self, role, snapshot, gpu_ids, directory, identity, on_phase,
-                 *, load_timeout=1800, score_timeout=1800, worker_id=None, max_model_len=None):
+                 *, load_timeout=3600, score_timeout=1800, worker_id=None, max_model_len=None):
         self.role, self.identity, self.on_phase = role, identity, on_phase
         self.load_timeout, self.score_timeout = load_timeout, score_timeout
         self.batch, self.ready, self.closed = 0, False, False

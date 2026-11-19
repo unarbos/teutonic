@@ -1,0 +1,15 @@
+{
+  "format": "teutonic-packed-text-collection-v1",
+  "sources": {
+    "original": {
+      "bucket": "dataset",
+      "key": "teutonic-text/provenance-compact/v1/58ce39daf1a3b5be5860779faaf32245d1d040edad25c9abf17c399369e96448/manifest.json",
+      "sha256": "93e3210ba761b0f9f33a050bcacc81ca53f6703fe39577d3ae58e2ad0f560962"
+    },
+    "refinecode": {
+      "bucket": "code",
+      "key": "refinecode-text-v2/provenance-compact/v1/09f3724d1b20eee92d3b8af80ad5aab910f8a488b2eda3f9c586afe9e6856f0e/manifest.json",
+      "sha256": "41adbee1b98e47e3f5788ef061105cdae6cac46dd4a1daf9dab165f21f8527b6"
+    }
+  }
+}

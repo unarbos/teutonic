@@ -6,8 +6,9 @@
   <meta name="color-scheme" content="light dark">
   <title>Teutonic Dashboard</title>
   <link rel="icon" type="image/png" href="favicon.png">
-  <link rel="stylesheet" href="style.css?v=dataset-alignment-v1">
+  <link rel="stylesheet" href="style.css?v=dataset-layout-v4">
   <link rel="stylesheet" href="benchmark-layout.css?v=all-kings-v3">
+  <link rel="stylesheet" href="horizon-history.css?v=history-tabs-v1">
 </head>
 <body>
   <main class="page">
@@ -23,47 +24,54 @@
       <img src="favicon.png" alt="Teuton" class="logo">
       <h1>Teutonic</h1>
       <div class="hero-links" aria-label="Teutonic model and project links">
-        <span><i id="king-health" class="status-dot" aria-hidden="true"></i> MAIN KING: <a id="king-link" href="#">--</a> <span class="model-revision">@ <a id="king-revision" href="#">--</a></span></span>
+        <span><i id="king-health" class="status-dot" aria-hidden="true"></i> <span id="primary-king-label">MAIN KING:</span> <a id="king-link" href="#">--</a> <span class="model-revision">@ <a id="king-revision" href="#">--</a></span></span>
         <span>GENESIS: <a id="genesis-link" href="#">--</a> <span class="model-revision">@ <a id="genesis-revision" href="#">--</a></span></span>
         <span>VALIDATOR: <a href="https://github.com/unarbos/teutonic">GitHub</a></span>
         <span>PAPER: <a href="https://teutonic.ai/paper.html">Teutonic-I 10B Technical Report</a></span>
         <span id="king-reign">REIGN --</span>
       </div>
-      <div class="dataset-panel" id="dataset-panel">
-        <div class="dataset-panel-head">
-          <h2>DATASET MIX</h2>
-          <a id="dataset-manifest-link" href="/datasets/inventory.json" target="_blank" rel="noopener">MANIFEST</a>
+      <div class="dataset-panels">
+        <div class="dataset-panel" id="dataset-panel">
+          <div class="dataset-panel-head">
+            <h2>DATASET MIX</h2>
+            <a id="dataset-manifest-link" href="/datasets/inventory.json" target="_blank" rel="noopener">MANIFEST</a>
+          </div>
+          <p class="dataset-overview" id="dataset-summary" aria-live="polite">LOADING DATASET MANIFEST...</p>
+          <div class="dataset-table-wrap">
+            <table class="dataset-table">
+              <thead><tr><th>DATASET</th><th>TOKENS</th><th>SHARDS</th><th>AVG TOKENS / SHARD</th></tr></thead>
+              <tbody id="dataset-sources"><tr><td colspan="4" class="dataset-loading">LOADING...</td></tr></tbody>
+            </table>
+          </div>
         </div>
-        <p class="dataset-overview" id="dataset-summary" aria-live="polite">LOADING DATASET MANIFEST...</p>
-        <div class="dataset-table-wrap">
-          <table class="dataset-table">
-            <thead><tr><th>DATASET</th><th>TOKENS</th><th>SHARDS</th><th>AVG TOKENS / SHARD</th></tr></thead>
-            <tbody id="dataset-sources"><tr><td colspan="4" class="dataset-loading">LOADING...</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="dataset-panel" aria-labelledby="competition-dataset-heading">
-        <div class="dataset-panel-head competition-dataset-head">
-          <h2 id="competition-dataset-heading">COMPETITION DATASET MIX</h2>
-          <span class="dataset-help" id="competition-dataset-help">
-            <button type="button" aria-label="About the competition dataset mix" aria-describedby="competition-dataset-tooltip">(?)</button>
-            <span id="competition-dataset-tooltip" class="dataset-help-tooltip" role="tooltip" hidden>Each competition uses an explicit category list. Weights are sampling targets for whole documents. The rollout budget is 60M original MiMo tokens. Reward is the byte-weighted reduction in max(model loss − Horizon loss, 0); losses and thresholds are in bits/byte. Acceptance requires the bootstrap LCB to exceed the threshold. A kingless MIX challenges its pinned starting king; MIX07 starts from the MIX05 king pinned at activation.</span>
-          </span>
-        </div>
-        <div class="dataset-table-wrap">
-          <table class="dataset-table competition-dataset-table">
-            <thead><tr><th scope="col">COMPETITION</th><th scope="col">CATEGORY WEIGHTS</th><th scope="col">DOCUMENT TOKENS</th><th scope="col">STATUS</th><th scope="col">REQUIRED LCB</th><th scope="col">SOURCE</th></tr></thead>
-            <tbody id="competition-datasets"></tbody>
-          </table>
+        <div class="dataset-panel" aria-labelledby="competition-dataset-heading">
+          <div class="dataset-panel-head competition-dataset-head">
+            <h2 id="competition-dataset-heading">COMPETITION DATASET MIX</h2>
+            <span class="dataset-help" id="competition-dataset-help">
+              <button type="button" aria-label="About the competition dataset mix" aria-describedby="competition-dataset-tooltip">(?)</button>
+              <span id="competition-dataset-tooltip" class="dataset-help-tooltip" role="tooltip" hidden>Each competition uses an explicit category list. Weights are sampling targets for whole documents. The rollout budget is 60M original MiMo tokens. Reward is the byte-weighted reduction in max(model loss − Horizon loss, 0); losses and thresholds are in bits/byte. Acceptance requires the bootstrap LCB to exceed the threshold. A kingless MIX challenges its pinned starting king; MIX07 starts from the MIX05 king pinned at activation.</span>
+            </span>
+          </div>
+          <p class="dataset-overview">Sampling weights and acceptance thresholds</p>
+          <div class="dataset-table-wrap">
+            <table class="dataset-table competition-dataset-table">
+              <thead><tr><th scope="col">COMPETITION</th><th scope="col">CATEGORY WEIGHTS</th><th scope="col">DOCUMENT TOKENS</th><th scope="col">STATUS</th><th scope="col">REQUIRED LCB</th><th scope="col">SOURCE</th></tr></thead>
+              <tbody id="competition-datasets"></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </section>
 
     <div id="error-banner" class="error-banner" role="alert" hidden></div>
 
-    <section aria-labelledby="performance-heading">
-      <div class="section-heading chart-heading">
-        <h2 id="performance-heading">MAIN LOSS HISTORY</h2>
+    <section id="horizon-panel" aria-label="MAIN model history">
+      <div class="section-heading history-chart-tabs" role="tablist" aria-label="History chart">
+        <button id="performance-heading" type="button" role="tab" aria-selected="true" aria-controls="loss-history-panel" tabindex="0">MAIN LOSS HISTORY</button>
+        <button id="horizon-history-tab" type="button" role="tab" aria-selected="false" aria-controls="horizon-history-panel" tabindex="-1">KINGS / LOSS VS HORIZON</button>
+      </div>
+      <div id="loss-history-panel" role="tabpanel" aria-labelledby="performance-heading">
+      <div class="chart-heading loss-chart-toolbar">
         <div class="chart-tools">
           <span class="chart-legend"><i class="legend king-line"></i>KINGS <i class="legend challenger-line"></i>CHALLENGERS</span>
           <label for="smooth-slider">SMOOTH <input type="range" id="smooth-slider" min="0" max="1" step="0.05" value="0.35"><output id="smooth-value" for="smooth-slider">0.35</output></label>
@@ -76,6 +84,10 @@
         <div id="dataset-change-tooltip" class="dataset-change-tooltip" role="tooltip" hidden></div>
       </div>
       <div class="chart-footer"><span>OLDER</span><span><span id="chart-count">0 EVALUATIONS</span> · <span id="smooth-status">SMOOTH LOWESS 0.35</span></span><span>NEWER</span></div>
+      </div>
+      <div id="horizon-history-panel" role="tabpanel" aria-labelledby="horizon-history-tab" hidden>
+        <div id="horizon-content" aria-live="polite"></div>
+      </div>
     </section>
 
     <section class="bench-panel" aria-labelledby="benchmark-heading">
@@ -173,6 +185,8 @@
     <footer><span>TEUTONIC / DASHBOARD V1</span><span id="last-refresh">LAST REFRESH --</span></footer>
   </main>
   <script src="dashboard-v1.js?v=live-progress-v1"></script>
-  <script src="app.js?v=live-progress-v1"></script>
+  <script src="horizon-history-data.js?v=history-tabs-v2"></script>
+  <script src="horizon-history.js?v=history-tabs-v2"></script>
+  <script src="app.js?v=history-tabs-v2"></script>
 </body>
 </html>

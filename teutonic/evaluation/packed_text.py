@@ -1,6 +1,6 @@
 """Pinned packed-text inventories and document-only competition manifests.
 
-All dataset access is read-only and restricted to the singular `dataset` bucket.
+All dataset access is read-only and restricted to reviewed bucket prefixes.
 No publishing or deletion operations belong in this module.
 """
 
@@ -16,7 +16,7 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
@@ -27,6 +27,9 @@ MIX_FORMAT = "teutonic-packed-text-mix"
 CATALOG_FORMAT = "teutonic-packed-text-sampling"
 BUCKET = "dataset"
 PREFIX = "teutonic-text/"
+DATASET_ROOTS = {BUCKET: PREFIX, "code": "refinecode-text-v2/"}
+DATASET_FORMATS = {BUCKET: FORMAT, "code": "refinecode-packed-text-v2"}
+COLLECTION_FORMAT = "teutonic-packed-text-collection-v1"
 BUCKETS = (("2-4096", 2, 4096, 0.4), ("4097-16384", 4097, 16384, 0.6))
 DTYPE = np.dtype([
     ("doc_id", "V32"), ("shard_id", "<u4"), ("byte_offset", "<u8"),
@@ -106,8 +109,9 @@ def relative_path(value):
 def validate_pin(pin):
     if not isinstance(pin, dict) or set(pin) != {"bucket", "key", "sha256"}:
         raise ValueError("dataset pin needs bucket, key and SHA-256")
-    if pin["bucket"] != BUCKET or not pin["key"].startswith(PREFIX):
-        raise ValueError("evaluation data must be under dataset/teutonic-text/")
+    prefix = DATASET_ROOTS.get(pin["bucket"])
+    if prefix is None or not isinstance(pin["key"], str) or not pin["key"].startswith(prefix):
+        raise ValueError("evaluation data must be under dataset/teutonic-text/ or code/refinecode-text-v2/")
     relative_path(pin["key"])
     if not isinstance(pin["sha256"], str) or not SHA.fullmatch(pin["sha256"]):
         raise ValueError("invalid dataset SHA-256")
@@ -161,8 +165,11 @@ def read_client(*, max_pool_connections=32):
 
 
 class DatasetReader:
-    def __init__(self, client):
+    def __init__(self, client, *, bucket=BUCKET):
+        if bucket not in DATASET_ROOTS:
+            raise ValueError("unsupported dataset bucket")
         self.client = client
+        self.bucket, self.prefix = bucket, DATASET_ROOTS[bucket]
         self._guard = threading.Lock()
         self._objects = {}
 
@@ -182,13 +189,14 @@ class DatasetReader:
                 if not entry[1]:
                     del self._objects[key]
 
-    def _read(self, key, consume, **kwargs):
+    def _read(self, key, consume, *, bucket=None, **kwargs):
         from botocore.exceptions import ClientError, ConnectionClosedError, ReadTimeoutError
 
-        with self._object(key):
+        bucket = self.bucket if bucket is None else bucket
+        with self._object((bucket, key)):
             for attempt in range(8):
                 try:
-                    response = self.client.get_object(Bucket=BUCKET, Key=key, **kwargs)
+                    response = self.client.get_object(Bucket=bucket, Key=key, **kwargs)
                     # StreamingBody.__enter__ exposes the raw urllib3 stream,
                     # bypassing botocore's timeout translation. Keep the wrapper.
                     with closing(response["Body"]) as body:
@@ -211,7 +219,7 @@ class DatasetReader:
 
     def json(self, pin):
         pin = validate_pin(pin)
-        raw = self._read(pin["key"], lambda response, body: body.read())
+        raw = self._read(pin["key"], lambda response, body: body.read(), bucket=pin["bucket"])
         if hashlib.sha256(raw).hexdigest() != pin["sha256"]:
             raise ValueError("manifest hash mismatch")
         return json.loads(raw)
@@ -232,7 +240,7 @@ class DatasetReader:
             if len(raw) != length:
                 raise ValueError("short or oversized range response")
             return raw
-        return self._read(PREFIX + path, consume, Range=f"bytes={offset}-{end}", IfMatch=obj["etag"])
+        return self._read(self.prefix + path, consume, Range=f"bytes={offset}-{end}", IfMatch=obj["etag"])
 
 
 class Partition:
@@ -301,13 +309,21 @@ class Document:
 
 
 class PackedDataset:
-    def __init__(self, reader, pin, *, text_cache=None):
+    def __init__(self, reader, pin, *, text_cache=None, _allow_collection=True):
         self.reader, self.pin = reader, validate_pin(pin)
         self.text_cache = Path(text_cache) if text_cache is not None else None
         if self.text_cache is not None:
             self.text_cache.mkdir(parents=True, exist_ok=True)
         self.manifest = reader.json(pin)
-        if self.manifest.get("format") != FORMAT:
+        if getattr(reader, "bucket", BUCKET) != pin["bucket"]:
+            self.reader = reader = DatasetReader(reader.client, bucket=pin["bucket"])
+        self.sources = {}
+        if self.manifest.get("format") == COLLECTION_FORMAT:
+            if not _allow_collection or pin["bucket"] != BUCKET:
+                raise ValueError("nested or misplaced dataset collection")
+            self._collection(reader)
+            return
+        if self.manifest.get("format") != DATASET_FORMATS[pin["bucket"]]:
             raise ValueError("unsupported packed-text dataset")
         self.objects, self.texts = {}, {}
         for obj in self.manifest["objects"]:
@@ -330,11 +346,26 @@ class PackedDataset:
         return Partition(self.reader, obj, pages=self.index_pages)
 
     def document(self, path, number):
+        if self.sources:
+            source, local = self._source(path)
+            return replace(source.document(local, number), partition=path)
         part = self.partition(path)
         return self._document(part, number, part.row(number))
 
     def documents(self, references, executor):
         """Group candidate rows by partition; return results in requested RNG order."""
+        if self.sources:
+            grouped, result = {}, [None] * len(references)
+            for i, (path, number) in enumerate(references):
+                name, local = path.split("/", 1)
+                if name not in self.sources:
+                    raise ValueError("unknown dataset source")
+                grouped.setdefault(name, []).append((i, local, number))
+            for name, entries in grouped.items():
+                docs = self.sources[name].documents([(p, n) for _, p, n in entries], executor)
+                for (i, path, _), doc in zip(entries, docs, strict=True):
+                    result[i] = replace(doc, partition=f"{name}/{path}")
+            return result
         groups = {}
         for position, (path, number) in enumerate(references):
             groups.setdefault(path, []).append((position, number))
@@ -365,6 +396,9 @@ class PackedDataset:
         )
 
     def text(self, doc):
+        if self.sources:
+            source, local = self._source(doc.partition)
+            return source.text(replace(doc, partition=local))
         cached = self.text_cache / doc.text_sha256 if self.text_cache is not None else None
         raw = cached.read_bytes() if cached is not None and cached.exists() else None
         if raw is not None and (len(raw) != doc.byte_length or hashlib.sha256(raw).hexdigest() != doc.text_sha256):
@@ -382,9 +416,45 @@ class PackedDataset:
             temporary.replace(cached)
         return text
 
+    def _source(self, path):
+        name, local = relative_path(path).split("/", 1)
+        return self.sources[name], local
+
+    def _collection(self, reader):
+        """Namespaced indexes preserve native shard IDs and byte offsets per source."""
+        pins = validate_collection(self.manifest)
+        self.objects, identities = {}, set()
+        for name, pin in sorted(pins.items()):
+            source = PackedDataset(reader, pin, text_cache=self.text_cache, _allow_collection=False)
+            categories = {(o["dataset"], o["category"]) for o in source.objects.values()
+                          if o["role"] == "index"}
+            if identities & categories:
+                raise ValueError("collection sources have overlapping categories")
+            identities.update(categories)
+            self.sources[name] = source
+            for path, obj in source.objects.items():
+                self.objects[f"{name}/{path}"] = {**obj, "path": f"{name}/{path}"}
+
+
+def validate_collection(value):
+    if (not isinstance(value, dict) or set(value) != {"format", "sources"}
+            or value["format"] != COLLECTION_FORMAT or not isinstance(value["sources"], dict)
+            or not 1 <= len(value["sources"]) <= len(DATASET_ROOTS)):
+        raise ValueError("invalid packed-text collection")
+    for name, pin in value["sources"].items():
+        if not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
+            raise ValueError("invalid collection source name")
+        validate_pin(pin)
+    if len({digest(p) for p in value["sources"].values()}) != len(value["sources"]):
+        raise ValueError("duplicate collection source")
+    return value["sources"]
+
 
 def build_catalog(dataset):
     """One-time boundary discovery; no text downloads and no remote writes."""
+    if dataset.sources:
+        return combine_catalogs(dataset.pin, dataset.manifest,
+                                {name: build_catalog(source) for name, source in dataset.sources.items()})
     rows = []
     for path, obj in sorted(dataset.objects.items()):
         if obj["role"] != "index":
@@ -399,3 +469,18 @@ def build_catalog(dataset):
                              "bucket": name, "path": path, "lo": lo, "hi": hi})
     return {"format": CATALOG_FORMAT, "dataset": dataset.pin,
             "buckets": [list(x) for x in BUCKETS], "partitions": rows}
+
+
+def combine_catalogs(pin, collection, catalogs):
+    pins = validate_collection(collection)
+    if set(catalogs) != set(pins):
+        raise ValueError("collection needs every source catalog")
+    rows = []
+    for name, source_pin in sorted(pins.items()):
+        catalog = catalogs[name]
+        if (catalog.get("format") != CATALOG_FORMAT or catalog.get("dataset") != source_pin
+                or catalog.get("buckets") != [list(b) for b in BUCKETS]):
+            raise ValueError("source catalog differs from collection pin or bucket policy")
+        rows.extend({**row, "path": f"{name}/{relative_path(row['path'])}"} for row in catalog["partitions"])
+    return {"format": CATALOG_FORMAT, "dataset": validate_pin(pin),
+            "buckets": [list(b) for b in BUCKETS], "partitions": rows}

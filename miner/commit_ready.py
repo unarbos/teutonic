@@ -31,7 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "ready identity on chain."
         )
     )
-    parser.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main")
+    parser.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main2")
     add_wallet_arguments(parser)
     return parser.parse_args(argv)
 

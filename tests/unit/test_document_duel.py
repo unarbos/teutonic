@@ -31,8 +31,11 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(
     (snapshot / 'tokenizer.json').write_text('{}')
     monkeypatch.setattr(duel, 'read_client', lambda **kwargs: client)
     original_batches = duel.prepared_batches
+    batch_generators = []
     def small_batches(*args, **kwargs):
-        return original_batches(*args, **{**kwargs, 'batch_documents': 2})
+        generator = original_batches(*args, **{**kwargs, 'batch_documents': 2})
+        batch_generators.append(generator)
+        return generator
     monkeypatch.setattr(duel, 'prepared_batches', small_batches)
     original_sampling = duel.sample_document_batches
     def streaming_sampling(*args, **kwargs):
@@ -149,6 +152,8 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(
         preload()
         with pytest.raises(RuntimeError, match="fixture scorer failure"):
             run()
+        # Do not rely on garbage collection to close thread-owning generators.
+        assert all(generator.gi_frame is None for generator in batch_generators)
         assert not list(tmp_path.glob('duel-text-*'))
         assert failure in closed
         if failure == "challenger":
@@ -163,6 +168,7 @@ def test_cache_miss_hit_and_shared_text_with_read_only_r2(
         preload()
         client.calls.clear()
         verdict, metadata, _ = run()
+        assert all(generator.gi_frame is None for generator in batch_generators)
         assert verdict['accepted']
         # Fixture documents have two scored targets: raw NLL stays separate from BPB.
         assert verdict['avg_king_token_loss'] == 2.0

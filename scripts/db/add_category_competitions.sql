@@ -7,10 +7,10 @@ ALTER TABLE control_plane.competitions
         REFERENCES control_plane.king_reigns(reign_id) ON DELETE RESTRICT;
 ALTER TABLE control_plane.competitions DROP CONSTRAINT IF EXISTS competitions_competition_key_check;
 ALTER TABLE control_plane.competitions ADD CONSTRAINT competitions_competition_key_check
-    CHECK (competition_key ~ '^(main|math|code|text|mix(0[1-9]|[1-9][0-9]))$');
+    CHECK (competition_key ~ '^(main|main2|math|code|text|mix(0[1-9]|[1-9][0-9]))$');
 ALTER TABLE control_plane.uploads DROP CONSTRAINT IF EXISTS uploads_competition_key_check;
 ALTER TABLE control_plane.uploads ADD CONSTRAINT uploads_competition_key_check
-    CHECK (competition_key ~ '^(main|math|code|text|mix(0[1-9]|[1-9][0-9]))$');
+    CHECK (competition_key ~ '^(main|main2|math|code|text|mix(0[1-9]|[1-9][0-9]))$');
 GRANT SELECT ON control_plane.competitions TO teutonic_access_controller;
 
 CREATE OR REPLACE VIEW control_plane.dashboard_competitions WITH (security_barrier=true) AS

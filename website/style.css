@@ -49,3 +49,15 @@
 .history-filters button{border:var(--border);background:var(--paper);color:var(--ink);padding:3px 8px;font:600 10px/1 var(--font);letter-spacing:.05em;cursor:pointer}
 .history-filters button:hover,.history-filters button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
 .history-filters button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+
+/* Align the dataset panels while preserving the dashboard's existing style. */
+.dataset-panels{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,3fr);gap:14px;margin-top:14px;align-items:stretch}
+.dataset-panels>.dataset-panel{display:flex;flex-direction:column;width:100%;min-width:0;margin:0}
+.dataset-panels .dataset-table-wrap{flex:1}
+.dataset-panels .dataset-table{height:100%}
+.dataset-panels .dataset-table thead{height:26px}
+.dataset-panels #dataset-panel .dataset-table{min-width:460px}
+.dataset-panels .competition-dataset-table{min-width:680px}
+.dataset-panels .competition-dataset-table tbody th,.dataset-panels .competition-dataset-table tbody td{vertical-align:middle}
+@media(max-width:1099px){.dataset-panels{grid-template-columns:minmax(0,1fr);max-width:980px;margin-inline:auto}.dataset-panels .dataset-table{height:auto}}
+@media(max-width:640px){.dataset-panels{gap:10px;margin-top:10px}}

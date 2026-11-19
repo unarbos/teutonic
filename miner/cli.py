@@ -270,13 +270,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     ready = subparsers.add_parser("ready", help="commit the uploaded model as ready")
     add_selection_argument(ready)
-    ready.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main")
+    ready.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main2")
 
     submit = subparsers.add_parser(
         "submit", help="run check, register, auth, upload, and ready for a saved hotkey"
     )
     add_selection_argument(submit)
-    submit.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main")
+    submit.add_argument("--competition", type=normalize_competition, choices=ACTIVE_COMPETITIONS, default="main2")
     submit.add_argument("model_dir", type=Path)
     submit.add_argument("--name", required=True, dest="model_name")
     submit.add_argument("--mailbox-base-url")

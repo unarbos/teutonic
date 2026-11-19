@@ -4,6 +4,16 @@ This runbook describes the production two-host deployment and the order used to
 start a new competition. Run commands from the repository root unless stated
 otherwise.
 
+## Prepared 19 November update: RefineCode competitions
+
+The next rollout replaces MAIN with MAIN2, retires MIX01/MIX06, retains MIX07,
+and introduces MIX08/MIX09. See
+[`deployment/refinecode-20261119/README.md`](deployment/refinecode-20261119/README.md)
+for pinned sources, catalog preparation and the guarded cutover procedure.
+This is local preparation; source catalogs and immutable publication must be
+completed and reviewed before activation. The active budget remains 60M and the
+threshold remains 0.0005 bits/byte. The 13 November instructions below are historical.
+
 ## Prepared 13 November update: 60M and active-document scoring
 
 The current local update selects **60M original MiMo tokens** for MAIN, MIX01,
@@ -71,10 +81,17 @@ Provision these buckets before starting a packed-text competition:
 | `teutonic-models-enam` | Public | Genesis and promoted immutable models |
 | `teutonic-dash-enam` | Public read | Dashboard state and encrypted credential mailboxes |
 | `dataset` | Public read; authenticated evaluator access | Packed UTF-8 documents, indexes, sampling catalog and split manifests |
+| `code` | Public read; authenticated evaluator access | RefineCode packed UTF-8 documents and indexes under `refinecode-text-v2/` |
 
 Public dataset inventory:
 https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/manifest.json
 Resolve object paths relative to `https://pub-41c7413282854bc5816ba78e1e21eec8.r2.dev/teutonic-text/`.
+
+Public RefineCode inventory:
+https://pub-64e3f687d8a2411ca8595bc760d31654.r2.dev/refinecode-text-v2/manifest.json
+Resolve its object paths relative to `https://pub-64e3f687d8a2411ca8595bc760d31654.r2.dev/refinecode-text-v2/`.
+Collection manifests pin both source buckets; split manifests remain in `dataset`.
+
 The old `datasets` bucket was deleted. Its public URLs and the legacy rollout
 commands below are historical references, not working download locations.
 
@@ -83,7 +100,7 @@ verification, promotion, cleanup, and dashboard publication. The Cloudflare API
 token must be able to create and revoke the scoped parent tokens used by the
 access controller.
 
-The GPU uses a separate read-only R2 key that can read both model buckets and `dataset`. It
+The GPU uses a separate read-only R2 key that can read both model buckets, `dataset`, and `code`. It
 does not receive the Cloudflare management token or access-controller secrets.
 
 ## Configure the active chain
@@ -524,9 +541,11 @@ kings automatically. A synthetic PostgreSQL rehearsal covers migration,
 idempotence, guard failures, and restoring the old configuration; the final live
 configuration snapshot still needs review.
 
-The rollout retires MIX02, MIX03 and MIX05 in addition to already retired MIX04.
+The original four-competition rollout retires MIX02, MIX03 and MIX05 in addition to already retired MIX04.
 MAIN receives 40%; MIX01, MIX06 and MIX07 receive 20% each. Definitions, categories,
 models and historical results remain available. Category sampling weights do not change.
+This is the historical `four-competition-v3` policy. The MAIN2 rollout uses the
+separate RefineCode activation procedure below.
 
 Prepare the reward/activation cutover using the control-host database environment:
 
@@ -1513,6 +1532,21 @@ four decimal places; manifests retain full precision. Each category appears once
 | `web-high-medium` | 4.9513% |
 | `web-high-nltk-qa` | 5.2181% |
 
+
+## RefineCode competition incentives
+
+The prepared `refinecode-competitions-v5` policy allocates MAIN2 40%, and MIX07,
+MIX08 and MIX09 20% each. A successful crown transfers that competition's fixed
+share to its new king. There is no latest-crown bonus. Positions held by the same
+hotkey add together; the owner of the v9 starting model initially receives the
+two MIX08/MIX09 shares, totaling 40%.
+
+Follow [the RefineCode rollout procedure](deployment/refinecode-20261119/README.md)
+to preview and apply the competition, configuration and reward changes together.
+The activation command has no bonus-recipient argument. Repository defaults do
+not change the live database or published weights until the cutover is applied.
+Historical policy handling remains available for replay; the older latest-king
+bonus activation script is not part of this rollout.
 
 ## CPU release verification
 

@@ -25,7 +25,7 @@ def validate_definitions():
     from teutonic.competitions import ACTIVE_INCENTIVES, CONFIGURED_COMPETITIONS
 
     if set(chain_config.COMPETITION_DEFAULTS) != set(CONFIGURED_COMPETITIONS):
-        raise ValueError("configure MAIN and MIX01–MIX07, including retired MIX04 history")
+        raise ValueError("configure all current and historical competition definitions")
     for key, spec in chain_config.COMPETITION_DEFAULTS.items():
         weights = spec["categories"]
         if not weights or set(weights) - set(chain_config.CATEGORY_REGISTRY):

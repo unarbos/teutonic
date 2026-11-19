@@ -189,7 +189,8 @@ manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/dclm-baselin
 n = 0
 long_document_tokens = 60000000
 delta_threshold = 0.0005
-incentive = 0.4
+# Retired at the RefineCode cutover; retained for historical replay.
+incentive = 0.0
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/main/versions/44383013ef3b8c1fbaaf54ece816af899bb55727d18f842249931e56cf09e99d.json"
 
 [competitions.main.categories]
@@ -222,7 +223,7 @@ web-high-nltk-qa = 0.0656642256232968
 n = 0
 long_document_tokens = 60000000
 delta_threshold = 0.0005
-incentive = 0.2
+incentive = 0.0
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix01/versions/406f640bf0946c50625c54aa80334b9032ca2001bd5175ab18fed4f2e71ae94d.json"
 
 [competitions.mix01.categories]
@@ -336,7 +337,7 @@ reasoning = 0.19917344489800715
 n = 0
 long_document_tokens = 60000000
 delta_threshold = 0.0005
-incentive = 0.2
+incentive = 0.0
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/splits/mix06/versions/23aa16564c225ef8212d82eeefe74cb47b0cae1daa8532ed05f0307104b92c29.json"
 
 [competitions.mix06.categories]
@@ -378,3 +379,67 @@ starting_king_competition = "mix05"
 
 [competitions.mix07.categories]
 "dclm-baseline-1.0" = 1.0
+
+# RefineCode counts use the locked MiMo tokenizer, including EOS.
+[categories.the-stack-v2]
+dataset = "refinecode"
+tokens = 1032944291389
+
+# MAIN2 replaces MAIN; retain the old definition and evaluation history above.
+[competitions.main2]
+starting_king_competition = "main"
+n = 0
+long_document_tokens = 60000000
+delta_threshold = 0.0005
+incentive = 0.4
+manifest_url = ""
+
+[competitions.main2.categories]
+3efforts-pretrain = 0.005321654416250676
+code-no-thinking = 0.02988930454520292
+code-no-thinking-hard = 0.023307420250742523
+code-task-synthesis = 0.018882635277683166
+code-thinking-hard = 0.019399087956516427
+code-thinking-v0 = 0.03385486426294219
+code-thinking-v1 = 0.03158424407520017
+codeio = 0.0015948581666864162
+data-science = 0.028990443545010357
+format-rewrites = 0.024309176862933334
+games = 0.010900669870175048
+general = 0.04422108466011988
+instruction-following = 0.002989222518670289
+math-dialogue = 0.12486186893481152
+math-rewrite = 0.042308199585926305
+math-thinking-oss = 0.03149854612030751
+math-thinking-qwen = 0.05240389773106286
+other = 0.03357216493004977
+planning = 0.06062660665109214
+reasoning = 0.10068333066838596
+socratic-math-dialogue = 0.010193186249805966
+the-stack-v2 = 0.0667426104201438
+txt360-qa = 0.0824348989764818
+web-high-medium = 0.05814839952981829
+web-high-nltk-qa = 0.061281623793980666
+
+[competitions.mix08]
+n = 0
+long_document_tokens = 60000000
+delta_threshold = 0.0005
+incentive = 0.2
+manifest_url = ""
+starting_king_model = "teutonic-II-110B-A7B-5Eez-v9"
+
+[competitions.mix08.categories]
+"dclm-baseline-1.0" = 0.5
+"the-stack-v2" = 0.5
+
+[competitions.mix09]
+n = 0
+long_document_tokens = 60000000
+delta_threshold = 0.0005
+incentive = 0.2
+manifest_url = ""
+starting_king_model = "teutonic-II-110B-A7B-5Eez-v9"
+
+[competitions.mix09.categories]
+"the-stack-v2" = 1.0

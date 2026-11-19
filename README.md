@@ -18,6 +18,12 @@ lists the packed documents and byte-offset indexes. Resolve object paths relativ
 to its `teutonic-text/` prefix. The evaluator uses authenticated, pinned reads
 from the same `dataset` bucket. The old `datasets` bucket has been deleted.
 
+The [public RefineCode manifest](https://pub-64e3f687d8a2411ca8595bc760d31654.r2.dev/refinecode-text-v2/manifest.json)
+lists the additional data used by MAIN2, MIX08 and MIX09 after cutover. Resolve
+its object paths relative to `https://pub-64e3f687d8a2411ca8595bc760d31654.r2.dev/refinecode-text-v2/`.
+The evaluator reads these objects from `code/refinecode-text-v2/`; collection
+manifests pin both sources without copying documents between buckets.
+
 Horizon uses a deterministic eight-GPU layer pipeline, followed by four MiMo king
 and four challenger vLLM replicas. Large MiMo documents use two-GPU groups.
 Horizon preloads at startup and after each duel, remaining on the GPUs while idle;
@@ -170,13 +176,29 @@ teutonic-miner status
 
 ## Competitions
 
-For the new rollout, miners can select `MAIN`, `MIX01`, `MIX06` or `MIX07` with
-`teutonic-miner ready --competition MIX01` (also supported by `submit`). Omission
-selects MAIN. One ready submission per hotkey is shared across all competitions.
-The allocation is MAIN **40%**, MIX01/MIX06/MIX07 **20% each**. MIX02/03/05 retire
-at cutover and MIX04 stays retired; models and historical results are retained.
-Each competition uses its existing category weights and a **60M original MiMo-token**
-whole-document budget. Acceptance uses a byte-weighted bootstrap LCB for reduction
+For the RefineCode rollout, miners can select `MAIN2`, `MIX07`, `MIX08` or `MIX09`
+with `teutonic-miner ready --competition MIX08` (also supported by `submit`).
+Omission selects MAIN2. One ready submission per hotkey is shared across all competitions.
+
+| Competition | Data mixture (MiMo input-token budget) | Starting opponent |
+| --- | --- | --- |
+| MAIN2 | Existing MAIN categories 93.325739%; RefineCode 6.674261% | MAIN king pinned at cutover |
+| MIX07 | 100% DCLM; existing configuration unchanged | Existing MIX07 king |
+| MIX08 | 50% DCLM, 50% RefineCode | `teutonic-II-110B-A7B-5Eez-v9` |
+| MIX09 | 100% RefineCode | `teutonic-II-110B-A7B-5Eez-v9` |
+
+MAIN2 uses each category's token inventory divided by the combined inventory,
+including RefineCode, just as MAIN did. MAIN, MIX01 and MIX06 retire from admission
+and rewards; historical definitions and results remain available. Starting opponents
+are pinned once; each competition uses its own king after its first win.
+
+The `refinecode-competitions-v5` reward policy gives **MAIN2 40%**, and
+**MIX07, MIX08 and MIX09 20% each**. These allocations stay fixed when a new king
+is crowned; the winner takes its competition's share. Positions held by the same
+hotkey add together, including the two v9 starting positions. Historical reward
+policies retain their original meaning.
+Each competition retains a **60M original MiMo-token** whole-document budget and
+**0.0005 bits/byte** threshold. Acceptance uses a byte-weighted bootstrap LCB for reduction
 in loss above the fixed Horizon reference, in bits/byte. PostgreSQL holds the live
 configuration. Documents where both king and challenger match or beat Horizon
 are excluded from the reward denominator and bootstrap; all sample losses are

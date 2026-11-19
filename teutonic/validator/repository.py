@@ -177,7 +177,7 @@ class ValidatorRepository:
                 SELECT c.competition_id, c.name AS competition_name, c.competition_key,
                        (SELECT ec.config_version FROM control_plane.evaluation_configs ec
                          WHERE ec.competition_id=c.competition_id AND ec.active) AS config_version,
-                       COALESCE(c.current_reign_id, CASE WHEN c.competition_key LIKE 'mix%%' THEN c.starting_reign_id ELSE main.current_reign_id END) AS current_reign_id,
+                       COALESCE(c.current_reign_id, CASE WHEN c.competition_key ~ '^(main2|mix[0-9]{2})$' THEN c.starting_reign_id ELSE main.current_reign_id END) AS current_reign_id,
                        k.model_digest AS king_digest, k.public_bucket AS king_bucket,
                        k.public_prefix AS king_prefix,
                        u.upload_id, u.registration_id, u.model_digest, u.model_name,
@@ -200,7 +200,7 @@ class ValidatorRepository:
                   JOIN control_plane.competitions main
                     ON main.competition_id = COALESCE(c.main_competition_id, c.competition_id)
                   JOIN control_plane.king_reigns k
-                    ON k.reign_id = COALESCE(c.current_reign_id, CASE WHEN c.competition_key LIKE 'mix%%' THEN c.starting_reign_id ELSE main.current_reign_id END)
+                    ON k.reign_id = COALESCE(c.current_reign_id, CASE WHEN c.competition_key ~ '^(main2|mix[0-9]{2})$' THEN c.starting_reign_id ELSE main.current_reign_id END)
                   JOIN LATERAL (
                       SELECT candidate.*
                         FROM control_plane.uploads candidate
@@ -257,7 +257,7 @@ class ValidatorRepository:
                        ORDER BY s.finalized_block DESC
                        LIMIT 1
                   ) assignment ON true
-                 WHERE c.netuid = %s AND c.chain_generation = %s AND main.name = %s AND c.active AND main.active
+                 WHERE c.netuid = %s AND c.chain_generation = %s AND main.name = %s AND c.active AND (main.active OR main.reward_transition->>'version'='refinecode-competitions-v5')
                  ORDER BY u.ready_finalized_block, u.ready_extrinsic_index, u.ready_event_index, u.upload_id
                  LIMIT 1
                  FOR UPDATE OF c, main
@@ -485,7 +485,7 @@ class ValidatorRepository:
     def _split_baseline_changed(self, cursor, row) -> bool:
         current = cursor.execute(
             """SELECT c.competition_key,
-                      COALESCE(c.current_reign_id, CASE WHEN c.competition_key LIKE 'mix%%' THEN c.starting_reign_id ELSE main.current_reign_id END) AS reign_id
+                      COALESCE(c.current_reign_id, CASE WHEN c.competition_key ~ '^(main2|mix[0-9]{2})$' THEN c.starting_reign_id ELSE main.current_reign_id END) AS reign_id
                  FROM control_plane.competitions c
                  JOIN control_plane.competitions main
                    ON main.competition_id = COALESCE(c.main_competition_id, c.competition_id)
@@ -1276,7 +1276,7 @@ class ValidatorRepository:
                 )
                 return None
             baseline = row["current_reign_id"] or (
-                row["starting_reign_id"] if row["competition_key"].startswith("mix")
+                row["starting_reign_id"] if (row["competition_key"] == "main2" or row["competition_key"].startswith("mix"))
                 else row["main_reign_id"]
             )
             if baseline != row["claimed_king_reign_id"]:

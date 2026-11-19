@@ -66,7 +66,7 @@ def test_packed_database_settings_to_validator_request():
 
 def test_local_migration_bundle_preserves_weights_and_never_writes_r2(tmp_path):
     client, dataset, _, _ = fixture()
-    entries = prepare(dataset, {"main": {"categories": {"a": 1}, "long_document_tokens": 40000}},
+    entries = prepare(dataset, {"main2": {"categories": {"a": 1}, "long_document_tokens": 40000}},
                       {"a": {"dataset": "test"}}, tmp_path)
     assert len(entries) == 2
     for entry in entries:
@@ -76,11 +76,11 @@ def test_local_migration_bundle_preserves_weights_and_never_writes_r2(tmp_path):
     assert "category_weights" in sql and "category_sources" in sql
     assert "AND active FOR UPDATE" in sql
     assert "DELETE" not in sql
-    assert "s3://dataset/teutonic-text/splits/main/" in sql
+    assert "s3://dataset/teutonic-text/splits/main2/" in sql
     assert "COMMIT" in sql
     # The fake client exposes no upload/delete methods: preparation can only read.
     assert client.calls
-    assert json.loads((tmp_path/"main.json").read_text())["categories"][0]["weight"] == 1
+    assert json.loads((tmp_path/"main2.json").read_text())["categories"][0]["weight"] == 1
 
 
 def test_result_requires_complete_reference_objective_and_consistent_decision():

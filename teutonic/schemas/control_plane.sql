@@ -232,7 +232,7 @@ ALTER TABLE control_plane.chain_cursors OWNER TO teutonic_schema_owner;
 --
 
 CREATE TABLE control_plane.competitions (
-    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key ~ '^(main|math|code|text|mix(0[1-9]|[1-9][0-9]))$'),
+    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key ~ '^(main|main2|math|code|text|mix(0[1-9]|[1-9][0-9]))$'),
     main_competition_id uuid,
     reward_reign_id uuid,
     reward_main_hotkeys text[],
@@ -623,7 +623,7 @@ ALTER TABLE control_plane.registrations OWNER TO teutonic_schema_owner;
 --
 
 CREATE TABLE control_plane.uploads (
-    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key ~ '^(main|math|code|text|mix(0[1-9]|[1-9][0-9]))$'),
+    competition_key text NOT NULL DEFAULT 'main' CHECK (competition_key ~ '^(main|main2|math|code|text|mix(0[1-9]|[1-9][0-9]))$'),
     upload_id uuid DEFAULT gen_random_uuid() NOT NULL,
     registration_id character(64) NOT NULL,
     chain_generation text NOT NULL,

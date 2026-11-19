@@ -12,7 +12,7 @@ from scripts.stage_packed_configuration import stage
 
 def bundle(tmp_path):
     client, dataset, _, _ = fixture()
-    prepare(dataset, {"main": {"categories": {"a": 1}, "long_document_tokens": 35000000}},
+    prepare(dataset, {"main2": {"categories": {"a": 1}, "long_document_tokens": 35000000}},
             {"a": {"dataset": "test"}}, tmp_path)
     writes = []
     def head(*, Bucket, Key):
@@ -33,7 +33,7 @@ def test_dry_run_is_read_only_and_default_publication_is_immutable(tmp_path):
     assert run(tmp_path, client, publish=False)["state"] == "validated-read-only"
     assert not writes
     result = run(tmp_path, client)
-    assert result["budgets"] == {"main": 35000000}
+    assert result["budgets"] == {"main2": 35000000}
     assert len(writes) == 2 and "/sampling/" in writes[0] and "/splits/" in writes[1]
     run(tmp_path, client, publish=True)
     assert len(writes) == 2
@@ -49,18 +49,18 @@ def test_invalid_bundle_fails_before_any_upload(tmp_path, mutation):
     path = tmp_path / "pending-publication.json"
     entries = json.loads(path.read_text())
     if mutation == "hash":
-        (tmp_path / "main.json").write_bytes(b"bad")
+        (tmp_path / "main2.json").write_bytes(b"bad")
     elif mutation == "bucket":
         entries[-1]["bucket"] = "datasets"
     elif mutation == "key":
-        entries[-1]["key"] = "teutonic-text/splits/main/latest.json"
+        entries[-1]["key"] = "teutonic-text/splits/main2/latest.json"
     else:
-        value = json.loads((tmp_path / "main.json").read_text())
+        value = json.loads((tmp_path / "main2.json").read_text())
         value["dataset"]["sha256"] = "c" * 64
         raw = json.dumps(value).encode()
-        (tmp_path / "main.json").write_bytes(raw)
+        (tmp_path / "main2.json").write_bytes(raw)
         sha = hashlib.sha256(raw).hexdigest()
-        entries[-1].update(sha256=sha, key=f"teutonic-text/splits/main/{sha}.json")
+        entries[-1].update(sha256=sha, key=f"teutonic-text/splits/main2/{sha}.json")
     path.write_text(json.dumps(entries))
     with pytest.raises(ValueError):
         run(tmp_path, client, publish=True)
@@ -80,7 +80,7 @@ def test_budget_change_is_explicit_in_staged_sql(tmp_path):
 
 def test_exact_config_budget_change_preserves_dataset_pins(tmp_path):
     bundle(tmp_path)
-    configs = {"main": "a" * 64}
+    configs = {"main2": "a" * 64}
     sql = stage(tmp_path, netuid=999, generation="fixture", threshold=.00075,
                 previous_configs=configs, previous_token_budget=70000000)
     assert "::bigint=70000000" in sql
@@ -102,4 +102,4 @@ def test_active_competition_defaults_use_60m():
     config = tomllib.loads((Path(__file__).resolve().parents[2] / 'chain.toml').read_text())
     for name in ACTIVE_COMPETITIONS:
         assert config['competitions'][name]['long_document_tokens'] == 60_000_000
-        assert config['competitions'][name]['delta_threshold'] == .00075
+        assert config['competitions'][name]['delta_threshold'] == .0005

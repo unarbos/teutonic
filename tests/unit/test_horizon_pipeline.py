@@ -68,7 +68,7 @@ def test_document_sums_independent_of_neighbors_and_head_boundaries():
 def test_reference_token_windows_preserve_order_and_all_documents(monkeypatch):
     docs=[SimpleNamespace(doc_id=str(i)) for i in range(4)]
     sequences=[[3]*n for n in [4,5,7,3]]
-    monkeypatch.setattr(document_duel,'prepared_batches',lambda *a,**kw:iter([(docs,sequences)]))
+    monkeypatch.setattr(document_duel,'prepared_batches',lambda *a,**kw:(pair for pair in [(docs,sequences)]))
     monkeypatch.setattr(document_duel,'MAX_REQUEST_TOKENS',9)
     batches=list(document_duel.reference_batches(None,docs,None))
     assert [[d.doc_id for d in batch] for batch,_ in batches]==[['0','1'],['2'],['3']]
