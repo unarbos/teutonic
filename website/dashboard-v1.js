@@ -163,6 +163,15 @@
         return record && (record.loss_unit === "bits/byte" || record.policy_version === "horizon-deficit-bpb" || record.policy_version === "horizon-deficit-active-bpb") ? "bits/byte" : "nats/token";
     }
 
+    function combinedMainHistory(main, main2) {
+        main = main || {};
+        main2 = main2 || {};
+        return {
+            history: (main.history || []).concat(main2.history || []),
+            dataset_versions: (main.dataset_versions || []).concat(main2.dataset_versions || [])
+        };
+    }
+
     function lossChartPresentation(history) {
         function loss(value) {
             return value == null || value === "" ? null : finiteNumber(value, null);
@@ -738,6 +747,7 @@
         mainDatasetPresentation: mainDatasetPresentation,
         graphPointRadius: graphPointRadius,
         lossChartPresentation: lossChartPresentation,
+        combinedMainHistory: combinedMainHistory,
         lossUnit: lossUnit,
         datasetChangePresentation: datasetChangePresentation,
         benchmarkDetailsKey: benchmarkDetailsKey,

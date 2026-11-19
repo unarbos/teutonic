@@ -490,14 +490,15 @@
     var weight = d.weight_status || {}; text("weight-state", String(weight.state || weight.latest_attempt_state || "NOT SCHEDULED").toUpperCase()); text("weight-block", number(weight.latest_finalized_block || weight.last_attempted_block)); text("weight-next", number(weight.next_due_block)); text("weight-finalized", date(weight.finalized_at));
   }
   function renderChart(d) {
-    d = primaryDashboard(d);
+    var main2 = (specialists || []).find(function (s) { return s.key === "main2"; });
+    d = Object.assign({}, d, TeutonicDashboardV1.combinedMainHistory(d, main2 && main2.dashboard));
     var svg = el("loss-chart"), tooltip = el("dataset-change-tooltip");
     tooltip.hidden = true;
     var amount = finite(el("smooth-slider").value) || 0;
     var smoothLabel = amount > 0 ? "SMOOTH " + smoothMode.toUpperCase() + " " + amount.toFixed(2) : "SMOOTH OFF";
     text("smooth-status", smoothLabel);
     var chart = TeutonicDashboardV1.lossChartPresentation(d.history || []), points = chart.points;
-    text("performance-heading", (d.primaryCompetition || "MAIN") + " LOSS HISTORY");
+    text("performance-heading", "MAIN LOSS HISTORY");
     text("chart-count", points.length + (points.length === 1 ? " EVALUATION" : " EVALUATIONS"));
     el("chart-empty").hidden = points.length > 0;
     if (!points.length) { svg.innerHTML = ""; return; }

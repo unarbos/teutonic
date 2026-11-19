@@ -413,3 +413,17 @@ const packedCategory = dashboard.categoryScoresPresentation({category_scores:[{
 }]}).rows[0];
 assert.strictEqual(packedCategory.referenceLoss,.3);
 assert.strictEqual(packedCategory.muHat,.002); // Reward is not raw loss subtraction.
+
+// MAIN2 extends the original MAIN loss chart rather than replacing its history.
+const originalMain = {history:[{timestamp:'2026-11-01',avg_king_loss:2,avg_challenger_loss:1.9}],
+    dataset_versions:[{config_version:'main-config'}]};
+const successorMain = {history:[{timestamp:'2026-11-20',loss_unit:'bits/byte',avg_king_loss:.4,
+    avg_challenger_loss:.3,avg_king_token_loss:1.8,avg_challenger_token_loss:1.7,
+    accepted:true,publication_disposition:'winner',model_identity:'public'}],
+    dataset_versions:[{config_version:'main2-config'}]};
+assert.deepStrictEqual(dashboard.combinedMainHistory(originalMain,null),originalMain);
+const combinedMain = dashboard.combinedMainHistory(originalMain,successorMain);
+assert.deepStrictEqual(combinedMain.dataset_versions.map(c=>c.config_version),['main-config','main2-config']);
+assert.deepStrictEqual(dashboard.lossChartPresentation(combinedMain.history).points.map(p=>p.avg_challenger_loss),[1.9,1.7]);
+assert.strictEqual(originalMain.history.length,1);
+assert.strictEqual(successorMain.history[0].avg_challenger_loss,.3);
