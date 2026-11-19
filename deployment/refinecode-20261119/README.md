@@ -81,12 +81,20 @@ for this collection. No completed catalog or publication is claimed by this fold
   --output artifacts/refinecode-cutover-preview.json
 ```
 
-The versioned `refinecode-competitions-v5` reward policy gives MAIN2 40%, and
-MIX07, MIX08 and MIX09 20% each. Crowns replace the recipient of that competition's
-fixed share; there is no latest-crown bonus. Until their first wins, new competitions'
-shares go to their pinned starting-model owners. Shared hotkeys add together;
-the v9 owner initially receives 40% from the two MIX08/MIX09 positions.
-Historical reward policy versions keep their original meanings.
+The versioned `refinecode-replacement-v6` reward policy keeps MAIN2 at 40%
+and MIX07 at 20%. Retired MIX01/MIX06 kings retain 20% each until the first
+winning challenger in MIX08 or MIX09 is crowned. Each first crown takes the
+oldest remaining retired king's 20%, ordered by crown block and then reign ID.
+Later wins replace only that competition's own recipient. The v9 starting
+opponents do not receive incentives just for being pinned. Both new competitions
+have 20% after their first wins. There is no latest-crown bonus, and positions
+held by the same hotkey add together. Historical reward policy versions keep
+their original meanings.
+
+If the immediate v5 cutover was already applied, use the guarded
+`scripts/activate_refinecode_replacement.py --output /path/to/preview.json`
+repair with services stopped, review it, then use `--apply` with a new output
+path. It requires no first crown in MIX08/MIX09 and performs no chain writes.
 
 The historical MAIN database row remains the parent for service locks, reward
 publications and chain scope, but `active=false` disables MAIN submissions.

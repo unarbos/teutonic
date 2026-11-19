@@ -170,16 +170,16 @@ Pins do not follow later source-competition wins. Read `starting_king` in
 `competitions.json` for the exact digest and model reference. After its first
 crown, a new competition uses its own current king. All duels run sequentially.
 
-The `refinecode-competitions-v5` policy allocates MAIN2 40%, and MIX07, MIX08
-and MIX09 20% each. These competition allocations are fixed. Shared hotkeys
-receive the sum of their positions, including the two v9 starting positions.
-Uploading or losing does not change incentives. Old policy versions retain
-their historical allocations. Repository changes alone do not activate this rollout.
+The `refinecode-replacement-v6` policy keeps MAIN2 at 40% and MIX07 at 20%.
+Retired MIX01 and MIX06 kings keep 20% each until MIX08 or MIX09 crown their
+first winning challenger. Each first crown takes the oldest remaining retired
+king's slot, ordered by crown block and then reign ID. A later win transfers only
+that competition's own share. Pinned v9 starting opponents receive no reward
+merely from setup. After both first crowns MIX08 and MIX09 each have 20%.
+Shared hotkeys receive the sum of their earned or retained positions.
+Uploading or losing does not change incentives. Historical policy versions
+retain their original meaning.
 
-A new winner takes its competition's fixed allocation. The outgoing king does
-not retain a reward position for the
-competition it lost. Positions held by the same hotkey
-add together; retiring one position does not remove its other entitlements.
 On-chain weights retain UID eligibility normalization and the existing 101-block
 publication cadence. Older 25%/12.5% and fixed MAIN 40% allocations remain
 historical records. The existing fixed 40/20/20/20 policy stays live until the
@@ -552,7 +552,10 @@ the coldkey.
 - submission: `teutonic-miner register` -> `auth` -> `upload` -> `ready`
   (one shot per hotkey, forever)
 - contract: six genesis files byte-locked; weights only; <=250 GB
-- rewards after RefineCode activation: MAIN2 40%; MIX07/MIX08/MIX09 20% each;
+- rewards: MAIN2 40%, MIX07 20%; retired MIX01/MIX06 kings keep 20% each until
+  MIX08/MIX09 first crown a winning challenger. Each first crown replaces the
+  oldest remaining retired king by crown block (reign ID breaks ties). Later
+  wins replace only that competition's own 20%; pinned v9 baselines earn no slot;
   publication retains the 101-block cadence
 - code: https://github.com/unarbos/teutonic
 

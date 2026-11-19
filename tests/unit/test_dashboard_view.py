@@ -489,6 +489,26 @@ class MarketTests(unittest.TestCase):
 
 
 class DashboardStorageTests(unittest.TestCase):
+    def test_refinecode_competition_objects_use_separate_prefixes(self):
+        s3 = FakeS3()
+        for key in ("main2", "mix07", "mix08", "mix09"):
+            with self.subTest(competition=key):
+                prefix = f"competitions/{key}/"
+                store = DashboardObjectStore(s3, bucket="teutonic-dash", prefix=prefix)
+                store.publish(canonical_dashboard_json(payload()), source_watermark=7)
+                store.publish_dataset_manifest(
+                    canonical_dataset_manifest_json(dataset_manifest()), config_version="a" * 64,
+                )
+                self.assertIn(("teutonic-dash", prefix + "dashboard.json"), s3.objects)
+                self.assertIn(("teutonic-dash", prefix + "datasets/manifest.json"), s3.objects)
+                self.assertEqual(store.previous_payload()["source_watermark"], 7)
+        self.assertNotIn(("teutonic-dash", "dashboard.json"), s3.objects)
+
+    def test_invalid_competition_prefixes_remain_rejected(self):
+        for prefix in ("competitions/main3/", "competitions/main2/../", "competitions/mix00/"):
+            with self.subTest(prefix=prefix), self.assertRaises(ValueError):
+                DashboardObjectStore(FakeS3(), bucket="teutonic-dash", prefix=prefix)
+
     def test_complete_single_put_is_verified_and_unchanged_is_skipped(self):
         s3 = FakeS3()
         store = DashboardObjectStore(s3, bucket="teutonic-dash")

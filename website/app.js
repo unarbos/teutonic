@@ -448,7 +448,8 @@
     var body = el("reigns-body"), rows = [];
     competitionSources().forEach(function (source) {
       var rewardState = mainMixState && mainMixState.rewardTransition || {};
-      var rewardMixes = rewardState.kings || rewardState.mixes || {};
+      var rewardShares = TeutonicDashboardV1.competitionRewardShares(rewardState);
+      var rewardMixes = rewardShares || rewardState.mixes || {};
       if (source.active === false && !rewardMixes[source.key]) return;
       var d = source.dashboard;
       if (!d) return;
@@ -462,9 +463,11 @@
           }
         });
       } else if (d.king) {
-        rows.push(Object.assign({}, d.king, d.king_payout || {}, { competition: source.key }));
+        rows.push(Object.assign({}, d.king, d.king_payout || {}, { competition: source.key },
+          rewardShares ? { weight: rewardShares[source.key] || 0 } : {}));
       } else if (source.startingKing) {
-        rows.push(Object.assign({}, source.startingKing, { competition: source.key, pinned: true }));
+        rows.push(Object.assign({}, source.startingKing, { competition: source.key, pinned: true },
+          rewardShares ? { weight: rewardShares[source.key] || 0 } : {}));
       } else {
         rows.push({ competition: source.key, awaitingWinner: true });
       }

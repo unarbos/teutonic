@@ -1,0 +1,11 @@
+const assert = require('node:assert/strict');
+const ui = require('../../website/dashboard-v1.js');
+const initial = {version:'refinecode-replacement-v6', kings:{main2:'main',mix07:'seven'},legacy:[{id:'mix01',hotkey:'one'},{id:'mix06',hotkey:'six'}]};
+assert.deepEqual(ui.competitionRewardShares(initial),{main2:.4,mix07:.2,mix01:.2,mix06:.2});
+assert.equal(ui.competitionRewardShares(initial).mix08,undefined);
+const first = {...initial,kings:{...initial.kings,mix09:'winner'},legacy:initial.legacy.slice(1)};
+assert.deepEqual(ui.competitionRewardShares(first),{main2:.4,mix07:.2,mix09:.2,mix06:.2});
+const last = {...first,kings:{...first.kings,mix08:'winner'},legacy:[]};
+assert.deepEqual(ui.competitionRewardShares(last),{main2:.4,mix07:.2,mix09:.2,mix08:.2});
+assert.equal(ui.competitionRewardShares({version:'four-competition-v3'}),null);
+assert.deepEqual(ui.competitionRewardShares({version:'refinecode-competitions-v5',kings:{main2:'main',mix07:'seven',mix08:'v9',mix09:'v9'}}),{main2:.4,mix07:.2,mix08:.2,mix09:.2});

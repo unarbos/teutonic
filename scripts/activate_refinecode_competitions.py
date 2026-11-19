@@ -20,7 +20,7 @@ from scripts.retire_mix_competitions import apply_plan
 from teutonic.evaluation.configuration import DatasetManifestSnapshot, store_evaluation_configuration
 from teutonic.weights.contracts import weight_payload_digest
 from teutonic.weights.policy import (
-    REFINECODE_COMPETITIONS, begin_refinecode_policy, mapped_weight_plan, replacement_rewards,
+    REFINECODE_COMPETITIONS, begin_refinecode_replacement, mapped_weight_plan, replacement_rewards,
 )
 from teutonic.weights.transition import lock_drained_services
 
@@ -61,7 +61,9 @@ def prepare(rows, publication, seed, uid_by_hotkey):
                  "mix08": seed["reign_id"], "mix09": seed["reign_id"]}
     kings = {"main2": main["king_hotkey"], "mix07": by_key["mix07"]["king_hotkey"],
              "mix08": seed["hotkey"], "mix09": seed["hotkey"]}
-    state = begin_refinecode_policy(old, kings)
+    state = begin_refinecode_replacement(old, {k: kings[k] for k in ("main2", "mix07")},
+        [{"id": k, "hotkey": by_key[k]["king_hotkey"], "reign_id": str(by_key[k]["current_reign_id"]),
+          "crowned_block": by_key[k]["king_crowned_block"]} for k in ("mix01", "mix06")])
     hotkeys, shares = replacement_rewards(state)
     if not set(hotkeys) <= set(uid_by_hotkey):
         raise ValueError("starting king hotkey missing from finalized metagraph; review incentives")
@@ -130,7 +132,7 @@ def main():
         if not args.apply:
             db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         rows = db.execute(
-            """SELECT c.*, k.hotkey AS king_hotkey FROM control_plane.competitions c
+            """SELECT c.*, k.hotkey AS king_hotkey, k.crowned_finalized_block AS king_crowned_block FROM control_plane.competitions c
                LEFT JOIN control_plane.king_reigns k ON k.reign_id=c.current_reign_id
                WHERE c.netuid=%s AND c.chain_generation=%s ORDER BY c.competition_key"""
             + (" FOR UPDATE OF c" if args.apply else ""), scope).fetchall()

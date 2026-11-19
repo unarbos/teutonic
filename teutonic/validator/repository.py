@@ -257,7 +257,7 @@ class ValidatorRepository:
                        ORDER BY s.finalized_block DESC
                        LIMIT 1
                   ) assignment ON true
-                 WHERE c.netuid = %s AND c.chain_generation = %s AND main.name = %s AND c.active AND (main.active OR main.reward_transition->>'version'='refinecode-competitions-v5')
+                 WHERE c.netuid = %s AND c.chain_generation = %s AND main.name = %s AND c.active AND (main.active OR main.reward_transition->>'version' IN ('refinecode-competitions-v5','refinecode-replacement-v6'))
                  ORDER BY u.ready_finalized_block, u.ready_extrinsic_index, u.ready_event_index, u.upload_id
                  LIMIT 1
                  FOR UPDATE OF c, main

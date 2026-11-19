@@ -36,6 +36,14 @@
         }
     }
 
+    function competitionRewardShares(state) {
+        if (!state || ["refinecode-competitions-v5", "refinecode-replacement-v6"].indexOf(state.version) < 0) return null;
+        var shares = {};
+        Object.keys(state.kings || {}).forEach(function(key) { shares[key] = key === "main2" ? 0.4 : 0.2; });
+        (state.legacy || []).forEach(function(entry) { shares[entry.id] = 0.2; });
+        return shares;
+    }
+
     function validate(payload) {
         if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
             throw new Error("dashboard payload must be an object");
@@ -710,6 +718,7 @@
 
     return {
         HIDDEN: HIDDEN,
+        competitionRewardShares: competitionRewardShares,
         validate: validate,
         validateLive: validateLive,
         liveEvaluationSources: liveEvaluationSources,

@@ -1535,11 +1535,20 @@ four decimal places; manifests retain full precision. Each category appears once
 
 ## RefineCode competition incentives
 
-The prepared `refinecode-competitions-v5` policy allocates MAIN2 40%, and MIX07,
-MIX08 and MIX09 20% each. A successful crown transfers that competition's fixed
-share to its new king. There is no latest-crown bonus. Positions held by the same
-hotkey add together; the owner of the v9 starting model initially receives the
-two MIX08/MIX09 shares, totaling 40%.
+The `refinecode-replacement-v6` policy keeps MAIN2 at 40% and MIX07 at 20%.
+Retired MIX01/MIX06 kings keep 20% each until MIX08/MIX09 crown their first
+winning challengers. Each first crown displaces the oldest remaining retired
+king by crown block, then reign ID. Repeat wins transfer only the competition's
+own slot. The v9 starting-model owner gets no new reward merely from setup.
+After both first crowns, the fixed allocation is MAIN2 40%, MIX07/MIX08/MIX09
+20% each. There is no latest-crown bonus.
+
+For an already applied immediate v5 cutover, stop and drain admission, validator,
+promotion and weight publication, then preview `scripts/activate_refinecode_replacement.py
+--output /path/to/new-preview.json`. Review and repeat with `--apply` and a new
+output path. This guarded repair refuses to run after either MIX08 or MIX09
+has crowned a winner. It backs up affected rows and changes PostgreSQL only;
+install the v6 validator/promotion/publisher code before restarting services.
 
 Follow [the RefineCode rollout procedure](deployment/refinecode-20261119/README.md)
 to preview and apply the competition, configuration and reward changes together.

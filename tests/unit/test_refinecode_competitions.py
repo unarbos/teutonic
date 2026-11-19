@@ -95,24 +95,26 @@ def test_cutover_pins_requested_model_and_preserves_history():
     roster = {"main": "old", **state["mixes"]}
     rows = [{"competition_key": k, "competition_id": k, "active": True,
              "main_competition_id": None if k == "main" else "main",
-             "current_reign_id": k+"-reign", "king_hotkey": h,
+             "current_reign_id": k+"-reign", "king_hotkey": h, "king_crowned_block": {"main": 4, "mix01": 2, "mix06": 1, "mix07": 3}[k],
              "reward_transition": state, "reward_reign_id": "main-reign"} for k, h in roster.items()]
     h, w = replacement_rewards(state)
     publication = {"source_reign_id": "main-reign", "policy_hotkeys": h, "policy_weights": w}
     seed = {"model_name": "namespace/teutonic-II-110B-A7B-5Eez-v9", "reign_id": "seed-reign", "hotkey": "v9"}
-    mapping = {"old": 1, "seven": 2, "v9": 3}
+    mapping = {"old": 1, "seven": 2, "one": 4, "six": 5}
     before = deepcopy((rows, publication, seed))
     plan = cutover(rows, publication, seed, mapping)
     assert (rows, publication, seed) == before
     assert plan["starting_reigns"] == {"main2": "main-reign", "mix07": "mix07-reign",
                                       "mix08": "seed-reign", "mix09": "seed-reign"}
     assert plan["retired_ids"] == ["main", "mix01", "mix06"]
-    assert plan["policy_weights"] == pytest.approx([.4, .2, .4])
+    assert plan["policy_weights"] == pytest.approx([.4, .2, .2, .2])
+    assert [e["id"] for e in plan["transition"]["legacy"]] == ["mix06", "mix01"]
+    assert "v9" not in plan["policy_hotkeys"]
     for bad in ("wrong-seed", "missing-uid", "wrong-parent", "nan-publication"):
         r, p, s = deepcopy(before)
         m = dict(mapping)
         if bad == "wrong-seed": s["model_name"] = "another-model"
-        elif bad == "missing-uid": m.pop("v9")
+        elif bad == "missing-uid": m.pop("one")
         elif bad == "wrong-parent": r[1]["main_competition_id"] = "elsewhere"
         else: p["policy_weights"] = [float("nan"), *p["policy_weights"][1:]]
         with pytest.raises(ValueError):

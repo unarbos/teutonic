@@ -16,6 +16,7 @@ MAIN_SHARES = {
 FOUR_COMPETITION_POLICY = "four-competition-v3"
 LATEST_KING_POLICY = "latest-king-bonus-v4"
 REFINECODE_POLICY = "refinecode-competitions-v5"
+REFINECODE_REPLACEMENT_POLICY = "refinecode-replacement-v6"
 REFINECODE_COMPETITIONS = ("main2", "mix07", "mix08", "mix09")
 
 
@@ -39,6 +40,29 @@ def competition_rewards(main_history: Sequence[str], split_kings: Mapping[str, s
 
 def validate_transition(state):
     MIX_COMPETITIONS = tuple(f"mix{i:02d}" for i in range(1, 8))  # Historical policies.
+    if isinstance(state, dict) and state.get("version") == REFINECODE_REPLACEMENT_POLICY:
+        kings, legacy, evictions = state.get("kings"), state.get("legacy"), state.get("evictions")
+        if (not isinstance(kings, dict) or not {"main2", "mix07"} <= set(kings)
+                or set(kings) - set(REFINECODE_COMPETITIONS)
+                or any(not isinstance(h, str) or not h for h in kings.values())
+                or not isinstance(legacy, list) or not isinstance(evictions, list)
+                or len(kings) + len(legacy) != 4 or len(evictions) != len(kings) - 2):
+            raise ValueError("invalid gradual RefineCode reward roster")
+        if any(not isinstance(e, dict) or set(e) != {"competition", "entry"} for e in evictions):
+            raise ValueError("invalid RefineCode eviction record")
+        entries = legacy + [e["entry"] for e in evictions]
+        if (len(entries) != 2 or any(not isinstance(e, dict) for e in entries)
+                or {e.get("id") for e in entries} != {"mix01", "mix06"}
+                or any(not isinstance(e.get("hotkey"), str) or not e["hotkey"]
+                       or not isinstance(e.get("reign_id"), str) or not e["reign_id"]
+                       or type(e.get("crowned_block")) is not int or e["crowned_block"] < 0
+                       for e in entries)
+                or {e["competition"] for e in evictions} != set(kings) - {"main2", "mix07"}):
+            raise ValueError("invalid retired RefineCode reward positions")
+        ordered = sorted(entries, key=lambda e: (e["crowned_block"], e["reign_id"]))
+        if [e["entry"] for e in evictions] + legacy != ordered:
+            raise ValueError("retired rewards must be displaced oldest first")
+        return
     if isinstance(state, dict) and state.get("version") == REFINECODE_POLICY:
         kings = state.get("kings")
         if (not isinstance(kings, dict) or set(kings) != set(REFINECODE_COMPETITIONS)
@@ -83,6 +107,14 @@ def validate_transition(state):
 def replacement_rewards(state):
     """Calculate the versioned allocation, retaining historical policy semantics."""
     validate_transition(state)
+    if state["version"] == REFINECODE_REPLACEMENT_POLICY:
+        combined = {}
+        pairs = [(state["kings"][k], .4 if k == "main2" else .2)
+                 for k in REFINECODE_COMPETITIONS if k in state["kings"]]
+        pairs += [(entry["hotkey"], .2) for entry in state["legacy"]]
+        for hotkey, share in pairs:
+            combined[hotkey] = combined.get(hotkey, 0) + share
+        return tuple(combined), tuple(combined.values())
     if state["version"] == REFINECODE_POLICY:
         combined = {}
         for key in REFINECODE_COMPETITIONS:
@@ -119,6 +151,15 @@ def replacement_after_win(state, competition, hotkey):
     MIX_COMPETITIONS = tuple(f"mix{i:02d}" for i in range(1, 8))  # Historical policies.
     validate_transition(state)
     result = deepcopy(state)
+    if result["version"] == REFINECODE_REPLACEMENT_POLICY:
+        if competition not in REFINECODE_COMPETITIONS or not isinstance(hotkey, str) or not hotkey:
+            raise ValueError("retired competition or empty winner cannot receive rewards")
+        if competition not in result["kings"]:
+            removed = result["legacy"].pop(0)
+            result["evictions"].append({"competition": competition, "entry": removed})
+        result["kings"][competition] = hotkey
+        validate_transition(result)
+        return result
     if result["version"] == REFINECODE_POLICY:
         if competition not in result["kings"] or not isinstance(hotkey, str) or not hotkey:
             raise ValueError("retired competition or empty winner cannot receive rewards")
@@ -163,7 +204,7 @@ def replacement_after_win(state, competition, hotkey):
 def begin_mix07_replacement(state):
     """Retain MIX04's full reward slot until MIX07 is actually crowned."""
     validate_transition(state)
-    if state["version"] in {FOUR_COMPETITION_POLICY, LATEST_KING_POLICY, REFINECODE_POLICY}:
+    if state["version"] in {FOUR_COMPETITION_POLICY, LATEST_KING_POLICY, REFINECODE_POLICY, REFINECODE_REPLACEMENT_POLICY}:
         raise ValueError("MIX07 replacement is already complete; four-competition policy is active")
     result = deepcopy(state)
     if result["version"] == "mix-successor-v2":
@@ -178,7 +219,7 @@ def begin_mix07_replacement(state):
 def begin_four_competition_policy(state):
     """Retire three reward slots without inventing kings or changing old state."""
     validate_transition(state)
-    if state["version"] in {LATEST_KING_POLICY, REFINECODE_POLICY}:
+    if state["version"] in {LATEST_KING_POLICY, REFINECODE_POLICY, REFINECODE_REPLACEMENT_POLICY}:
         raise ValueError("cannot downgrade the latest king policy through the old cutover")
     if state["version"] == FOUR_COMPETITION_POLICY:
         return deepcopy(state)
@@ -204,6 +245,28 @@ def begin_refinecode_policy(state, kings):
     validate_transition(result)
     if state["version"] == REFINECODE_POLICY and result != state:
         raise ValueError("RefineCode policy is already active with different recipients")
+    return result
+
+
+def begin_refinecode_replacement(state, kings, retired):
+    """Starting opponents earn no new slot until a challenger is crowned."""
+    validate_transition(state)
+    if state["version"] not in {FOUR_COMPETITION_POLICY, LATEST_KING_POLICY, REFINECODE_POLICY}:
+        raise ValueError("gradual RefineCode cutover requires an unmigrated policy")
+    if set(kings) != {"main2", "mix07"}:
+        raise ValueError("only MAIN2 and MIX07 initially own active reward slots")
+    result = {"version": REFINECODE_REPLACEMENT_POLICY, "kings": dict(kings),
+              "legacy": sorted(deepcopy(retired), key=lambda e: (e["crowned_block"], e["reign_id"])),
+              "evictions": []}
+    validate_transition(result)
+    if state["version"] == REFINECODE_POLICY:
+        expected = {k: state["kings"][k] for k in kings}
+    else:
+        expected = {"main2": state["main"]["hotkey"], "mix07": state["mixes"]["mix07"]}
+        if any(e["hotkey"] != state["mixes"][e["id"]] for e in retired):
+            raise ValueError("retired positions differ from the existing reward policy")
+    if kings != expected:
+        raise ValueError("continuing kings differ from the existing reward policy")
     return result
 
 

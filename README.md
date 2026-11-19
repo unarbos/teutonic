@@ -189,14 +189,17 @@ Omission selects MAIN2. One ready submission per hotkey is shared across all com
 
 MAIN2 uses each category's token inventory divided by the combined inventory,
 including RefineCode, just as MAIN did. MAIN, MIX01 and MIX06 retire from admission
-and rewards; historical definitions and results remain available. Starting opponents
+only; historical definitions and results remain available. Starting opponents
 are pinned once; each competition uses its own king after its first win.
 
-The `refinecode-competitions-v5` reward policy gives **MAIN2 40%**, and
-**MIX07, MIX08 and MIX09 20% each**. These allocations stay fixed when a new king
-is crowned; the winner takes its competition's share. Positions held by the same
-hotkey add together, including the two v9 starting positions. Historical reward
-policies retain their original meaning.
+The `refinecode-replacement-v6` reward policy keeps **MAIN2 at 40%** and
+**MIX07 at 20%**. Retired MIX01 and MIX06 kings retain **20% each** until the
+first winning challenger is crowned in MIX08 or MIX09. Each competition's first
+winner takes the oldest remaining retired king's slot, ordered by crown block
+(with reign ID as a tie-breaker). Later wins transfer only that competition's
+20% share. The v9 starting opponents earn no reward merely for being pinned.
+After both first wins, MIX08 and MIX09 have 20% each. Shared hotkeys add together;
+historical reward policies retain their original meaning.
 Each competition retains a **60M original MiMo-token** whole-document budget and
 **0.0005 bits/byte** threshold. Acceptance uses a byte-weighted bootstrap LCB for reduction
 in loss above the fixed Horizon reference, in bits/byte. PostgreSQL holds the live

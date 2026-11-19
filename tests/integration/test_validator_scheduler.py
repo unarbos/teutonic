@@ -1921,6 +1921,42 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
                     "SELECT starting_reign_id FROM control_plane.competitions WHERE competition_id=%s",
                     (competition,)).fetchone()[0], self.genesis_reign_id)
 
+    def test_refinecode_first_win_replaces_oldest_retired_reward_in_crowning_transaction(self):
+        from psycopg.types.json import Jsonb
+        from teutonic.weights.policy import REFINECODE_REPLACEMENT_POLICY
+
+        for key in ("main2", "mix07", "mix08", "mix09"):
+            with self.subTest(key=key):
+                self._stale_fixture(key)
+                legacy = [{"id": k, "hotkey": k + "-hotkey", "reign_id": k,
+                           "crowned_block": n} for k, n in (("mix01", 80), ("mix06", 90))]
+                state = {"version": REFINECODE_REPLACEMENT_POLICY,
+                         "kings": {"main2": "genesis-hotkey", "mix07": "genesis-hotkey"},
+                         "legacy": legacy, "evictions": []}
+                self.connection.execute(
+                    "UPDATE control_plane.competitions SET active=false,reward_transition=%s WHERE competition_id=%s",
+                    (Jsonb(state), self.competition_id))
+                claim = self.repository.claim_next(now=NOW, policy=policy())
+                self.assertIsNotNone(claim)
+                promotion = self._accept_and_promote(claim)
+                hotkeys, weights = self.repository.promotion_weight_policy(str(promotion))
+                self.assertAlmostEqual(dict(zip(hotkeys, weights))["hotkey-3"], .4 if key == "main2" else .2)
+                uids = {"genesis-hotkey": 0, "hotkey-3": 3, "mix01-hotkey": 4, "mix06-hotkey": 5}
+                reign = self.repository.crown_promoted_winner(
+                    str(promotion), now=NOW, crowned_finalized_block=111,
+                    policy_hotkeys=hotkeys, policy_weights=weights,
+                    target_hotkeys=hotkeys, target_uids=[uids[h] for h in hotkeys], normalized_weights=weights)
+                self.assertIsNotNone(reign)
+                stored = self.connection.execute(
+                    "SELECT reward_transition FROM control_plane.competitions WHERE competition_id=%s",
+                    (self.competition_id,)).fetchone()[0]
+                self.assertEqual(stored["kings"][key], "hotkey-3")
+                self.assertEqual([e["id"] for e in stored["legacy"]],
+                                 ["mix06"] if key in ("mix08", "mix09") else ["mix01", "mix06"])
+                self.assertEqual(self.connection.execute(
+                    "SELECT policy_weights FROM control_plane.weight_publications WHERE source_reign_id=%s", (reign,)
+                ).fetchone()[0], list(weights))
+
     def test_refinecode_cutover_is_atomic_and_preserves_existing_reigns(self):
         from copy import deepcopy
         from psycopg.rows import dict_row
