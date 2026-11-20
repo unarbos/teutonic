@@ -32,4 +32,5 @@
 .history-chart-tabs [role="tab"]:focus-visible { outline: 1px dashed var(--ink); outline-offset: 4px; }
 #loss-history-panel[hidden], #horizon-history-panel[hidden] { display: none; }
 .loss-chart-toolbar { display: flex; justify-content: flex-end; margin: 12px 0; }
+.loss-chart-toolbar button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 @media(max-width:550px) { .history-chart-tabs { gap: 14px; } .loss-chart-toolbar .chart-tools { flex-wrap: wrap; } }

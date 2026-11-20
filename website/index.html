@@ -8,7 +8,7 @@
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css?v=dataset-layout-v4">
   <link rel="stylesheet" href="benchmark-layout.css?v=history-controls-v2">
-  <link rel="stylesheet" href="horizon-history.css?v=horizon-reference-v1">
+  <link rel="stylesheet" href="horizon-history.css?v=kings-only-v1">
 </head>
 <body>
   <main class="page">
@@ -73,7 +73,8 @@
       <div id="loss-history-panel" role="tabpanel" aria-labelledby="performance-heading">
       <div class="chart-heading loss-chart-toolbar">
         <div class="chart-tools">
-          <span class="chart-legend"><i class="legend king-line"></i>KINGS <i class="legend challenger-line"></i>CHALLENGERS</span>
+          <span class="chart-legend"><i class="legend king-line"></i>KINGS<span id="loss-chart-challenger-legend"> <i class="legend challenger-line"></i>CHALLENGERS</span></span>
+          <button id="loss-chart-kings-only" type="button" aria-pressed="false" aria-controls="loss-chart">KINGS ONLY</button>
           <label for="smooth-slider">SMOOTH <input type="range" id="smooth-slider" min="0" max="1" step="0.05" value="0.35"><output id="smooth-value" for="smooth-slider">0.35</output></label>
           <button id="smooth-mode-toggle" type="button">LOWESS</button>
         </div>
@@ -217,6 +218,6 @@
   <script src="dashboard-v1.js?v=main2-benchmark-identity-v1"></script>
   <script src="horizon-history-data.js?v=history-tabs-v2"></script>
   <script src="horizon-history.js?v=horizon-reference-v1"></script>
-  <script src="app.js?v=dashboard-history-controls-v2"></script>
+  <script src="app.js?v=kings-axis-v1"></script>
 </body>
 </html>

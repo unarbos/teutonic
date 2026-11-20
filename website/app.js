@@ -31,6 +31,7 @@
   var historyRenderTimer = null;
   var smoothingCache = new Map();
   var mainPolling = false;
+  var kingsOnly = false;
   var smoothMode = localStorage.getItem("smoothMode") || "lowess";
   if (smoothMode !== "lowess" && smoothMode !== "normal") smoothMode = "lowess";
   function el(id) { return document.getElementById(id); }
@@ -576,40 +577,63 @@
     text("smooth-status", smoothLabel);
     var chart = TeutonicDashboardV1.lossChartPresentation(d.history || []), points = chart.points;
     text("performance-heading", "MAIN LOSS HISTORY");
-    text("chart-count", points.length + (points.length === 1 ? " EVALUATION" : " EVALUATIONS"));
-    el("chart-empty").hidden = points.length > 0;
-    if (!points.length) { svg.innerHTML = ""; return; }
+    var kingPoints = [];
+    points.forEach(function (p, i) { if (p.accepted && p.publication_disposition === "winner" && p.model_identity === "public") kingPoints.push({ index: i, loss: finite(p.avg_challenger_loss) }); });
+    var evaluationCount = points.length + (points.length === 1 ? " EVALUATION" : " EVALUATIONS");
+    var kingCount = kingPoints.length + (kingPoints.length === 1 ? " KING" : " KINGS");
+    text("chart-count", kingsOnly ? kingCount : evaluationCount);
+    var empty = kingsOnly ? !kingPoints.length : !points.length;
+    el("chart-empty").hidden = !empty;
+    text("chart-empty", kingsOnly ? "NO CROWNED KING LOSS DATA" : "NO COMPLETED LOSS DATA");
+    if (empty) { svg.innerHTML = ""; return; }
 
     var bounds = svg.getBoundingClientRect();
     var W = Math.max(320, Math.round(bounds.width || 1000)), H = Math.max(180, Math.round(bounds.height || 280)), left = 48, right = 8, top = 16, bottom = 42, plotBottom = H - bottom;
-    var kingPoints = [];
-    var rawChallengers = points.map(function (p) { return finite(p.avg_challenger_loss); });
-    points.forEach(function (p, i) { if (p.accepted && p.publication_disposition === "winner" && p.model_identity === "public") kingPoints.push({ index: i, loss: finite(p.avg_challenger_loss) }); });
+    var rawChallengers = kingsOnly ? [] : points.map(function (p) { return finite(p.avg_challenger_loss); });
     var rawKings = kingPoints.map(function (p) { return p.loss; });
     var challengers = smoothSeries(rawChallengers, amount);
     var kings = smoothSeries(rawKings, amount);
     var min = 0, max = chart.maximum;
+    var datasetChanges = TeutonicDashboardV1.datasetChangePresentation(points, d.dataset_versions);
+    var axisCount = kingsOnly ? kingPoints.length : points.length;
+    var axisStart = 0, axisEnd = axisCount - 1;
+    if (kingsOnly && datasetChanges.length) {
+      if (datasetChanges[0].index <= kingPoints[0].index) axisStart--;
+      if (datasetChanges[datasetChanges.length - 1].index > kingPoints[axisEnd].index) axisEnd++;
+    }
 
-    function x(i) { return points.length === 1 ? (left + W - right) / 2 : left + i / (points.length - 1) * (W - left - right); }
+    function x(i) { return axisStart === axisEnd ? (left + W - right) / 2 : left + (i - axisStart) / (axisEnd - axisStart) * (W - left - right); }
+    function kingX(i) { return x(kingsOnly ? i : kingPoints[i].index); }
+    function datasetChangeX(index) {
+      var boundary = index - .5;
+      if (!kingsOnly) return x(boundary);
+      var next = kingPoints.findIndex(function (point) { return point.index >= index; });
+      if (next === -1) next = kingPoints.length;
+      var before = next === 0 ? 0 : kingPoints[next - 1].index;
+      var after = next === kingPoints.length ? points.length - 1 : kingPoints[next].index;
+      // Preserve the change's position within the evaluation gap between crowns.
+      return x(next - 1 + (boundary - before) / (after - before));
+    }
     function y(v) { var visible = Math.max(min, Math.min(max, v)); return top + (max - visible) / (max - min) * (H - top - bottom); }
     function challengerLine(series) { return series.map(function (value, i) { return x(i).toFixed(1) + "," + y(value).toFixed(1); }).join(" "); }
-    function kingLine(series) { return series.map(function (value, i) { return x(kingPoints[i].index).toFixed(1) + "," + y(value).toFixed(1); }).join(" "); }
+    function kingLine(series) { return series.map(function (value, i) { return kingX(i).toFixed(1) + "," + y(value).toFixed(1); }).join(" "); }
     var styles = getComputedStyle(document.documentElement), ink = styles.getPropertyValue("--ink").trim(), muted = styles.getPropertyValue("--muted").trim(), paper = styles.getPropertyValue("--paper").trim(), markup = "";
     var yDigits = max - min < .01 ? 4 : max - min < .1 ? 3 : 2;
     for (var tick = 0; tick <= 5; tick++) { var value = min + (max - min) * tick / 5, yy = y(value); markup += '<line x1="' + left + '" y1="' + yy + '" x2="' + (W - right) + '" y2="' + yy + '" stroke="' + muted + '" opacity=".24" stroke-dasharray="3 5"/><line x1="' + (left - 4) + '" y1="' + yy + '" x2="' + left + '" y2="' + yy + '" stroke="' + ink + '"/><text x="' + (left - 9) + '" y="' + (yy + 3) + '" fill="' + muted + '" font-family="Space Mono" font-size="9" text-anchor="end">' + value.toFixed(yDigits) + '</text>'; }
-    var xTickCount = Math.min(7, points.length), xTicks = [];
-    if (xTickCount === 1) xTicks.push(0); else for (var xTick = 0; xTick < xTickCount; xTick++) { var xIndex = Math.round(xTick * (points.length - 1) / (xTickCount - 1)); if (xTicks.indexOf(xIndex) === -1) xTicks.push(xIndex); }
+    var xTickCount = Math.min(7, axisCount), xTicks = [];
+    if (xTickCount === 1) xTicks.push(0); else for (var xTick = 0; xTick < xTickCount; xTick++) { var xIndex = Math.round(xTick * (axisCount - 1) / (xTickCount - 1)); if (xTicks.indexOf(xIndex) === -1) xTicks.push(xIndex); }
     xTicks.forEach(function(index) { var xx = x(index); markup += '<line x1="' + xx + '" y1="' + top + '" x2="' + xx + '" y2="' + plotBottom + '" stroke="' + muted + '" opacity=".18" stroke-dasharray="2 6"/><line x1="' + xx + '" y1="' + plotBottom + '" x2="' + xx + '" y2="' + (plotBottom + 4) + '" stroke="' + ink + '"/><text x="' + xx + '" y="' + (plotBottom + 17) + '" fill="' + muted + '" font-family="Space Mono" font-size="9" text-anchor="middle">' + (index + 1) + '</text>'; });
+    if (kingsOnly) markup += '<text x="' + ((left + W - right) / 2) + '" y="' + (plotBottom + 34) + '" fill="' + muted + '" font-family="Space Mono" font-size="9" text-anchor="middle">CORONATION ORDER</text>';
     markup += '<line x1="' + left + '" y1="' + top + '" x2="' + left + '" y2="' + plotBottom + '" stroke="' + ink + '" opacity=".8"/><line x1="' + left + '" y1="' + plotBottom + '" x2="' + (W - right) + '" y2="' + plotBottom + '" stroke="' + ink + '" opacity=".8"/>';
-    if (amount > 0 && points.length > 1) markup += '<polyline points="' + challengerLine(rawChallengers) + '" fill="none" stroke="' + muted + '" stroke-width="1" opacity=".24" stroke-dasharray="2 5"/>';
+    if (amount > 0 && rawChallengers.length > 1) markup += '<polyline points="' + challengerLine(rawChallengers) + '" fill="none" stroke="' + muted + '" stroke-width="1" opacity=".24" stroke-dasharray="2 5"/>';
     if (amount > 0 && kingPoints.length > 1) markup += '<polyline points="' + kingLine(rawKings) + '" fill="none" stroke="' + ink + '" stroke-width="1" opacity=".2" stroke-dasharray="2 5"/>';
-    if (points.length > 1) markup += '<polyline points="' + challengerLine(challengers) + '" fill="none" stroke="' + muted + '" stroke-width="1.5" stroke-dasharray="6 5"/>';
+    if (challengers.length > 1) markup += '<polyline points="' + challengerLine(challengers) + '" fill="none" stroke="' + muted + '" stroke-width="1.5" stroke-dasharray="6 5"/>';
     if (kingPoints.length > 1) markup += '<polyline points="' + kingLine(kings) + '" fill="none" stroke="' + ink + '" stroke-width="2"/>';
-    var pointRadius = TeutonicDashboardV1.graphPointRadius(points.length, W - left - right, 0.75, 2.5), kingPointRadius = Math.min(3, pointRadius + 0.5);
+    var pointRadius = TeutonicDashboardV1.graphPointRadius(axisCount, W - left - right, 0.75, 2.5), kingPointRadius = Math.min(3, pointRadius + 0.5);
     challengers.forEach(function (value, i) { markup += '<circle cx="' + x(i) + '" cy="' + y(value) + '" r="' + pointRadius.toFixed(2) + '" fill="' + paper + '" stroke="' + muted + '"/>'; });
-    kings.forEach(function (value, i) { markup += '<circle cx="' + x(kingPoints[i].index) + '" cy="' + y(value) + '" r="' + kingPointRadius.toFixed(2) + '" fill="' + ink + '"/>'; });
+    kings.forEach(function (value, i) { markup += '<circle cx="' + kingX(i) + '" cy="' + y(value) + '" r="' + kingPointRadius.toFixed(2) + '" fill="' + ink + '"/>'; });
     svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.innerHTML = markup;
-    var namespace = "http://www.w3.org/2000/svg", datasetChanges = TeutonicDashboardV1.datasetChangePresentation(points, d.dataset_versions);
+    var namespace = "http://www.w3.org/2000/svg";
     function tooltipContent(change) {
       clear(tooltip);
       var heading = document.createElement("strong"), versions = document.createElement("span"), list = document.createElement("ul");
@@ -626,7 +650,7 @@
     function showTooltip(change, clientX) { tooltipContent(change); positionTooltip(clientX); }
     function hideTooltip() { tooltip.hidden = true; }
     datasetChanges.forEach(function(change) {
-      var marker = document.createElementNS(namespace, "g"), line = document.createElementNS(namespace, "line"), hit = document.createElementNS(namespace, "line"), flag = document.createElementNS(namespace, "rect"), label = document.createElementNS(namespace, "text"), xx = (x(change.index - 1) + x(change.index)) / 2, flagWidth = 68, flagX = Math.max(left, Math.min(xx - flagWidth / 2, W - right - flagWidth));
+      var marker = document.createElementNS(namespace, "g"), line = document.createElementNS(namespace, "line"), hit = document.createElementNS(namespace, "line"), flag = document.createElementNS(namespace, "rect"), label = document.createElementNS(namespace, "text"), xx = datasetChangeX(change.index), flagWidth = 68, flagX = Math.max(left, Math.min(xx - flagWidth / 2, W - right - flagWidth));
       marker.setAttribute("class", "dataset-change-marker"); marker.setAttribute("tabindex", "0"); marker.setAttribute("role", "img"); marker.setAttribute("aria-label", "Dataset changed from " + change.fromLabel + " to " + change.toLabel + ". " + change.changes.join(". "));
       [line, hit].forEach(function(node) { node.setAttribute("x1", xx); node.setAttribute("x2", xx); node.setAttribute("y1", top); node.setAttribute("y2", plotBottom); });
       line.setAttribute("class", "dataset-change-line"); line.setAttribute("stroke", muted); line.setAttribute("stroke-width", "1.5"); line.setAttribute("stroke-dasharray", "5 4");
@@ -651,6 +675,13 @@
   updateSmoothControls();
   smoothSlider.addEventListener("input", function () { localStorage.setItem("smoothing", smoothSlider.value); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("smooth-mode-toggle").addEventListener("click", function () { smoothMode = smoothMode === "lowess" ? "normal" : "lowess"; localStorage.setItem("smoothMode", smoothMode); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
+  el("loss-chart-kings-only").addEventListener("click", function (event) {
+    kingsOnly = !kingsOnly;
+    event.currentTarget.setAttribute("aria-pressed", String(kingsOnly));
+    el("loss-chart-challenger-legend").hidden = kingsOnly;
+    el("loss-chart").setAttribute("aria-label", kingsOnly ? "Crowned king average loss in nats per token, in coronation order" : "King and challenger average loss in nats per token over completed evaluations");
+    if (lastPayload) renderChart(lastPayload);
+  });
   var chartTabs = Array.from(document.querySelectorAll('.history-chart-tabs [role="tab"]'));
   function selectChartTab(tab) {
     chartTabs.forEach(function (item) {
