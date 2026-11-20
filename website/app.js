@@ -13,8 +13,11 @@
   var livePayload = null;
   var livePolling = false;
   var liveFailed = false;
-  var benchmarkPayload = null;
+  var benchmarkView = null;
   var benchmarkHistoryVisible = false;
+  var benchmarkHistoryCompetitions = new Set();
+  var benchmarkSortKey = "timestamp";
+  var benchmarkSortDirection = "descending";
   var benchmarkSources = new Map();
   var benchmarkLoading = false;
   var historyShowErrors = false;
@@ -167,14 +170,79 @@
     if (points.length > 1) { var last = node("text", { x: W - right, y: H - 3, class: "bench-sparkline-label", "text-anchor": "end" }); last.textContent = shortDate(points[points.length - 1].timestamp); svg.appendChild(last); }
     return svg;
   }
+  function createCompetitionFilter(key, controls) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.dataset.competition = key;
+    button.textContent = key.toUpperCase();
+    button.setAttribute("aria-controls", controls);
+    return button;
+  }
+  function showBenchmarkCompetition(key) {
+    return !benchmarkHistoryCompetitions.size || benchmarkHistoryCompetitions.has(key);
+  }
+  function renderBenchmarkHistoryFilters(view) {
+    var filters = el("benchmark-history-filters");
+    var available = new Set(view.kings.map(function (king) { return king.competition; }));
+    filters.querySelectorAll('button:not([data-competition="all"])').forEach(function (button) {
+      var key = button.dataset.competition;
+      if (available.has(key)) return;
+      benchmarkHistoryCompetitions.delete(key);
+      button.remove();
+    });
+    BENCHMARK_COMPETITIONS.forEach(function (key) {
+      if (available.has(key) && !filters.querySelector('[data-competition="' + key + '"]')) {
+        filters.appendChild(createCompetitionFilter(key, "benchmark-history-graphs benchmark-history-body"));
+      }
+    });
+    filters.querySelectorAll("button").forEach(function (button) {
+      var key = button.dataset.competition;
+      button.setAttribute("aria-pressed", String(key === "all" ? !benchmarkHistoryCompetitions.size : benchmarkHistoryCompetitions.has(key)));
+    });
+  }
   function renderBenchmarkHistory(view) {
-    var panel = el("benchmark-history"), graphs = el("benchmark-history-graphs"), body = el("benchmark-history-body"), toggle = el("benchmark-history-toggle");
+    var panel = el("benchmark-history"), graphs = el("benchmark-history-graphs"), toggle = el("benchmark-history-toggle");
     panel.hidden = !benchmarkHistoryVisible; toggle.textContent = benchmarkHistoryVisible ? "HIDE HISTORY" : "SHOW HISTORY"; toggle.setAttribute("aria-pressed", benchmarkHistoryVisible ? "true" : "false");
-    clear(graphs); clear(body); if (!benchmarkHistoryVisible) return;
-    view.series.forEach(function(series) { var tile = document.createElement("article"), heading = document.createElement("div"), name = document.createElement("strong"), latest = document.createElement("span"), lastPoint = series.points.length ? series.points[series.points.length - 1] : null; tile.className = "bench-history-graph"; heading.className = "bench-history-graph-head"; name.textContent = series.name; latest.textContent = lastPoint ? "LATEST " + percent(lastPoint.score) : "NO SCORES"; heading.appendChild(name); heading.appendChild(latest); tile.appendChild(heading); tile.appendChild(benchmarkSparkline(series)); graphs.appendChild(tile); });
-    if (!view.kings.length) return emptyRow(body, view.series.length + 6, "NO BENCHMARK HISTORY YET");
+    if (!benchmarkHistoryVisible) return;
+    renderBenchmarkHistoryFilters(view);
+    clear(graphs);
+    view.series.forEach(function (series) {
+      var points = series.points.filter(function (point) { return showBenchmarkCompetition(point.competition); });
+      var tile = document.createElement("article"), heading = document.createElement("div");
+      var name = document.createElement("strong"), latest = document.createElement("span"), lastPoint = points[points.length - 1];
+      tile.className = "bench-history-graph";
+      heading.className = "bench-history-graph-head";
+      name.textContent = series.name;
+      latest.textContent = lastPoint ? "LATEST " + percent(lastPoint.score) : "NO SCORES";
+      heading.append(name, latest);
+      tile.append(heading, benchmarkSparkline({ name: series.name, points: points }));
+      graphs.appendChild(tile);
+    });
+    renderBenchmarkHistoryRows(view);
+  }
+  function renderBenchmarkHistoryRows(view) {
+    var body = el("benchmark-history-body");
+    el("benchmark-history-head").querySelectorAll("button[data-sort]").forEach(function (button) {
+      if (button.dataset.sort === benchmarkSortKey) button.parentElement.setAttribute("aria-sort", benchmarkSortDirection);
+      else button.parentElement.removeAttribute("aria-sort");
+    });
+    var kings = view.kings.filter(function (king) { return showBenchmarkCompetition(king.competition); });
+    if (!kings.length) return emptyRow(body, view.series.length + 6, "NO BENCHMARK HISTORY YET");
+    var scoreIndex = view.series.findIndex(function (series) { return series.name === benchmarkSortKey; });
+    var direction = benchmarkSortDirection === "ascending" ? 1 : -1;
+    function sortValue(king) {
+      if (scoreIndex !== -1) return king.benchmarks[scoreIndex].score;
+      if (benchmarkSortKey === "timestamp") return finite(Date.parse(king.timestamp));
+      return king[benchmarkSortKey];
+    }
+    kings.sort(function (a, b) {
+      var left = sortValue(a), right = sortValue(b);
+      if (left == null) return right == null ? 0 : 1;
+      if (right == null) return -1;
+      return direction * (typeof left === "string" ? left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }) : left - right);
+    });
     var fragment = document.createDocumentFragment();
-    view.kings.forEach(function(king) {
+    kings.forEach(function(king) {
       var row = document.createElement("tr"), byName = {};
       row.dataset.king = king.key; row.dataset.competition = king.competition; row.dataset.date = king.timestamp || "";
       if (king.current) row.classList.add("bench-history-current");
@@ -193,11 +261,11 @@
       view.series.forEach(function(series) { var benchmark = byName[series.name]; cell(row, benchmark && benchmark.score != null ? percent(benchmark.score) : "--", "mono", benchmark ? benchmark.status.toUpperCase() : "PENDING"); });
       fragment.appendChild(row);
     });
-    body.appendChild(fragment);
+    body.replaceChildren(fragment);
   }
   function renderBenchmarks(payload) {
     var view = TeutonicDashboardV1.benchmarkPresentation(payload), selected = view.selected, meta = el("benchmark-meta"), grid = el("benchmark-grid");
-    benchmarkPayload = payload;
+    benchmarkView = view;
     meta.textContent = view.kingCount + (view.kingCount === 1 ? " KING" : " KINGS") + " · " + view.benchmarkResultCount + " RESULTS · " + age(view.generatedAt);
     renderBenchmarkHistory(view);
     if (!selected) { text("benchmark-model", "NO KING BENCHMARK RESULTS YET"); text("benchmark-identity", "NO PUBLIC KING RESULT HAS BEEN PUBLISHED"); clear(grid); var none = document.createElement("p"); none.className = "bench-empty"; none.textContent = "WAITING FOR THE FIRST KING RESULT"; grid.appendChild(none); return; }
@@ -245,7 +313,7 @@
       var status = el("benchmark-feed-status"); status.hidden = !warnings.length;
       status.textContent = warnings.length ? "PUBLIC UPDATES UNAVAILABLE: " + warnings.join(" · ") + ". SHOWING AVAILABLE PUBLISHED RESULTS." : "";
     }
-    catch (error) { if (!benchmarkPayload) { text("benchmark-meta", "BENCHMARK RESULTS UNAVAILABLE"); clear(el("benchmark-grid")); var empty = document.createElement("p"); empty.className = "bench-empty"; empty.textContent = "LIVE BENCHMARK RESULTS COULD NOT BE LOADED"; el("benchmark-grid").appendChild(empty); } }
+    catch (error) { if (!benchmarkView) { text("benchmark-meta", "BENCHMARK RESULTS UNAVAILABLE"); clear(el("benchmark-grid")); var empty = document.createElement("p"); empty.className = "bench-empty"; empty.textContent = "LIVE BENCHMARK RESULTS COULD NOT BE LOADED"; el("benchmark-grid").appendChild(empty); } }
     finally { benchmarkLoading = false; }
   }
   function renderDatasetManifest(manifest) {
@@ -417,10 +485,9 @@
       body.appendChild(row);
     });
   }
-  function renderCompetitionStatus(id, competition) {
+  function renderCompetitionStatus(id, sources) {
     var notes = [], missing = [], stale = [];
-    competitionSources().forEach(function (source) {
-      if (competition && competition !== "all" && source.key !== competition) return;
+    sources.forEach(function (source) {
       if (!source.dashboard) missing.push(source.key.toUpperCase());
       else if (source.failed) stale.push(source.key.toUpperCase());
     });
@@ -431,14 +498,19 @@
   function renderHistory() {
     if (historyRenderTimer != null) clearTimeout(historyRenderTimer);
     historyRenderTimer = null;
+    var sources = competitionSources().filter(function (source) {
+      if (historyCompetition === "all") return true;
+      if (historyCompetition === "current") return historyCompetitionButtons.has(source.key);
+      if (historyCompetition === "retired") return source.active === false;
+      return source.key === historyCompetition;
+    });
     var history = [];
-    competitionSources().forEach(function (source) {
-      if (historyCompetition !== "all" && source.key !== historyCompetition) return;
+    sources.forEach(function (source) {
       if (source.dashboard) (source.dashboard.history || []).forEach(function (item) {
         history.push(Object.assign({}, item, { competition: source.key }));
       });
     });
-    renderCompetitionStatus("history-status", historyCompetition);
+    renderCompetitionStatus("history-status", sources);
     var body = el("history-body"), view = TeutonicDashboardV1.historyPresentation(history, historyShowErrors), rows = view.rows.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
     var countLabel = rows.length + (rows.length === 1 ? " RESULT" : " RESULTS");
     if (!historyShowErrors && view.errorCount) countLabel += " · " + view.errorCount + (view.errorCount === 1 ? " ERROR HIDDEN" : " ERRORS HIDDEN");
@@ -450,8 +522,8 @@
     body.appendChild(fragment);
   }
   function renderReigns() {
-    var body = el("reigns-body"), rows = [];
-    competitionSources().forEach(function (source) {
+    var body = el("reigns-body"), rows = [], sources = competitionSources();
+    sources.forEach(function (source) {
       var rewardState = mainMixState && mainMixState.rewardTransition || {};
       var rewardShares = TeutonicDashboardV1.competitionRewardShares(rewardState);
       var rewardMixes = rewardShares || rewardState.mixes || {};
@@ -477,7 +549,7 @@
         rows.push({ competition: source.key, awaitingWinner: true });
       }
     });
-    renderCompetitionStatus("reigns-status");
+    renderCompetitionStatus("reigns-status", sources);
     var kingCount = rows.filter(function (item) { return !item.awaitingWinner; }).length;
     text("reign-count", kingCount + (kingCount === 1 ? " KING" : " KINGS"));
     if (!rows.length) return emptyRow(body, 11, "NO REIGNS YET"); clear(body);
@@ -605,16 +677,59 @@
   if (window.location && window.location.hash === '#horizon-history-panel') selectChartTab(chartTabs[1]);
   el("history-errors-toggle").addEventListener("click", function () { historyShowErrors = !historyShowErrors; renderHistory(); });
   var historyFilterContainer = el("history-competition-filters");
+  var historyCompetitionButtons = new Map();
+  function updateHistoryFilterSelection() {
+    historyFilterContainer.querySelectorAll("button").forEach(function (button) {
+      button.setAttribute("aria-pressed", String(button.dataset.competition === historyCompetition));
+    });
+  }
+  function updateHistoryCompetitionButtons(currentCompetitions) {
+    historyCompetitionButtons.forEach(function (button, key) {
+      if (currentCompetitions.has(key)) return;
+      historyCompetitionButtons.delete(key);
+      if (historyCompetition === key) historyCompetition = "current";
+      if (document.activeElement === button) historyFilterContainer.querySelector('[data-competition="current"]').focus();
+      button.remove();
+    });
+    currentCompetitions.forEach(function (key) {
+      if (historyCompetitionButtons.has(key)) return;
+      var button = createCompetitionFilter(key, "history-body");
+      historyCompetitionButtons.set(key, button);
+      historyFilterContainer.appendChild(button);
+    });
+    updateHistoryFilterSelection();
+  }
   historyFilterContainer.addEventListener("click", function (event) {
     var button = event.target.closest("button[data-competition]");
     if (!button) return;
     historyCompetition = button.dataset.competition;
-    historyFilterContainer.querySelectorAll("button").forEach(function (filter) {
-      filter.setAttribute("aria-pressed", String(filter === button));
-    });
+    updateHistoryFilterSelection();
     renderHistory();
   });
-  el("benchmark-history-toggle").addEventListener("click", function () { benchmarkHistoryVisible = !benchmarkHistoryVisible; if (benchmarkPayload) renderBenchmarks(benchmarkPayload); });
+  el("benchmark-history-toggle").addEventListener("click", function () {
+    benchmarkHistoryVisible = !benchmarkHistoryVisible;
+    if (benchmarkView) renderBenchmarkHistory(benchmarkView);
+  });
+  el("benchmark-history-filters").addEventListener("click", function (event) {
+    var button = event.target.closest("button[data-competition]");
+    if (!button) return;
+    var key = button.dataset.competition;
+    if (key === "all") benchmarkHistoryCompetitions.clear();
+    else if (!benchmarkHistoryCompetitions.delete(key)) benchmarkHistoryCompetitions.add(key);
+    renderBenchmarkHistory(benchmarkView);
+  });
+  el("benchmark-history-head").addEventListener("click", function (event) {
+    var button = event.target.closest("button[data-sort]");
+    if (!button) return;
+    var key = button.dataset.sort;
+    if (key === benchmarkSortKey) {
+      benchmarkSortDirection = benchmarkSortDirection === "ascending" ? "descending" : "ascending";
+    } else {
+      benchmarkSortKey = key;
+      benchmarkSortDirection = key === "competition" || key === "modelRepo" ? "ascending" : "descending";
+    }
+    renderBenchmarkHistoryRows(benchmarkView);
+  });
   var datasetHelp = el("competition-dataset-help"), datasetHelpButton = datasetHelp.querySelector("button"), datasetHelpTooltip = el("competition-dataset-tooltip");
   function showDatasetHelp() { datasetHelpTooltip.hidden = false; }
   datasetHelp.addEventListener("pointerenter", showDatasetHelp);
@@ -632,7 +747,7 @@
   var mainMixState = null;
   async function loadCompetitionIndex() {
     try {
-      var index = await fetchJson("/competitions.json");
+      var index = await fetchJson("/competitions.json"), currentCompetitions = new Set();
       index.competitions.forEach(function (item) {
         var key = item.competition;
         if (!/^(main|main2|math|code|text|mix(0[1-9]|[1-9][0-9]))$/.test(key)) return;
@@ -641,20 +756,21 @@
           state = { key: key, prefix: key === "main" ? "/" : "/competitions/" + key + "/", dashboard: null, failed: false, polling: false, loadingDataset: false, dataset: null, datasetFailed: false, datasetRow: document.createElement("tr") };
           state.datasetRow.id = "dataset-" + key;
           if (key === "main") mainMixState = state; else specialists.push(state);
-          if (!historyFilterContainer.querySelector('[data-competition="' + key + '"]')) {
-            var button = document.createElement("button"); button.type = "button";
-            button.dataset.competition = key; button.textContent = key.toUpperCase();
-            button.setAttribute("aria-pressed", "false"); historyFilterContainer.appendChild(button);
-          }
         }
         state.active = item.active !== false; state.hasKing = item.has_king;
         state.startingKing = item.starting_king;
         state.rewardTransition = item.reward_transition;
         state.documentTokens = item.document_tokens;
         renderCompetitionDataset(state);
-        if (state.active) loadSpecialistDataset(state);
+        if (state.active) {
+          currentCompetitions.add(key);
+          loadSpecialistDataset(state);
+        }
         if (key !== "main") pollSpecialist(state);
       });
+      updateHistoryCompetitionButtons(currentCompetitions);
+      if (currentCompetitions.has("main2")) window.HorizonComparison.markRefineCodeCutover();
+      scheduleSharedRender();
     } catch (error) { text("queue-status", "Competition index unavailable; showing last publication."); }
   }
   async function pollSpecialist(state) {

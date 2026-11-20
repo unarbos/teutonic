@@ -6,6 +6,24 @@
 .bench-feed-status { position:relative; margin:0 0 10px; color:var(--muted); font:10px/1.5 var(--mono); }
 .bench-feed-status[hidden] { display:none; }
 .bench-history-table a { color:var(--ink); text-decoration:none; border-bottom:1px dotted var(--muted); }
+.bench-history-filters { margin-bottom: 10px; }
+.bench-history-table th button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.bench-history-table th button:hover { color: var(--ink); }
+.bench-history-table th button:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
+.bench-history-table th button::after { content: "↕" / ""; color: var(--muted); }
+.bench-history-table th[aria-sort="ascending"] button::after { content: "↑" / ""; color: var(--ink); }
+.bench-history-table th[aria-sort="descending"] button::after { content: "↓" / ""; color: var(--ink); }
 .bench-history-best .bench-average { font-weight:700; }
 .bench-history-best { background:var(--wash); }
 

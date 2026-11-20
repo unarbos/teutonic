@@ -1,10 +1,18 @@
 #horizon-panel { padding-top: 0; }
-.trend-legend { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 18px; margin: 16px 0 0; font: 9px var(--mono); color: var(--muted); }
+.trend-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 18px; margin: 16px 0 0; }
+.trend-toolbar p { color: var(--muted); font: 11px var(--font); }
+.trend-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font: 9px var(--mono); color: var(--muted); }
 .trend-legend span { display: flex; align-items: center; gap: 7px; }
+.trend-legend a { color: var(--ink); text-underline-offset: 2px; }
 .trend-key { display: inline-block; width: 7px; height: 7px; background: var(--ink); border-radius: 50%; }
 .horizon-history { display: block; width: 100%; height: auto; overflow: visible; }
 .trend-grid { stroke: var(--faint); stroke-dasharray: 2 5; }
 .trend-tick { fill: var(--muted); font: 9px var(--mono); }
+.trend-axis { stroke: var(--muted); }
+.trend-axis-label { fill: var(--muted); font: 700 9px var(--mono); letter-spacing: .05em; }
+.trend-cutover .dataset-change-flag { fill: var(--paper); stroke: var(--muted); }
+.trend-cutover .dataset-change-label { fill: var(--ink); }
+.trend-cutover:focus .dataset-change-flag { stroke: var(--ink); stroke-width: 2; }
 .trend-king-line { fill: none; stroke: var(--ink); stroke-width: 1.5; }
 .trend-horizon-line { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-dasharray: 2 5; opacity: .65; }
 .trend-horizon-dot { fill: var(--paper); stroke: var(--ink); stroke-width: 1; }

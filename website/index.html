@@ -7,8 +7,8 @@
   <title>Teutonic Dashboard</title>
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css?v=dataset-layout-v4">
-  <link rel="stylesheet" href="benchmark-layout.css?v=all-kings-v3">
-  <link rel="stylesheet" href="horizon-history.css?v=history-tabs-v1">
+  <link rel="stylesheet" href="benchmark-layout.css?v=history-controls-v2">
+  <link rel="stylesheet" href="horizon-history.css?v=horizon-reference-v1">
 </head>
 <body>
   <main class="page">
@@ -86,6 +86,13 @@
       <div class="chart-footer"><span>OLDER</span><span><span id="chart-count">0 EVALUATIONS</span> · <span id="smooth-status">SMOOTH LOWESS 0.35</span></span><span>NEWER</span></div>
       </div>
       <div id="horizon-history-panel" role="tabpanel" aria-labelledby="horizon-history-tab" hidden>
+        <div class="trend-toolbar">
+          <p id="horizon-guidance">A smaller gap above Horizon is better.</p>
+          <div class="trend-legend">
+            <span><i class="trend-key king" aria-hidden="true"></i>CROWNED KING</span>
+            <span><i class="trend-key horizon" aria-hidden="true"></i>HORIZON · <a href="https://huggingface.co/IFM/K2-Horizon-375B-A23B/tree/mid_4_6000" target="_blank" rel="noopener">K2-Horizon-375B-A23B</a></span>
+          </div>
+        </div>
         <div id="horizon-content" aria-live="polite"></div>
       </div>
     </section>
@@ -107,10 +114,32 @@
         <p class="bench-empty">LOADING LIVE KING BENCHMARKS</p>
       </div>
       <div id="benchmark-history" class="bench-history" hidden>
+        <div id="benchmark-history-filters" class="history-filters bench-history-filters" role="group" aria-label="Filter benchmark history by competition">
+          <button type="button" data-competition="all" aria-pressed="true" aria-controls="benchmark-history-graphs benchmark-history-body">ALL</button>
+        </div>
         <div id="benchmark-history-graphs" class="bench-history-graphs" aria-label="Benchmark score history graphs"></div>
         <div class="table-wrap">
           <table class="bench-history-table">
-            <thead><tr><th>COMPETITION</th><th title="Newest first">DATE</th><th>REIGN</th><th>UID</th><th>MODEL</th><th title="Mean across all 12 completed benchmarks">AVG</th><th>BBH COT</th><th>MMLU</th><th>HELLASWAG</th><th>WINOGRANDE</th><th>GSM8K</th><th>PIQA</th><th>ARC-C</th><th>ARC-E</th><th>GPQA DIAMOND</th><th>MATH-500</th><th>HUMANEVAL-SANITIZED</th><th>MBPP-SANITIZED</th></tr></thead>
+            <thead id="benchmark-history-head"><tr>
+              <th scope="col"><button type="button" data-sort="competition">COMPETITION</button></th>
+              <th scope="col" aria-sort="descending"><button type="button" data-sort="timestamp">DATE</button></th>
+              <th scope="col"><button type="button" data-sort="reignNumber">REIGN</button></th>
+              <th scope="col"><button type="button" data-sort="uid">UID</button></th>
+              <th scope="col"><button type="button" data-sort="modelRepo">MODEL</button></th>
+              <th scope="col" title="Mean across all 12 completed benchmarks"><button type="button" data-sort="average">AVG</button></th>
+              <th scope="col"><button type="button" data-sort="BBH CoT">BBH COT</button></th>
+              <th scope="col"><button type="button" data-sort="MMLU">MMLU</button></th>
+              <th scope="col"><button type="button" data-sort="HellaSwag">HELLASWAG</button></th>
+              <th scope="col"><button type="button" data-sort="WinoGrande">WINOGRANDE</button></th>
+              <th scope="col"><button type="button" data-sort="GSM8K">GSM8K</button></th>
+              <th scope="col"><button type="button" data-sort="PIQA">PIQA</button></th>
+              <th scope="col"><button type="button" data-sort="ARC-C">ARC-C</button></th>
+              <th scope="col"><button type="button" data-sort="ARC-E">ARC-E</button></th>
+              <th scope="col"><button type="button" data-sort="GPQA Diamond">GPQA DIAMOND</button></th>
+              <th scope="col"><button type="button" data-sort="MATH-500">MATH-500</button></th>
+              <th scope="col"><button type="button" data-sort="HumanEval-Sanitized">HUMANEVAL-SANITIZED</button></th>
+              <th scope="col"><button type="button" data-sort="MBPP-Sanitized">MBPP-SANITIZED</button></th>
+            </tr></thead>
             <tbody id="benchmark-history-body"></tbody>
           </table>
         </div>
@@ -158,8 +187,9 @@
         <div class="history-heading-main">
           <h2 id="history-heading">EVALUATION HISTORY</h2>
           <div id="history-competition-filters" class="history-filters" role="group" aria-label="Filter evaluation history by competition">
+            <button type="button" data-competition="current" aria-pressed="false" aria-controls="history-body">ALL CURRENT</button>
+            <button type="button" data-competition="retired" aria-pressed="false" aria-controls="history-body">ALL RETIRED</button>
             <button type="button" data-competition="all" aria-pressed="true" aria-controls="history-body">ALL</button>
-            <button type="button" data-competition="main" aria-pressed="false" aria-controls="history-body">MAIN</button>
           </div>
         </div>
         <span class="section-heading-actions"><span id="history-count" aria-live="polite">0 RESULTS</span><button id="history-errors-toggle" type="button" aria-pressed="false">SHOW ERRORS</button></span>
@@ -186,7 +216,7 @@
   </main>
   <script src="dashboard-v1.js?v=main2-benchmark-identity-v1"></script>
   <script src="horizon-history-data.js?v=history-tabs-v2"></script>
-  <script src="horizon-history.js?v=history-tabs-v2"></script>
-  <script src="app.js?v=benchmark-progress-labels-v1"></script>
+  <script src="horizon-history.js?v=horizon-reference-v1"></script>
+  <script src="app.js?v=dashboard-history-controls-v2"></script>
 </body>
 </html>
