@@ -648,7 +648,7 @@
             var result = item.result || {};
             var model = result.model || {};
             var competition = item.competition || model.competition_key || model.competition || "main";
-            if (!/^mix0[1-9]$/.test(competition)) competition = "main";
+            if (!/^(main|main2|mix0[1-9])$/.test(competition)) competition = "main";
             var byName = {};
             (Array.isArray(result.benchmarks) ? result.benchmarks : []).forEach(function(row) {
                 if (row && typeof row.name === "string") byName[benchmarkKey(row.name)] = row;

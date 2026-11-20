@@ -111,5 +111,19 @@ const newScopes = ["main2", "mix08", "mix09"];
 const newHistory = dashboard.benchmarkPresentation(dashboard.mergeBenchmarkSources(
     newScopes.map(competition => ({ competition, results: publication([result("new-king", .6)]) }))));
 assert.equal(newHistory.kingCount, 3);
-newScopes.forEach(key => assert.equal(dashboard.benchmarkDetailsKey(key, "new-king"),
-    "competitions/" + key + "/kings/new-king/results.json"));
+newScopes.forEach(key => {
+    const king = newHistory.kings.find(king => king.competition === key);
+    assert.ok(king, key + " must retain its competition label");
+    assert.equal(king.key, key + ":new-king");
+    assert.equal(king.detailsKey, "competitions/" + key + "/kings/new-king/results.json");
+    assert.equal(newHistory.series[0].points.find(point => point.competition === key).score, .6);
+});
+
+// MAIN2 must not collide with historical MAIN when king IDs match.
+const mainScopes = dashboard.benchmarkPresentation(dashboard.mergeBenchmarkSources(
+    ["main", "main2"].map(competition => ({ competition, results: publication([result("same-king", .5)]) }))));
+assert.equal(new Set(mainScopes.kings.map(king => king.key)).size, 2);
+assert.equal(mainScopes.kings.find(king => king.competition === "main").detailsKey,
+    "king-benchmark-daily/kings/same-king/results.json");
+assert.equal(mainScopes.kings.find(king => king.competition === "main2").detailsKey,
+    "competitions/main2/kings/same-king/results.json");
