@@ -184,6 +184,11 @@
       var modelCell = cell(row, "", "", king.hotkey);
       if (king.detailsKey) { var link = document.createElement("a"); link.textContent = king.modelRepo; link.href = BENCHMARK_STORAGE_BASE + king.detailsKey; link.target = "_blank"; link.rel = "noopener"; modelCell.appendChild(link); }
       else modelCell.textContent = king.modelRepo;
+      if (king.average == null) {
+        var progress = document.createElement("span"); progress.className = "dataset-sub";
+        progress.textContent = (king.status === "completed" ? "INCOMPLETE" : king.status.toUpperCase()) + " · " + king.scored + "/" + view.benchmarkCount + " SCORED";
+        modelCell.appendChild(progress);
+      }
       cell(row, percent(king.average), "mono bench-average", king.average == null ? king.scored + "/" + view.benchmarkCount + " SCORED · AVERAGE REQUIRES ALL BENCHMARKS" : "MEAN OF " + view.benchmarkCount + " COMPLETED BENCHMARKS");
       view.series.forEach(function(series) { var benchmark = byName[series.name]; cell(row, benchmark && benchmark.score != null ? percent(benchmark.score) : "--", "mono", benchmark ? benchmark.status.toUpperCase() : "PENDING"); });
       fragment.appendChild(row);
